@@ -975,17 +975,7 @@ function drawTactical(g, W, H, idx) {
     const bv = toB(rv[0], rv[1], rv[2]);
     const rng = Math.hypot(r[0], r[1], r[2]);
     const closing = -(r[0]*rv[0] + r[1]*rv[1] + r[2]*rv[2])/rng;
-    const V = WEAPON.railV;
-    const A = bv.dot(bv) - V*V, Bq = 2*b.dot(bv), Cq = b.dot(b);
-    let tt = null;
-    if (Math.abs(A) > 1e-9) {
-      const disc = Bq*Bq - 4*A*Cq;
-      if (disc >= 0) {
-        const s = Math.sqrt(disc);
-        const roots = [(-Bq - s)/(2*A), (-Bq + s)/(2*A)].filter(x => x > 0).sort((a,b)=>a-b);
-        if (roots.length) tt = roots[0];
-      }
-    } else if (Math.abs(Bq) > 1e-9) { const x = -Cq/Bq; if (x > 0) tt = x; }
+    const tt = leadTime(b, bv);
     if (tt !== null) {
       const L = b.clone().addScaledVector(bv, tt);
       if (L.z < 0) {
@@ -1327,6 +1317,21 @@ const STAR_DIRS = Array.from({ length: 260 }, () => ({
   b: 0.3 + Math.random()*0.7,
 }));
 // Relative heat of each target for the IR view (0..1)
+// Earliest time t > 0 at which a railgun shot from the ship, at WEAPON.railV, meets a target at rel + relV*t.
+// Both vectors are relative to the ship. Returns null when there is no intercept.
+function leadTime(rel, relV) {
+  const V = WEAPON.railV;
+  const A = relV.dot(relV) - V*V, Bq = 2*rel.dot(relV), Cq = rel.dot(rel);
+  if (Math.abs(A) > 1e-9) {
+    const disc = Bq*Bq - 4*A*Cq;
+    if (disc < 0) return null;
+    const s = Math.sqrt(disc);
+    const roots = [(-Bq - s)/(2*A), (-Bq + s)/(2*A)].filter(x => x > 0).sort((a,b)=>a-b);
+    return roots.length ? roots[0] : null;
+  }
+  if (Math.abs(Bq) > 1e-9) { const x = -Cq/Bq; if (x > 0) return x; }
+  return null;
+}
 function irLevel(t) {
   const n = t.name;
   return n.includes('TUG') ? 0.85 : n.includes('DERELICT') ? 0.35 : n.includes('DEBRIS') ? 0.2 : 0.4;
@@ -1409,6 +1414,24 @@ function drawScope(g, W, H, idx) {
         g.moveTo(p.x + sx*b, p.y + sy*(b - 8)); g.lineTo(p.x + sx*b, p.y + sy*b); g.lineTo(p.x + sx*(b - 8), p.y + sy*b);
       }
       g.stroke();
+    }
+  }
+  // Lead indicator: where the target will be when a railgun shot fired now arrives.
+  // Point the nose (and the spinal reticle) at this diamond to hit a moving target.
+  if (lockOk) {
+    const rel = new THREE.Vector3(tgt.x-ship.x, tgt.y-ship.y, tgt.z-ship.z);
+    const relV = new THREE.Vector3(tgt.vx-ship.vx, tgt.vy-ship.vy, tgt.vz-ship.vz);
+    const tt = leadTime(rel, relV);
+    if (tt !== null) {
+      const L = rel.clone().addScaledVector(relV, tt);
+      const p = proj(L.applyQuaternion(bq));
+      if (p) {
+        g.strokeStyle = masterMode !== 'OFF' ? (irOn ? '#ffffff' : AMB) : (irOn ? '#777' : DIM);
+        g.lineWidth = 2;
+        g.beginPath();
+        g.moveTo(p.x, p.y - 8); g.lineTo(p.x + 8, p.y); g.lineTo(p.x, p.y + 8); g.lineTo(p.x - 8, p.y); g.closePath();
+        g.stroke();
+      }
     }
   }
   g.restore();
