@@ -3200,8 +3200,20 @@ function loadHangarModels() {
     const v = Object.values(prog), done = v.reduce((a, q) => a + q.l, 0), tot = v.reduce((a, q) => a + q.t, 0);
     hangarLoadEl.textContent = `LOADING SHIP ${tot ? Math.round(100*done/tot) : 0}%`;
   };
+  // Each model is tried as a .glb file (repository, GitHub Pages), then as <name>.glb.json holding the same bytes
+  // in base64 under "glb" (the published artifact can't serve .glb files, but serves JSON)
+  const viaJson = (f, res, rej) => {
+    prog[f] = { l: 0, t: 1 }; show();
+    fetch(MODEL_DIR + f + '.json').then(r => { if (!r.ok) throw new Error(`${r.status} ${f}.json`); return r.json(); })
+      .then(j => {
+        const b64 = atob(j.glb), bytes = new Uint8Array(b64.length);
+        for (let i = 0; i < b64.length; i++) bytes[i] = b64.charCodeAt(i);
+        loader.parse(bytes.buffer, MODEL_DIR, gl => { prog[f] = { l: 1, t: 1 }; show(); res([f, gl.scene]); }, rej);
+      }).catch(rej);
+  };
   const get = f => new Promise((res, rej) => loader.load(MODEL_DIR + f, gl => res([f, gl.scene]),
-    e => { prog[f] = { l: e.loaded, t: e.total || e.loaded }; show(); }, rej));
+    e => { prog[f] = { l: e.loaded, t: e.total || e.loaded }; show(); },
+    () => viaJson(f, res, rej)));
   Promise.all(files.map(get)).then(list => assembleHangar(Object.fromEntries(list))).catch(err => {
     console.error(err);
     failed = true; hangar.loading = false;           // opening the hangar again retries
