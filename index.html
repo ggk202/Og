@@ -1196,11 +1196,12 @@ function drawShip(g, W, H, idx) {
     g.beginPath(); g.moveTo(-21 - 9*Math.cos(spin), v - 9*Math.sin(spin)); g.lineTo(-21 + 9*Math.cos(spin), v + 9*Math.sin(spin)); g.stroke();
   }
 
-  // Fuel pods: one pill on each side, beyond the radiators. The fill shows the remaining propellant.
+  // Fuel pods: one pill on each side, attached to the hull edge forward of the radiators and
+  // clear of the callout arrows. The fill shows the remaining propellant.
   if (podsOn) {
     const f = clamp(podProp/SHIP.podProp0, 0, 1);
     for (const s of [-1, 1]) {
-      const pu0 = s > 0 ? 166 : -190, pw = 24, pl = 72, pv0 = PV - pl/2;
+      const pu0 = s > 0 ? 36 : -60, pw = 24, pl = 40, pv0 = -116;
       g.beginPath();
       if (g.roundRect) g.roundRect(pu0, pv0, pw, pl, pw/2); else g.rect(pu0, pv0, pw, pl);
       g.fillStyle = 'rgba(125,255,154,0.08)'; g.fill();
