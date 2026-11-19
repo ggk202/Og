@@ -276,7 +276,9 @@ function leadBodyDir() {
 }
 // Fire-control hold: body-axis RCS commands (-1..1) that rotate the nose onto the lead point.
 // Uses the same torque path as manual control, so it spends RCS propellant and respects the torque limit.
-const LEAD_GAIN = 0.8, LEAD_MAX_RATE = 0.25, LEAD_TAU_TIME = 0.5;   // 1/s, rad/s, s
+// Damping ratio of the hold is 1/(2*sqrt(LEAD_GAIN*LEAD_TAU_TIME)): about 1.1 here, so it settles without overshoot.
+const LEAD_GAIN = 0.4, LEAD_MAX_RATE = 0.25, LEAD_TAU_TIME = 0.5;   // 1/s, rad/s, s
+const LEAD_DEADBAND = 0.2 * Math.PI/180;                           // no RCS firing inside 0.2 deg of the lead
 // Turn axis from the last well-defined direction. When the lead point is nearly behind the nose, fwd x Lb
 // is almost zero and its sign flips with any sideways wobble, which made the nose spin back and forth.
 let leadAxisPrev = new THREE.Vector3(0, 1, 0);
@@ -287,8 +289,11 @@ function leadHoldCmd() {
   const ang = Math.acos(clamp(fwd.dot(Lb), -1, 1));
   const axis = new THREE.Vector3().crossVectors(fwd, Lb);
   if (axis.length() > 0.02) leadAxisPrev.copy(axis).normalize();   // only update where the axis is well defined
-  const wdes = leadAxisPrev.clone().multiplyScalar(Math.min(LEAD_MAX_RATE, ang*LEAD_GAIN));
+  const err = Math.max(0, ang - LEAD_DEADBAND);          // deadband: no correction for small errors
+  const wdes = leadAxisPrev.clone().multiplyScalar(Math.min(LEAD_MAX_RATE, err*LEAD_GAIN));
   const wm = [omega.x, omega.y, omega.z], wd = [wdes.x, wdes.y, wdes.z];
+  // Inside the deadband and nearly still: stop firing RCS
+  if (err === 0 && omega.length() < 0.002) return [0, 0, 0];
   return wd.map((v, i) => clamp(SHIP.I*(v - wm[i])/LEAD_TAU_TIME/SHIP.rcsTorque, -1, 1));
 }
 
