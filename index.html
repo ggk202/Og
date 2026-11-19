@@ -393,10 +393,42 @@ scene.add(amberLight, coldLight, ceilLight, new THREE.HemisphereLight(0x303840, 
 const cockpit = new THREE.Group();
 scene.add(cockpit);
 const PANEL_Z = -0.89;               // camera-facing surface of main instrument panel (offsets are added toward the camera)
+// Procedural surface maps: speckled grime for colour, grain for bump
+function surfaceTex(base, grime, size = 512) {
+  return canvasTex(size, size, (g, w, h) => {
+    g.fillStyle = base; g.fillRect(0, 0, w, h);
+    for (let i = 0; i < 9000; i++) {
+      const dark = Math.random() < 0.6;
+      g.fillStyle = dark ? `rgba(0,0,0,${Math.random()*grime*0.25})` : `rgba(255,255,255,${Math.random()*grime*0.12})`;
+      const s = 1 + Math.random()*3;
+      g.fillRect(Math.random()*w, Math.random()*h, s, s);
+    }
+    // soft wear streaks down the panel
+    for (let i = 0; i < 25; i++) {
+      g.fillStyle = `rgba(0,0,0,${0.03 + Math.random()*grime*0.05})`;
+      g.fillRect(Math.random()*w, 0, 1 + Math.random()*2, h);
+    }
+  }).tex;
+}
+function grainTex(size = 256) {
+  return canvasTex(size, size, (g, w, h) => {
+    g.fillStyle = '#808080'; g.fillRect(0, 0, w, h);
+    for (let i = 0; i < 4000; i++) {
+      const v = 100 + Math.random()*110 | 0;
+      g.fillStyle = `rgb(${v},${v},${v})`; g.fillRect(Math.random()*w, Math.random()*h, 2, 2);
+    }
+  }).tex;
+}
+const panelMap = surfaceTex('#3a4037', 0.9), panelBump = grainTex();
+const darkMap = surfaceTex('#17181a', 0.6), darkBump = grainTex();
+const metalMap = surfaceTex('#9aa0a4', 0.5), metalBump = grainTex();
+[panelMap, darkMap, metalMap].forEach(t => { t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(2, 2); });
+[panelBump, darkBump, metalBump].forEach(t => { t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(3, 3); });
+
 const M = {
-  panel:  new THREE.MeshStandardMaterial({ color: 0x3a4037, roughness: 0.72, metalness: 0.35 }),
-  dark:   new THREE.MeshStandardMaterial({ color: 0x17181a, roughness: 0.85, metalness: 0.2 }),
-  metal:  new THREE.MeshStandardMaterial({ color: 0x9aa0a4, roughness: 0.32, metalness: 0.9 }),
+  panel:  new THREE.MeshStandardMaterial({ color: 0xffffff, map: panelMap, bumpMap: panelBump, bumpScale: 0.6, roughness: 0.72, metalness: 0.35 }),
+  dark:   new THREE.MeshStandardMaterial({ color: 0xffffff, map: darkMap, bumpMap: darkBump, bumpScale: 0.4, roughness: 0.85, metalness: 0.2 }),
+  metal:  new THREE.MeshStandardMaterial({ color: 0xffffff, map: metalMap, bumpMap: metalBump, bumpScale: 0.3, roughness: 0.32, metalness: 0.9 }),
   rubber: new THREE.MeshStandardMaterial({ color: 0x0b0b0b, roughness: 0.95 }),
   bezel:  new THREE.MeshStandardMaterial({ color: 0x2a2c2e, roughness: 0.5, metalness: 0.6 }),
   btn:    new THREE.MeshStandardMaterial({ color: 0x222426, roughness: 0.6, metalness: 0.2 }),
