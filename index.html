@@ -11,6 +11,23 @@
   #start { position:fixed; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center;
     background:rgba(0,0,0,.85); cursor:pointer; z-index:10; letter-spacing:.2em; font-size:18px; text-align:center; }
   #start small { font-size:12px; letter-spacing:.05em; opacity:.6; margin-top:10px; }
+  /* Hangar: full-screen 3D ship view with the loadout panel on the right */
+  #hangar { position:fixed; inset:0; display:none; z-index:12; pointer-events:none; }
+  #hangar .panel { pointer-events:auto; position:absolute; right:18px; top:18px; bottom:18px; width:340px;
+    background:rgba(9,12,10,.88); border:1px solid #3c4a3a; padding:16px 18px; display:flex; flex-direction:column; gap:10px; }
+  #hangar h2 { margin:0; letter-spacing:.35em; font-size:17px; color:#d9e4cc; }
+  #hangar .sub { font-size:11px; letter-spacing:.2em; opacity:.6; }
+  #hangar .hp { display:flex; justify-content:space-between; align-items:center; padding:7px 9px; margin-bottom:5px;
+    border:1px solid #2a352a; cursor:pointer; font-size:13px; letter-spacing:.06em; user-select:none; }
+  #hangar .hp .st { font-size:11px; letter-spacing:.15em; }
+  #hangar .hp.on { border-color:#5fbf72; } #hangar .hp.on .st { color:#7dff9a; }
+  #hangar .hp.off { color:#7d8a78; } #hangar .hp.off .st { color:#c8a050; }
+  #hangar .hp:hover, #hangar .hp.hover { background:#18261b; }
+  #hangar .stats { white-space:pre; font-size:12.5px; line-height:1.6; color:#b9c8b0; border-top:1px solid #2a352a; padding-top:9px; }
+  #hangar #launchBtn { margin-top:auto; font-size:16px; padding:11px; letter-spacing:.4em; background:#1f2e1f; border-color:#7dff9a; color:#d9ffe0; }
+  #hangar #launchBtn:hover { background:#2c4a2e; }
+  #hangar .load { position:absolute; left:0; right:380px; top:48%; text-align:center; letter-spacing:.3em; font-size:15px; }
+  #hangar .hint { position:absolute; left:18px; bottom:14px; font-size:12px; letter-spacing:.1em; opacity:.55; }
   /* Death: black at once; the message fades in when .show is added (2 s later) */
   #death { position:fixed; inset:0; display:none; flex-direction:column; align-items:center; justify-content:center;
     background:#000; z-index:15; text-align:center; cursor:default; }
@@ -42,7 +59,11 @@
 <body>
 <canvas id="gl"></canvas>
 <div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small></div>
-<div id="death"><div class="msg"><h1>SHIP LOST</h1><div class="cause" id="deathCause"></div><div class="stats" id="deathStats"></div><small>CLICK TO RESTART</small></div></div>
+<div id="hangar"><div class="load" id="hangarLoad">LOADING SHIP</div>
+  <div class="hint">DRAG TO ORBIT · WHEEL TO ZOOM · CLICK A HARDPOINT TO FIT OR EMPTY IT</div>
+  <div class="panel"><h2>HANGAR</h2><div class="sub">LOADOUT · CLICK TO FIT OR EMPTY</div>
+    <div id="hpList"></div><div class="stats" id="hangarStats"></div><button id="launchBtn">LAUNCH</button></div></div>
+<div id="death"><div class="msg"><h1>SHIP LOST</h1><div class="cause" id="deathCause"></div><div class="stats" id="deathStats"></div><small>CLICK TO RETURN TO THE HANGAR</small></div></div>
 <div id="settings">
   <div class="panel">
     <h3>CONTROLS</h3>
@@ -57,6 +78,7 @@
 <script type="module">
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 
 /* ================= CONSTANTS (SI units) ================= */
 const C = 299792458, G0 = 9.80665;
@@ -64,12 +86,39 @@ const GM_E = 3.986004418e14, R_E = 6.371e6;            // Earth
 const GM_M = 4.9048695e12, R_EM = 3.844e8, T_MOON = 27.321661 * 86400, MOON_PHASE0 = 0.7;
 const LEO_R = R_E + 400e3;
 
-// Propellant: internal tanks give 5000 m/s; the drop tanks (pods) add 2500 m/s, for 7500 m/s in total when the
-// pods are burned first and dropped once dry. podDry is the empty pod structure, lost with them.
-// Inertia: I is the ship without pods; the pods sit podR m out on the hull, so their mass adds podMass*podR^2
-// (2.2e5 kg m^2 when full, about 29% more than without them).
-const SHIP = { dry: 6000, mainProp0: 1067.6, podProp0: 607, podDry: 73, podR: 8.5, rcsProp0: 180, I: 170870,
-  rcsTorque: 25000, rcsLever: 2, rcsThrust: 250, rcsIsp: 250, mainThrust: 20000, mainIsp: 3200 };
+// Propellant: internal tanks give 5000 m/s; the two drop tanks (pods) add 2500 m/s, for 7500 m/s in total with
+// the full loadout, when the pods are burned first and dropped once dry. tankDry is one empty tank's structure.
+// hullDry is the hull without any modules; the fitted modules add their mass (see MODULES).
+const SHIP = { hullDry: 4250, mainProp0: 1067.6, tankProp0: 303.5, tankDry: 36.5, rcsProp0: 180,
+  rcsThrust: 250, rcsIsp: 250, mainThrust: 20000, mainIsp: 3200 };
+// RCS torque per axis [pitch, yaw, roll]. Pitch and yaw thrusters act on a ~10.5 m arm; roll on ~1.9 m with fewer
+// thrusters, scaled so the ship rolls about 1.5x faster than it pitches. RCS_K keeps the full-loadout pitch
+// acceleration of the earlier model (6.5 deg/s^2).
+const RCS_K = 51602, RCS_ROLL = 0.08, RCS_ARM = [10.5, 10.5, 1.9];
+const rcsTorqueAxis = i => RCS_K*(i === 2 ? RCS_ROLL : 1);
+
+/* ---------- Loadout: modules on the ship model's hardpoints ----------
+   Positions are module centres in body axes (x right, y up, z aft): the model's +Z nose maps to body -Z, so a
+   model point (x, y, z) is (-x, y, -z) here. Values come from the model files (hardpoint + module bounds). */
+const MODULES = {
+  railgun: { name: 'SPINAL RAILGUN', mass: 900, pos: [0, -1.15, -10.04], file: 'att_spinal_railgun.glb', hp: 'HP_Spinal_Railgun' },
+  laser:   { name: 'GIMBAL LASER',   mass: 250, pos: [-0.96, -0.05, -10.59], file: 'att_gimbal_laser.glb', hp: 'HP_Gimbal_Laser' },
+  pdcTop:  { name: 'PDC TOP',        mass: 300, pos: [0.06, 2.34, -0.275], file: 'att_pdc_turret.glb', hp: 'HP_PDC_Top' },
+  pdcBot:  { name: 'PDC BOTTOM',     mass: 300, pos: [-0.06, -2.34, -0.275], file: 'att_pdc_turret.glb', hp: 'HP_PDC_Bot' },
+  tankTop: { name: 'DROP TANK TOP',  mass: 0,   pos: [0, 2.25, 6.78], file: 'att_drop_tank.glb', hp: 'HP_DropTank_Top', tank: true },
+  tankBot: { name: 'DROP TANK BOTTOM', mass: 0, pos: [0, -2.25, 6.78], file: 'att_drop_tank.glb', hp: 'HP_DropTank_Bot', tank: true },
+};
+// Weapon origins in body axes: railgun muzzle (front of the barrel), laser emitter (front of the lens)
+const RAIL_MUZZLE = [0, -0.86, -12.5], LASER_EMITTER = [-0.96, -0.05, -10.94];
+const LOADOUT_KEY = 'og-loadout-v1';
+let loadout = Object.fromEntries(Object.keys(MODULES).map(k => [k, true]));
+try { Object.assign(loadout, JSON.parse(localStorage.getItem(LOADOUT_KEY) || '{}')); } catch (e) {}
+const saveLoadout = () => { try { localStorage.setItem(LOADOUT_KEY, JSON.stringify(loadout)); } catch (e) {} };
+const tankCount = () => (loadout.tankTop ? 1 : 0) + (loadout.tankBot ? 1 : 0);
+// Dry mass with the fitted weapon modules (tanks are counted separately, while attached)
+const dryMass = () => SHIP.hullDry + Object.entries(MODULES).reduce((a, [k, m]) => a + (loadout[k] && !m.tank ? m.mass : 0), 0);
+// Body-axis offset to world axes at the current attitude
+const bodyOff = p => new THREE.Vector3(p[0], p[1], p[2]).applyQuaternion(shipQ);
 const WEAPON = { railMass: 5, railV: 1000, railCooldown: 3, railEnergy: 2.5e6, railHeat: 1e6, railDmgDiv: 5e4,
   laserElec: 300e3, laserDmgRate: 10, laserRange: 5000, laserTol: 2 };
 // Laser gimbal: a small independent mount slaved to the locked target, so the laser can fire while the nose
@@ -78,8 +127,8 @@ const LASER_GIMBAL_MAX = 2 * Math.PI/180, LASER_SLEW = 30 * Math.PI/180;
 // Point-defence cannons: two mounts on opposite hull faces, across from each other. Both faces are parallel to
 // the radiators (their normal is body Y). Each fires tracers at the nearest torpedo inside its arc.
 const PDC_MOUNTS = [
-  { name: 'PDC TOP', sys: 'pdcTop', pos: [0, 1.2, 0.5], dir: [0, 1, 0], cd: 0 },
-  { name: 'PDC BOT', sys: 'pdcBot', pos: [0, -1.2, 0.5], dir: [0, -1, 0], cd: 0 },
+  { name: 'PDC TOP', sys: 'pdcTop', pos: [0, 2.54, -0.15], dir: [0, 1, 0], cd: 0 },    // turret centre on the model
+  { name: 'PDC BOT', sys: 'pdcBot', pos: [0, -2.54, -0.15], dir: [0, -1, 0], cd: 0 },
 ];
 // Magazine and barrel heat, per mount. A mount fires about 4 rounds/s (once per 0.25 s physics step), so
 // continuous fire overheats it in about 17 s ((4*0.025 - 0.04) per s); it locks out until the heat falls to
@@ -89,6 +138,7 @@ function resetPdcMounts() { for (const m of PDC_MOUNTS) Object.assign(m, { cd: 0
 resetPdcMounts();
 // Short status for displays: OFF (destroyed), HOT (overheated), EMPTY, or the normal state
 function pdcStatus(m) {
+  if (!loadout[m.sys]) return 'NONE';
   if (damage[m.sys] <= 0) return 'OFFLINE';
   if (m.rounds <= 0) return 'EMPTY';
   if (m.hot) return 'OVERHEAT';
@@ -145,6 +195,8 @@ function applyTorpedoHit(tp) {
   const w = DMG_SYSTEMS.map(s => {
     const d = new THREE.Vector3(...s.dir), L = d.length();
     const c = L > 0 ? Math.max(0, from.dot(d)/L) : 0.3;
+    const notFitted = { rail: !loadout.railgun, laser: !loadout.laser, pdcTop: !loadout.pdcTop, pdcBot: !loadout.pdcBot }[s.id];
+    if (notFitted) return 0;                         // nothing there to damage
     return damage[s.id] > 0 ? 0.15 + c*c : 0.02;
   });
   let r = Math.random()*w.reduce((a, b) => a + b, 0), k = 0;
@@ -181,14 +233,14 @@ function restartAfterDeath() {
   resetShip(); resetDamage(); resetPdcMounts(); resetTargets();
   projectiles = [];
   battery = POWER.battCap; hullT = THERM.tStart; railCD = 0; warpIdx = 0;
-  mainProp = SHIP.mainProp0; rcsProp = SHIP.rcsProp0; podProp = SHIP.podProp0; podsOn = true;
+  mainProp = SHIP.mainProp0; rcsProp = SHIP.rcsProp0; podProp = SHIP.tankProp0*tankCount(); podsOn = tankCount() > 0;
   leadHold = false; leadPrev = null; hullHits = 0;
   for (const t of targets) if (t.hostile) t.fireT = 10;
   const el = document.getElementById('death');
   el.style.display = 'none'; el.classList.remove('show');
   dead = false;
   if (actx && actx.state === 'suspended') actx.resume();
-  log('NEW SHIP · ORBIT NOMINAL · LEO 400 KM');
+  if (started) log('NEW SHIP · ORBIT NOMINAL · LEO 400 KM');
 }
 
 /* ---------- Torpedo guidance (user-supplied, used as written; only `export` removed) ---------- */
@@ -365,14 +417,29 @@ let ship = { ...SHIP_START };
 const shipQ = SHIP_Q0.clone();
 const omega = new THREE.Vector3();
 let mainProp = SHIP.mainProp0, rcsProp = SHIP.rcsProp0;
-let podProp = SHIP.podProp0, podsOn = true, masterMode = 'OFF', masterGuardOpen = false;   // master arm: OFF / ON / TNG   // fuel pods (feed the main drive first)
-function shipMass() { return SHIP.dry + mainProp + rcsProp + (podsOn ? SHIP.podDry + podProp : 0); }
-// Moment of inertia: the pods (structure and propellant) far out on the hull make the ship slower to turn
-function shipI() { return SHIP.I + (podsOn ? (SHIP.podDry + podProp)*SHIP.podR*SHIP.podR : 0); }
+let podProp = SHIP.tankProp0*tankCount(), podsOn = tankCount() > 0, masterMode = 'OFF', masterGuardOpen = false;   // master arm: OFF / ON / TNG   // fuel pods (feed the main drive first)
+function shipMass() { return dryMass() + mainProp + rcsProp + (podsOn ? SHIP.tankDry*tankCount() + podProp : 0); }
+// Moments of inertia [pitch, yaw, roll] about the model origin (centre of mass offsets are ignored):
+// the hull with its internal propellant as a 3.6 x 3.8 x 23.7 m box, the radiator fins (300 kg, 9.8 m aft,
+// 11.6 m tall), and each fitted module as a point mass at its centre. The railgun, far forward, dominates.
+function shipI() {
+  const mh = SHIP.hullDry + mainProp + rcsProp;
+  const I = [mh*(3.8*3.8 + 23.7*23.7)/12, mh*(3.6*3.6 + 23.7*23.7)/12, mh*(3.6*3.6 + 3.8*3.8)/12];
+  I[0] += 300*(5.8*5.8/3 + 9.8*9.8); I[1] += 300*9.8*9.8; I[2] += 300*5.8*5.8/3;
+  for (const [k, m] of Object.entries(MODULES)) {
+    if (!loadout[k]) continue;
+    const mass = m.tank ? (podsOn ? SHIP.tankDry + podProp/Math.max(1, tankCount()) : 0) : m.mass;
+    const [x, y, z] = m.pos;
+    I[0] += mass*(y*y + z*z); I[1] += mass*(x*x + z*z); I[2] += mass*(x*x + y*y);
+  }
+  return I;
+}
+// Angular acceleration per axis at full RCS, deg/s^2 (for the displays)
+const turnAccel = () => shipI().map((v, i) => rcsTorqueAxis(i)/v*180/Math.PI);
 // Delta-v the pods' remaining propellant gives (burned first, with the pods still attached)
 function podDv() {
   if (!podsOn) return 0;
-  const m = SHIP.dry + mainProp + rcsProp + SHIP.podDry;
+  const m = dryMass() + mainProp + rcsProp + SHIP.tankDry*tankCount();
   return SHIP.mainIsp*G0*Math.log((m + podProp)/m);
 }
 let battery = POWER.battCap, hullT = THERM.tStart;
@@ -599,18 +666,19 @@ function orbitInfo() {
 function fireRail() {
   const mass = shipMass();
   const fwd = new THREE.Vector3(0,0,-1).applyQuaternion(shipQ);
+  const mz = bodyOff(RAIL_MUZZLE);
   const V = WEAPON.railV, m = WEAPON.railMass;
   // Diagnostic: nose error to the solver's direction, and the miss the solver predicts for this exact shot
   const Ls = leadVector();
   if (Ls && targets[curTarget]) {
     const off = Math.acos(clamp(fwd.dot(Ls.clone().normalize()), -1, 1))*180/Math.PI;
     const tt = Ls.length()/V;
-    const P = propagateTo({ x: ship.x+fwd.x*4, y: ship.y+fwd.y*4, z: ship.z+fwd.z*4,
+    const P = propagateTo({ x: ship.x+mz.x, y: ship.y+mz.y, z: ship.z+mz.z,
       vx: ship.vx+fwd.x*V, vy: ship.vy+fwd.y*V, vz: ship.vz+fwd.z*V }, tt);
     const T = propagateTo(targets[curTarget], tt);
     log(`SOLN OFF ${off.toFixed(3)}°  PRED MISS ${Math.hypot(T.x-P.x, T.y-P.y, T.z-P.z).toFixed(1)} M`);
   }
-  projectiles.push({ x: ship.x+fwd.x*4, y: ship.y+fwd.y*4, z: ship.z+fwd.z*4,
+  projectiles.push({ x: ship.x+mz.x, y: ship.y+mz.y, z: ship.z+mz.z,
     vx: ship.vx+fwd.x*V, vy: ship.vy+fwd.y*V, vz: ship.vz+fwd.z*V,
     px:0, py:0, pz:0, age: 0, dead: false });
   const p = projectiles[projectiles.length-1];
@@ -683,8 +751,9 @@ function shootingSolution(tgt) {
   let tt = leadTime(rel, relV);
   if (tt === null) return null;
   const dir = rel.clone().addScaledVector(relV, tt).normalize();
+  const mz = bodyOff(RAIL_MUZZLE);                           // the shot leaves from the muzzle, below and ahead of the origin
   for (let it = 0; it < SOLVE_ITERS; it++) {
-    const P = propagateTo({ x: ship.x + dir.x*4, y: ship.y + dir.y*4, z: ship.z + dir.z*4,
+    const P = propagateTo({ x: ship.x + mz.x, y: ship.y + mz.y, z: ship.z + mz.z,
       vx: ship.vx + dir.x*V, vy: ship.vy + dir.y*V, vz: ship.vz + dir.z*V }, tt);
     const T = propagateTo(tgt, tt);
     const m = new THREE.Vector3(T.x-P.x, T.y-P.y, T.z-P.z);
@@ -700,7 +769,7 @@ function shootingSolution(tgt) {
 // Lead point for the current target, relative to the ship (world axes), or null without an intercept
 function leadVector() {
   const tgt = tgtLocal(targets[curTarget]);   // no fire-control solution beyond own-sensor range
-  if (!tgt) return null;
+  if (!tgt || !loadout.railgun) return null;   // the solution is for the railgun
   if (leadCache && leadCache.simT === simT && leadCache.tgt === tgt) return leadCache.L ? leadCache.L.clone() : null;
   const sol = shootingSolution(tgt);
   leadCache = { simT, tgt, L: sol ? sol.L.clone() : null };
@@ -750,7 +819,8 @@ function leadHoldCmd(h) {
   const wdes = ff.add(corr);
   if (wdes.length() > LEAD_MAX_RATE) wdes.setLength(LEAD_MAX_RATE);
   const wm = [omega.x, omega.y, omega.z], wd = [wdes.x, wdes.y, wdes.z], dd = [dff.x, dff.y, dff.z];
-  return wd.map((v, i) => clamp(shipI()*((v - wm[i])/LEAD_TAU_TIME + dd[i])/SHIP.rcsTorque, -1, 1));
+  const In = shipI();
+  return wd.map((v, i) => clamp(In[i]*((v - wm[i])/LEAD_TAU_TIME + dd[i])/rcsTorqueAxis(i), -1, 1));
 }
 
 function physicsStep(h) {
@@ -765,15 +835,18 @@ function physicsStep(h) {
   }
   const w = [omega.x, omega.y, omega.z];
   const tau = [0, 0, 0];
+  const Inow = shipI();
   for (let i = 0; i < 3; i++) {
-    if (cmd[i] !== 0) tau[i] = cmd[i]*SHIP.rcsTorque*rcsK();
-    else if (rcsStab) tau[i] = clamp(-shipI()*w[i]/1.5, -SHIP.rcsTorque*rcsK(), SHIP.rcsTorque*rcsK());
+    const tq = rcsTorqueAxis(i)*rcsK();
+    if (cmd[i] !== 0) tau[i] = cmd[i]*tq;
+    else if (rcsStab) tau[i] = clamp(-Inow[i]*w[i]/1.5, -tq, tq);
   }
   let tauMag = Math.hypot(tau[0], tau[1], tau[2]);
   if (rcsProp <= 0) { tau[0] = tau[1] = tau[2] = 0; tauMag = 0; }
-  rcsProp = Math.max(0, rcsProp - tauMag/(SHIP.rcsLever*2*SHIP.rcsIsp*G0)*h);
-  const Inow = shipI();
-  for (let i = 0; i < 3; i++) w[i] += tau[i]/Inow*h;
+  // Propellant: each axis is a thruster couple on its arm, so force = torque / (2 * arm)
+  const rcsF = tau.reduce((a, t, i) => a + Math.abs(t)/(2*RCS_ARM[i]), 0);
+  rcsProp = Math.max(0, rcsProp - rcsF/(SHIP.rcsIsp*G0)*h);
+  for (let i = 0; i < 3; i++) w[i] += tau[i]/Inow[i]*h;
   omega.set(w[0], w[1], w[2]);
   const wm = omega.length();
   if (wm > 1e-12) shipQ.multiply(new THREE.Quaternion().setFromAxisAngle(omega.clone().divideScalar(wm), wm*h)).normalize();
@@ -795,7 +868,8 @@ function physicsStep(h) {
   railCD = Math.max(0, railCD - h);
   if (railReq) {
     railReq = false;
-    if (damage.rail <= 0) log('RAIL OFFLINE');
+    if (!loadout.railgun) log('RAIL NOT FITTED');
+    else if (damage.rail <= 0) log('RAIL OFFLINE');
     else if (railCD <= 0 && battery >= WEAPON.railEnergy && masterMode !== 'OFF') fireRail();
     else if (railCD > 0) log(`RAIL CYCLING ${railCD.toFixed(1)} s`);
     else log('RAIL CAPACITOR LOW');
@@ -850,7 +924,7 @@ function physicsStep(h) {
     // Barrel cooling, every step; an overheated mount comes back once it has cooled to PDC_HEAT_RESUME
     m.heat = Math.max(0, m.heat - PDC_COOL*h);
     if (m.hot && m.heat <= PDC_HEAT_RESUME) { m.hot = false; log(`${m.name} COOLED · READY`); }
-    if (m.cd > 0 || masterMode === 'OFF' || battery < PDC_ENERGY || damage[m.sys] <= 0 || m.hot || m.rounds <= 0) continue;
+    if (!loadout[m.sys] || m.cd > 0 || masterMode === 'OFF' || battery < PDC_ENERGY || damage[m.sys] <= 0 || m.hot || m.rounds <= 0) continue;
     const nW = new THREE.Vector3(...m.dir).applyQuaternion(shipQ);
     const mP = new THREE.Vector3(...m.pos).applyQuaternion(shipQ).add(new THREE.Vector3(ship.x, ship.y, ship.z));
     // Nearest torpedo inside range and the mount's arc
@@ -932,13 +1006,14 @@ function physicsStep(h) {
   }
 
   /* --- laser: instant, beam-limited, line-of-sight check in body frame --- */
-  laserFiring = c.laser && laserArmed && masterMode !== 'OFF' && battery > 0 && hullT < THERM.tMax && !brownout && damage.laser > 0;
+  laserFiring = c.laser && laserArmed && masterMode !== 'OFF' && battery > 0 && hullT < THERM.tMax && !brownout && damage.laser > 0 && loadout.laser;
   if (laserFiring) {
     const qi = shipQ.clone().invert();
     const ld = laserDirBody();
     let best = null, bestD = Infinity;
     for (const t of targets) {
-      const b = new THREE.Vector3(t.x-ship.x, t.y-ship.y, t.z-ship.z).applyQuaternion(qi);
+      const b = new THREE.Vector3(t.x-ship.x, t.y-ship.y, t.z-ship.z).applyQuaternion(qi)
+        .sub(new THREE.Vector3(...LASER_EMITTER));             // from the emitter, in body axes
       const dist = b.dot(ld);                                   // distance along the beam
       const off = b.clone().addScaledVector(ld, -dist).length();  // miss distance from the beam
       if (dist > 0 && dist < WEAPON.laserRange && off < t.radius + WEAPON.laserTol && dist < bestD) {
@@ -1572,7 +1647,7 @@ keypadKeys.forEach((row, r) => row.forEach((k, c) => makeButton(-0.08 + c*0.08, 
 /* ================= DISPLAY HELPERS ================= */
 // Total delta-v left, staged: the pods' propellant first, then the internal tanks once the pods are dropped
 function dvRemaining() {
-  const mInt = SHIP.dry + rcsProp;
+  const mInt = dryMass() + rcsProp;
   return podDv() + SHIP.mainIsp*G0*Math.log((mInt + mainProp)/mInt);
 }
 function fmtDist(m) { return m >= 1e3 ? (m/1e3).toFixed(m >= 1e5 ? 0 : 1) + ' km' : m.toFixed(0) + ' m'; }
@@ -1730,15 +1805,15 @@ function drawTactical(g, W, H, idx) {
   const line = (s, col = PH) => { txt(g, RX, y, s, col, '24px monospace'); y += 31; };
   line(`ALT ${((Math.hypot(ship.x,ship.y,ship.z)-R_E)/1e3).toFixed(1)} km`);
   line(`DV  ${dvRemaining().toFixed(0)} m/s`);
-  line(damage.rail <= 0 ? 'RAIL OFFLINE' : `RAIL ${railCD > 0 ? 'CYC ' + railCD.toFixed(1) + 's' : 'READY'}`, damage.rail <= 0 ? RED : PH);
-  line(damage.laser <= 0 ? 'LASER OFFLINE' : `LASER ${laserArmed ? (laserFiring ? 'FIRING' : 'ARMED') : 'SAFE'}`, laserArmed || damage.laser <= 0 ? RED : PH);
+  if (!loadout.railgun) line('RAIL NOT FITTED', DIM); else line(damage.rail <= 0 ? 'RAIL OFFLINE' : `RAIL ${railCD > 0 ? 'CYC ' + railCD.toFixed(1) + 's' : 'READY'}`, damage.rail <= 0 ? RED : PH);
+  if (!loadout.laser) line('LASER NOT FITTED', DIM); else line(damage.laser <= 0 ? 'LASER OFFLINE' : `LASER ${laserArmed ? (laserFiring ? 'FIRING' : 'ARMED') : 'SAFE'}`, laserArmed || damage.laser <= 0 ? RED : PH);
   y += 10;
   for (const l of tgtLines) line(l);
   y += 10;
   // Threat summary: closing torpedoes, time to impact of the nearest, PDC state, hull
   line(threats ? `THREAT ${threats} TORP` : 'THREAT NONE', threats ? RED : DIM);
   line(tti !== null ? `TTI ${tti.toFixed(1)}s ${fmtDist(tRng)}` : 'TTI --', tti !== null && tti < 20 ? RED : PH);
-  const pdcS = m => ({ OFFLINE: 'OFF', EMPTY: 'EMP', OVERHEAT: 'HOT', SAFE: 'SAFE', FIRING: 'FIRE', READY: 'RDY' })[pdcStatus(m)];
+  const pdcS = m => ({ NONE: '--', OFFLINE: 'OFF', EMPTY: 'EMP', OVERHEAT: 'HOT', SAFE: 'SAFE', FIRING: 'FIRE', READY: 'RDY' })[pdcStatus(m)];
   line(`PDC T ${pdcS(PDC_MOUNTS[0])} B ${pdcS(PDC_MOUNTS[1])}`,
     PDC_MOUNTS.some(m => ['OFFLINE', 'EMPTY', 'OVERHEAT'].includes(pdcStatus(m))) ? AMB : PH);
   line(`HULL ${(hullInt*100).toFixed(0)}%`, hullInt <= 0.25 ? RED : hullInt < 1 ? AMB : PH);
@@ -1810,13 +1885,16 @@ function drawWeapons(g, W, H, idx) {
   let y = 78;
   const line = (s, col = PH) => { txt(g, 30, y, s, col, '25px monospace'); y += 27; };
   const dmgTag = id => damage[id] < 1 && damage[id] > 0 ? '  DMG' : '';
-  if (damage.rail <= 0) line('RAIL  OFFLINE', RED);
+  if (!loadout.railgun) line('RAIL  NOT FITTED', DIM);
+  else if (damage.rail <= 0) line('RAIL  OFFLINE', RED);
   else line(`RAIL  ${railCD > 0 ? 'CYCLING ' + railCD.toFixed(1) + ' s' : 'READY'}${dmgTag('rail')}`, railCD > 0 || damage.rail < 1 ? AMB : PH);
-  if (damage.laser <= 0) line('LASER OFFLINE', RED);
+  if (!loadout.laser) line('LASER NOT FITTED', DIM);
+  else if (damage.laser <= 0) line('LASER OFFLINE', RED);
   else line(`LASER ${laserArmed ? (guardOpen ? 'ARMED' : 'ARMED (GUARD)') : 'SAFE'}${laserFiring ? ' FIRING' : ''}${dmgTag('laser')}`, laserArmed ? RED : PH);
   line(`IN FLIGHT ${projectiles.length}`);
   for (const m of PDC_MOUNTS) {
     const st = pdcStatus(m);
+    if (st === 'NONE') { line(`${m.name} NOT FITTED`, DIM); continue; }
     const col = st === 'OFFLINE' || st === 'EMPTY' || st === 'OVERHEAT' ? RED : st === 'SAFE' ? PH : AMB;
     line(`${m.name} ${st.padEnd(8)} ${String(m.rounds).padStart(4)} RDS  HEAT ${String(Math.round(m.heat*100)).padStart(3)}%${dmgTag(m.sys)}`, col);
   }
@@ -2055,8 +2133,11 @@ function drawPropulsion(g, W, H, idx) {
   y += 32;
   txt(g, x, y, `RCS STAB ${rcsStab ? 'ON' : 'OFF'}   RCS ${rcsActive ? 'FIRING' : 'IDLE'}`, rcsStab ? PH : AMB, '25px monospace');
   y += 32;
-  txt(g, x, y, podsOn ? `PODS ${podProp.toFixed(0)} kg  ${podDv().toFixed(0)} m/s   INERTIA +${((shipI()/SHIP.I - 1)*100).toFixed(0)}%`
-    : 'PODS JETTISONED', podsOn ? PH : DIM, '25px monospace');
+  txt(g, x, y, podsOn ? `PODS ${tankCount()}x  ${podProp.toFixed(0)} kg  ${podDv().toFixed(0)} m/s` : tankCount() ? 'PODS JETTISONED' : 'PODS NOT FITTED',
+    podsOn ? PH : DIM, '25px monospace');
+  y += 32;
+  const ta = turnAccel();
+  txt(g, x, y, `TURN  P ${ta[0].toFixed(1)}  Y ${ta[1].toFixed(1)}  R ${ta[2].toFixed(1)} °/s²`, PH, '25px monospace');
 }
 
 function drawComms(g, W, H, idx) {
@@ -2219,8 +2300,9 @@ function drawShip(g, W, H, idx) {
   // Fuel pods: one pill on each side, attached to the hull edge and clear of the callout arrows.
   // The fill shows the remaining propellant.
   if (podsOn) {
-    const f = clamp(podProp/SHIP.podProp0, 0, 1);
+    const f = clamp(podProp/(SHIP.tankProp0*Math.max(1, tankCount())), 0, 1);
     for (const s of [-1, 1]) {
+      if (!(s > 0 ? loadout.tankTop : loadout.tankBot)) continue;
       const pu0 = s > 0 ? 36 : -72, pw = 36, pl = 70, pv0 = 136;
       g.beginPath();
       if (g.roundRect) g.roundRect(pu0, pv0, pw, pl, pw/2); else g.rect(pu0, pv0, pw, pl);
@@ -2282,6 +2364,7 @@ function drawShip(g, W, H, idx) {
   // The barrel points along the last shot for 1.5 s, otherwise straight out.
   // Body to drawing frame: u = body Y, v = body Z (aft positive); frame angle 0 is +u.
   for (const [m, s] of [[PDC_MOUNTS[0], 1], [PDC_MOUNTS[1], -1]]) {
+    if (!loadout[m.sys]) continue;
     const u0 = s*(HW + 10), v0 = -10, e = damage[m.sys];
     const firingNow = simT - (m.lastFire ?? -1e9) < 0.3;
     const col = e <= 0 ? RED : masterMode === 'OFF' ? DIM : firingNow ? AMB : e < 1 ? AMB : PH;
@@ -2307,6 +2390,7 @@ function drawShip(g, W, H, idx) {
   // PDC labels beside their coverage fans (screen coordinates)
   // Label: name and rounds left, or the fault; a heat bar under it fills toward overheat
   const pdcLab = (m, y) => {
+    if (!loadout[m.sys]) return;
     const st = pdcStatus(m), bad = st === 'OFFLINE' || st === 'EMPTY' || st === 'OVERHEAT';
     const text = st === 'OFFLINE' ? `${m.name} OFF` : st === 'EMPTY' ? `${m.name} EMPTY` : st === 'OVERHEAT' ? `${m.name} HOT` : `${m.name} ${m.rounds}`;
     txt(g, sx(5), y, text, bad ? RED : damage[m.sys] < 1 || m.rounds <= PDC_LOW_ROUNDS ? AMB : PH, '18px monospace', 'center');
@@ -3047,7 +3131,7 @@ window.addEventListener('keydown', e => {
     assignBinding(rebinding, e.code); return;
   }
   if (e.code === 'Escape') { if (!e.repeat) setMenu(!menuOpen); e.preventDefault(); return; }
-  if (!started || menuOpen) return;
+  if (!started || menuOpen || hangarOpen) return;
   if (PREVENT.has(e.code)) e.preventDefault();
   if (e.repeat || held.has(e.code)) return;
   held.add(e.code);
@@ -3058,6 +3142,7 @@ window.addEventListener('keyup', e => held.delete(e.code));
 window.addEventListener('pointerdown', e => {
   const code = 'Mouse' + e.button;
   if (rebinding) { e.preventDefault(); assignBinding(rebinding, code); return; }
+  if (hangarOpen) return;
   if (!started || menuOpen) return;
   if (e.target !== canvas) return;
   // Panel buttons take the click; anything else is a weapon trigger
@@ -3073,16 +3158,197 @@ window.addEventListener('contextmenu', e => e.preventDefault());
 
 // Death screen: clicks only count once the message is showing, so a click mid-fight can't skip it
 document.getElementById('death').addEventListener('click', e => {
-  if (e.currentTarget.classList.contains('show')) restartAfterDeath();
+  if (!e.currentTarget.classList.contains('show')) return;
+  e.currentTarget.style.display = 'none'; e.currentTarget.classList.remove('show');
+  openHangar();
 });
 
 startEl.addEventListener('click', () => {
   initAudio();
-  started = true;
   startEl.style.display = 'none';
-  log('ORBIT NOMINAL · LEO 400 KM · PROGRADE');
-  log('GROUND LINK ESTABLISHED');
+  openHangar();
 });
+
+/* ================= HANGAR: 3D loadout editor ================= */
+// The ship model and its modules load the first time the hangar opens (models/ beside index.html).
+// Modules attach to the hull's hardpoint nodes; an empty hardpoint shows a ring that can be clicked.
+const MODEL_DIR = 'models/';
+const hangarEl = document.getElementById('hangar'), hangarLoadEl = document.getElementById('hangarLoad');
+let hangarOpen = false;
+const hangar = { scene: null, cam: null, ship: null, mods: {}, markers: {}, loading: false, loaded: false,
+  yaw: 0.9, pitch: 0.28, dist: 36, drag: null, hover: null, idle: 0 };
+function buildHangarScene() {
+  const sc = new THREE.Scene();
+  sc.background = new THREE.Color(0x05070a);
+  sc.environment = scene.environment;                // same studio reflections as the cockpit
+  const sun = new THREE.DirectionalLight(0xfff1dc, 2.6); sun.position.set(-20, 25, 18); sc.add(sun);
+  const rim = new THREE.DirectionalLight(0x88aaff, 0.9); rim.position.set(25, -8, -20); sc.add(rim);
+  sc.add(new THREE.HemisphereLight(0x9fb0c0, 0x101010, 0.35));
+  const grid = new THREE.GridHelper(80, 40, 0x2a4a33, 0x16241a); grid.position.y = -6.6; sc.add(grid);
+  hangar.scene = sc;
+  hangar.cam = new THREE.PerspectiveCamera(38, window.innerWidth/window.innerHeight, 0.1, 500);
+}
+function loadHangarModels() {
+  if (hangar.loading) return;
+  hangar.loading = true;
+  const loader = new GLTFLoader();
+  const files = ['ship_bare.glb', ...new Set(Object.values(MODULES).map(m => m.file))];
+  const prog = {};
+  let failed = false;
+  const show = () => {
+    if (failed || hangar.loaded) return;             // a late progress event must not hide the failure message
+    const v = Object.values(prog), done = v.reduce((a, q) => a + q.l, 0), tot = v.reduce((a, q) => a + q.t, 0);
+    hangarLoadEl.textContent = `LOADING SHIP ${tot ? Math.round(100*done/tot) : 0}%`;
+  };
+  const get = f => new Promise((res, rej) => loader.load(MODEL_DIR + f, gl => res([f, gl.scene]),
+    e => { prog[f] = { l: e.loaded, t: e.total || e.loaded }; show(); }, rej));
+  Promise.all(files.map(get)).then(list => assembleHangar(Object.fromEntries(list))).catch(err => {
+    console.error(err);
+    failed = true; hangar.loading = false;           // opening the hangar again retries
+    hangarLoadEl.textContent = 'SHIP MODEL FAILED TO LOAD · LAUNCH STILL WORKS';
+  });
+}
+function assembleHangar(by) {
+  const ship = by['ship_bare.glb'];
+  hangar.scene.add(ship); hangar.ship = ship;
+  for (const [k, m] of Object.entries(MODULES)) {
+    const hp = ship.getObjectByName(m.hp);
+    if (!hp) { console.warn('missing hardpoint', m.hp); continue; }
+    const mod = by[m.file].clone(true);              // shares geometry and materials with the loaded file
+    mod.traverse(o => { if (o.isMesh) o.userData.slot = k; });
+    hp.add(mod); hangar.mods[k] = mod;
+    // Empty-hardpoint marker: a ring flat on the mount, and an invisible sphere to make it easy to click
+    const mk = new THREE.Group();
+    const ring = new THREE.Mesh(new THREE.TorusGeometry(0.65, 0.06, 8, 48),
+      new THREE.MeshBasicMaterial({ color: 0x7dff9a, transparent: true, opacity: 0.85, toneMapped: false }));
+    ring.rotation.x = Math.PI/2; mk.add(ring); mk.userData.ring = ring;
+    const pick = new THREE.Mesh(new THREE.SphereGeometry(1.1, 12, 8), new THREE.MeshBasicMaterial({ visible: false }));
+    pick.userData.slot = k; mk.add(pick); mk.userData.pick = pick;
+    hp.add(mk); hangar.markers[k] = mk;
+  }
+  hangar.loaded = true;
+  hangarLoadEl.style.display = 'none';
+  refreshHangar();
+}
+// Fresh propellant for the current loadout, so the stats show what the ship launches with
+function applyLoadoutToShip() {
+  mainProp = SHIP.mainProp0; rcsProp = SHIP.rcsProp0;
+  podProp = SHIP.tankProp0*tankCount(); podsOn = tankCount() > 0;
+}
+function toggleSlot(k) {
+  loadout[k] = !loadout[k];
+  saveLoadout(); sfx.click();
+  refreshHangar();
+}
+function refreshHangar() {
+  applyLoadoutToShip();
+  for (const k of Object.keys(MODULES)) {
+    if (hangar.mods[k]) hangar.mods[k].visible = loadout[k];
+    const mk = hangar.markers[k];
+    if (mk) {
+      mk.visible = !loadout[k] || hangar.hover === k;
+      mk.userData.ring.material.color.set(loadout[k] ? 0xffb020 : 0x7dff9a);
+    }
+  }
+  const list = document.getElementById('hpList');
+  list.innerHTML = '';
+  for (const [k, m] of Object.entries(MODULES)) {
+    const row = document.createElement('div');
+    row.className = 'hp ' + (loadout[k] ? 'on' : 'off') + (hangar.hover === k ? ' hover' : '');
+    const kg = m.tank ? SHIP.tankDry + SHIP.tankProp0 : m.mass;
+    row.innerHTML = `<span>${m.name}</span><span class="st">${loadout[k] ? 'FITTED · ' + Math.round(kg) + ' KG' : 'EMPTY'}</span>`;
+    row.addEventListener('click', () => toggleSlot(k));
+    row.addEventListener('mouseenter', () => { hangar.hover = k; refreshMarkers(); });
+    row.addEventListener('mouseleave', () => { hangar.hover = null; refreshMarkers(); });
+    list.appendChild(row);
+  }
+  const ta = turnAccel();
+  const weapons = [loadout.railgun && 'RAIL', loadout.laser && 'LASER',
+    (loadout.pdcTop || loadout.pdcBot) && `PDC x${(loadout.pdcTop ? 1 : 0) + (loadout.pdcBot ? 1 : 0)}`].filter(Boolean).join(' · ') || 'NONE';
+  document.getElementById('hangarStats').textContent =
+    `MASS       ${shipMass().toFixed(0)} kg\n` +
+    `DELTA-V    ${dvRemaining().toFixed(0)} m/s${tankCount() ? `  (TANKS ${podDv().toFixed(0)})` : ''}\n` +
+    `TURN P/Y   ${ta[0].toFixed(1)} / ${ta[1].toFixed(1)} °/s²\n` +
+    `TURN ROLL  ${ta[2].toFixed(1)} °/s²\n` +
+    `WEAPONS    ${weapons}`;
+}
+// Hover changes only the markers and row highlight (no stats rebuild)
+function refreshMarkers() {
+  for (const [k, mk] of Object.entries(hangar.markers)) mk.visible = !loadout[k] || hangar.hover === k;
+  document.querySelectorAll('#hpList .hp').forEach((row, i) => row.classList.toggle('hover', Object.keys(MODULES)[i] === hangar.hover));
+}
+function openHangar() {
+  hangarOpen = true;
+  hangarEl.style.display = 'block';
+  if (actx && actx.state === 'running') actx.suspend();   // the cockpit is not running here
+  if (!hangar.scene) buildHangarScene();
+  loadHangarModels();
+  refreshHangar();
+}
+function launch() {
+  hangarOpen = false;
+  hangarEl.style.display = 'none';
+  restartAfterDeath();                               // fresh ship and scenario with this loadout
+  if (!started) { started = true; log('ORBIT NOMINAL · LEO 400 KM · PROGRADE'); log('GROUND LINK ESTABLISHED'); }
+  const fit = Object.entries(MODULES).filter(([k]) => loadout[k]).map(([, m]) => m.name.replace('DROP TANK', 'TANK'));
+  log(`LOADOUT · ${fit.length ? fit.join(' · ') : 'BARE HULL'}`);
+}
+document.getElementById('launchBtn').addEventListener('click', launch);
+// Clickable things in the hangar: fitted modules, and the pick spheres of empty hardpoints
+function hangarPick(e) {
+  if (!hangar.loaded) return null;
+  const objs = [];
+  for (const k of Object.keys(MODULES)) {
+    if (loadout[k] && hangar.mods[k]) hangar.mods[k].traverse(o => { if (o.isMesh) objs.push(o); });
+    else if (hangar.markers[k]) objs.push(hangar.markers[k].userData.pick);
+  }
+  ndc.set(e.clientX/window.innerWidth*2 - 1, -(e.clientY/window.innerHeight)*2 + 1);
+  raycaster.setFromCamera(ndc, hangar.cam);
+  const hit = raycaster.intersectObjects(objs, false)[0];
+  return hit ? hit.object.userData.slot : null;
+}
+canvas.addEventListener('pointerdown', e => {
+  if (!hangarOpen) return;
+  hangar.drag = { x: e.clientX, y: e.clientY, moved: 0 };
+});
+window.addEventListener('pointermove', e => {
+  if (!hangarOpen) return;
+  if (hangar.drag) {
+    const dx = e.clientX - hangar.drag.x, dy = e.clientY - hangar.drag.y;
+    hangar.drag.moved += Math.abs(dx) + Math.abs(dy); hangar.drag.x = e.clientX; hangar.drag.y = e.clientY;
+    hangar.yaw -= dx*0.006; hangar.pitch = clamp(hangar.pitch + dy*0.005, -1.2, 1.4); hangar.idle = 0;
+    return;
+  }
+  if (e.target !== canvas) return;
+  const k = hangarPick(e);
+  if (k !== hangar.hover) { hangar.hover = k; refreshMarkers(); canvas.style.cursor = k ? 'pointer' : 'grab'; }
+});
+window.addEventListener('pointerup', e => {
+  if (!hangarOpen || !hangar.drag) return;
+  const click = hangar.drag.moved < 5;
+  hangar.drag = null;
+  if (click && e.target === canvas) { const k = hangarPick(e); if (k) toggleSlot(k); }
+});
+canvas.addEventListener('wheel', e => {
+  if (!hangarOpen) return;
+  e.preventDefault();
+  hangar.dist = clamp(hangar.dist*Math.exp(e.deltaY*0.001), 14, 80); hangar.idle = 0;
+}, { passive: false });
+window.addEventListener('resize', () => {
+  if (hangar.cam) { hangar.cam.aspect = window.innerWidth/window.innerHeight; hangar.cam.updateProjectionMatrix(); }
+});
+function renderHangar(dt) {
+  hangar.idle += dt;
+  if (hangar.idle > 4 && !hangar.drag) hangar.yaw += dt*0.08;   // slow turntable when left alone
+  const cp = Math.cos(hangar.pitch);
+  // The view centre sits left of the screen centre, clear of the panel
+  hangar.cam.position.set(hangar.dist*cp*Math.sin(hangar.yaw), hangar.dist*Math.sin(hangar.pitch), hangar.dist*cp*Math.cos(hangar.yaw));
+  hangar.cam.lookAt(0, 0, 0);
+  hangar.cam.setViewOffset(window.innerWidth, window.innerHeight, 180, 0, window.innerWidth, window.innerHeight);
+  const t = performance.now()/1000;
+  for (const mk of Object.values(hangar.markers)) mk.userData.ring.material.opacity = 0.55 + 0.35*Math.sin(t*3);
+  renderer.render(hangar.scene, hangar.cam);
+}
 
 /* ================= MAIN LOOP ================= */
 function step(dt) {
@@ -3099,6 +3365,7 @@ function frame(now) {
   requestAnimationFrame(frame);
   const dt = Math.min((now - lastFrame)/1000, 0.1);
   lastFrame = now;
+  if (hangarOpen) { renderHangar(dt); return; }
   if (started && !paused && !menuOpen && !dead) step(dt);
   animateCockpit(dt);
   uiAcc += dt;
