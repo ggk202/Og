@@ -53,7 +53,7 @@ const GM_E = 3.986004418e14, R_E = 6.371e6;            // Earth
 const GM_M = 4.9048695e12, R_EM = 3.844e8, T_MOON = 27.321661 * 86400, MOON_PHASE0 = 0.7;
 const LEO_R = R_E + 400e3;
 
-const SHIP = { dry: 6000, mainProp0: 1800, rcsProp0: 180, I: 2.2e5,
+const SHIP = { dry: 6000, mainProp0: 1000, podProp0: 800, rcsProp0: 180, I: 2.2e5,
   rcsTorque: 25000, rcsLever: 2, rcsThrust: 250, rcsIsp: 250, mainThrust: 20000, mainIsp: 3200 };
 const WEAPON = { railMass: 5, railV: 1000, railCooldown: 3, railEnergy: 2.5e6, railHeat: 1e6, railDmgDiv: 5e4,
   laserElec: 300e3, laserDmgRate: 10, laserRange: 5000, laserTol: 2 };
@@ -91,6 +91,8 @@ const ACTIONS = [
   { id:'toggleRad',  label:'Radiators deploy / stow',  def:'KeyN', edge:true },
   { id:'cycleTarget',label:'Cycle target',             def:'KeyT', edge:true },
   { id:'cycleRange', label:'Tactical range scale',     def:'KeyM', edge:true },
+  { id:'masterArm',  label:'Master arm (toggle)',      def:'KeyH', edge:true },
+  { id:'jettison',   label:'Jettison fuel pods',       def:'KeyJ', edge:true },
   { id:'warpUp',     label:'Time warp up',             def:'Period', edge:true },
   { id:'warpDown',   label:'Time warp down',           def:'Comma', edge:true },
   { id:'pause',      label:'Pause',                    def:'KeyP', edge:true },
@@ -112,6 +114,8 @@ let ship = { ...SHIP_START };
 const shipQ = SHIP_Q0.clone();
 const omega = new THREE.Vector3();
 let mainProp = SHIP.mainProp0, rcsProp = SHIP.rcsProp0;
+let podProp = SHIP.podProp0, podsOn = true, masterArm = false;   // fuel pods (feed the main drive first)
+function shipMass() { return SHIP.dry + mainProp + podProp + rcsProp; }
 let battery = POWER.battCap, hullT = THERM.tStart;
 let radDeployed = true, rcsStab = true, laserArmed = false, guardOpen = false, brownout = false;
 let lampTestT = 0;   // seconds of lamp test remaining
@@ -209,7 +213,7 @@ function orbitInfo() {
 }
 
 function fireRail() {
-  const mass = SHIP.dry + mainProp + rcsProp;
+  const mass = shipMass();
   const fwd = new THREE.Vector3(0,0,-1).applyQuaternion(shipQ);
   const V = WEAPON.railV, m = WEAPON.railMass;
   projectiles.push({ x: ship.x+fwd.x*4, y: ship.y+fwd.y*4, z: ship.z+fwd.z*4,
@@ -276,11 +280,12 @@ function physicsStep(h) {
   if (rcsProp <= 0) { F[0] = F[1] = F[2] = 0; fr = 0; }
   rcsProp = Math.max(0, rcsProp - fr/(SHIP.rcsIsp*G0)*h);
   thrustFrac = 0;
-  if (c.main && mainProp > 0) {
+  if (c.main && mainProp + podProp > 0) {
     F[2] -= SHIP.mainThrust; thrustFrac = 1;
-    mainProp = Math.max(0, mainProp - SHIP.mainThrust/(SHIP.mainIsp*G0)*h);
+    const dm = SHIP.mainThrust/(SHIP.mainIsp*G0)*h;
+    if (podProp > 0) podProp = Math.max(0, podProp - dm); else mainProp = Math.max(0, mainProp - dm);
   }
-  const mass = SHIP.dry + mainProp + rcsProp;
+  const mass = shipMass();
   const fw = new THREE.Vector3(F[0], F[1], F[2]).applyQuaternion(shipQ);
   rk4(ship, h, fw.x/mass, fw.y/mass, fw.z/mass);
 
@@ -288,7 +293,7 @@ function physicsStep(h) {
   railCD = Math.max(0, railCD - h);
   if (railReq) {
     railReq = false;
-    if (railCD <= 0 && battery >= WEAPON.railEnergy) fireRail();
+    if (railCD <= 0 && battery >= WEAPON.railEnergy && masterArm) fireRail();
     else if (railCD > 0) log(`RAIL CYCLING ${railCD.toFixed(1)} s`);
     else log('RAIL CAPACITOR LOW');
   }
@@ -315,7 +320,7 @@ function physicsStep(h) {
   }
 
   /* --- laser: instant, beam-limited, line-of-sight check in body frame --- */
-  laserFiring = c.laser && laserArmed && battery > 0 && hullT < THERM.tMax && !brownout;
+  laserFiring = c.laser && laserArmed && masterArm && battery > 0 && hullT < THERM.tMax && !brownout;
   if (laserFiring) {
     const qi = shipQ.clone().invert();
     let best = null, bestD = Infinity;
@@ -533,9 +538,9 @@ function decal(lines, x, y, w, color = 'rgba(214,208,180,0.85)') {
   m.position.set(x, y, PANEL_Z + 0.004); cockpit.add(m);
 }
 decal(['MIL-SPEC MK II', 'ASSY 3 · REV C'], -0.42, -0.42, 0.2);
-decal(['HOT SURFACE', 'DO NOT TOUCH'], 0.42, -0.42, 0.2);
+decal(['HOT SURFACE', 'DO NOT TOUCH'], 0.56, -0.42, 0.16);
 const jewelCols = [0xff3322, 0x33ff66, 0xffaa22];
-[-0.66, -0.6, -0.54, 0.54, 0.6, 0.66].forEach((x, i) => {
+[-0.66, -0.6, -0.54, 0.7, 0.74, 0.78].forEach((x, i) => {
   add(new THREE.SphereGeometry(0.007, 12, 8),
     new THREE.MeshStandardMaterial({ color: jewelCols[i % 3], emissive: jewelCols[i % 3], emissiveIntensity: i % 2 ? 0.8 : 0.1, roughness: 0.2 }),
     x, -0.42, PANEL_Z + 0.007);
@@ -741,12 +746,13 @@ cockpit.add(noseRet);
 
 // Switches and guarded laser arm
 const switchDefs = [
-  { id:'rad',  x:-0.85, label:'RADIATORS' },
-  { id:'stab', x:-0.51, label:'RCS STAB' },
-  { id:'arm',  x:-0.17, label:'LASER ARM', guard: true },
-  { id:'aux1', x: 0.17, label:'AUX PWR' },
-  { id:'aux2', x: 0.51, label:'COMMS' },
-  { id:'aux3', x: 0.85, label:'BEACON' },
+  { id:'rad',    x:-0.85,   label:'RADIATORS' },
+  { id:'stab',   x:-0.5667, label:'RCS STAB' },
+  { id:'arm',    x:-0.2833, label:'LASER ARM', guard: true },
+  { id:'master', x: 0,      label:'MASTER ARM' },
+  { id:'aux1',   x: 0.2833, label:'AUX PWR' },
+  { id:'aux2',   x: 0.5667, label:'COMMS' },
+  { id:'aux3',   x: 0.85,   label:'BEACON' },
 ];
 const SW_Y = -0.52;
 const leverGeo = (() => {
@@ -769,7 +775,8 @@ for (const s of switchDefs) {
 }
 
 
-// Utility buttons beside the placard: lamp test and MFD page reset
+// Utility buttons beside the placard: lamp test, MFD page reset, and fuel pod jettison
+makeButton(0.34, -0.43, 'JETT', () => jettisonPods());
 makeButton(-0.26, -0.43, 'TEST', () => { lampTestT = 3; sfx.click(); });
 makeButton(0.26, -0.43, 'RESET', () => {
   mfds.forEach((m, i) => { m.page = mfdDefs[i].page; m.on = true; drawMFD(m); });
@@ -806,7 +813,7 @@ keypadKeys.forEach((row, r) => row.forEach((k, c) => makeButton(-0.08 + c*0.08, 
 
 /* ================= DISPLAY HELPERS ================= */
 function dvRemaining() {
-  const m0 = SHIP.dry + mainProp + rcsProp, m1 = SHIP.dry + rcsProp;
+  const m0 = shipMass(), m1 = SHIP.dry + rcsProp;
   return SHIP.mainIsp*G0*Math.log(m0/m1);
 }
 function fmtDist(m) { return m >= 1e3 ? (m/1e3).toFixed(m >= 1e5 ? 0 : 1) + ' km' : m.toFixed(0) + ' m'; }
@@ -1030,7 +1037,7 @@ function drawPropulsion(g, W, H, idx) {
   row(mainProp/SHIP.mainProp0, 'MAIN PROPELLANT', `${mainProp.toFixed(0)} kg`);
   row(rcsProp/SHIP.rcsProp0, 'RCS PROPELLANT', `${rcsProp.toFixed(1)} kg`);
   row(thrustFrac, 'MAIN THRUST', thrustFrac ? '20.0 kN' : 'OFF');
-  const mass = SHIP.dry + mainProp + rcsProp;
+  const mass = shipMass();
   txt(g, x, y, `DELTA-V ${dvRemaining().toFixed(0)} m/s    MASS ${mass.toFixed(0)} kg`, PH, '25px monospace');
   y += 32;
   const dps = v => (v*180/Math.PI).toFixed(2).padStart(7);
@@ -1056,7 +1063,7 @@ function drawComms(g, W, H, idx) {
 // Ship coordinates: u = lateral (screen up is +u), v = longitudinal (aft at screen right).
 // Mapping to screen: x = cx + v, y = cy - u.
 function drawShip(g, W, H, idx) {
-  mfdHeader(g, W, `SHIP  ${radDeployed ? 'RAD DEPLOYED' : 'RAD STOWED'}  HULL ${hullT.toFixed(0)} K`, idx);
+  mfdHeader(g, W, `SHIP  ${radDeployed ? 'RAD DEPLOYED' : 'RAD STOWED'}  HULL ${hullT.toFixed(0)} K${podsOn ? '  PODS ' + Math.round(podProp) + ' KG' : ''}`, idx);
   const cx = W/2, cy = 255;
   const HW = 40, HS = -270, HE = 300, RL = 110;   // half-width, nose, aft, radiator length
   const PV = 250;                                 // radiator centre along the hull (aft)
@@ -1189,6 +1196,20 @@ function drawShip(g, W, H, idx) {
     g.beginPath(); g.moveTo(-21 - 9*Math.cos(spin), v - 9*Math.sin(spin)); g.lineTo(-21 + 9*Math.cos(spin), v + 9*Math.sin(spin)); g.stroke();
   }
 
+  // Fuel pods: one pill on each side, beyond the radiators. The fill shows the remaining propellant.
+  if (podsOn) {
+    const f = clamp(podProp/SHIP.podProp0, 0, 1);
+    for (const s of [-1, 1]) {
+      const pu0 = s > 0 ? 166 : -190, pw = 24, pl = 72, pv0 = PV - pl/2;
+      g.beginPath();
+      if (g.roundRect) g.roundRect(pu0, pv0, pw, pl, pw/2); else g.rect(pu0, pv0, pw, pl);
+      g.fillStyle = 'rgba(125,255,154,0.08)'; g.fill();
+      g.strokeStyle = PH; g.lineWidth = 2.5; g.stroke();
+      g.fillStyle = 'rgba(255,176,32,0.45)';
+      g.fillRect(pu0 + 6, pv0 + pl*(1 - f) + 4, pw - 12, Math.max(0, pl*f - 8));
+    }
+  }
+
   g.restore();
 
   /* ---------- callouts, in screen coordinates ---------- */
@@ -1199,8 +1220,8 @@ function drawShip(g, W, H, idx) {
   callArrow(sx(-151), 98, sx(-151), 219);
   label('ECM', sx(-70), 60);
   callArrow(sx(-70), 66, sx(-70), 219);
-  label(`REACTOR LOAD ${kWload}kW`, sx(120), 60, laserFiring ? AMB : PH);
-  callArrow(sx(120), 66, sx(120), 219);
+  label(`REACTOR LOAD ${kWload}kW`, sx(90), 60, laserFiring ? AMB : PH);
+  callArrow(sx(90), 66, sx(90), 219);
 
   // below the ship (module outer edge at screen y 293)
   label('FCS', sx(-231), 438, fcsCol);
@@ -1209,8 +1230,8 @@ function drawShip(g, W, H, idx) {
   callArrow(sx(-122), 444, sx(-122), 292);
   label('COOLANT', sx(120), 438, hot ? AMB : PH);
   callArrow(sx(120), 428, sx(120), 292);
-  label('GIMBAL', sx(HE+9), 438);
-  callArrow(sx(HE+9), 428, sx(HE+9), 280);
+  label('GIMBAL', sx(HE+9) + 40, 438);
+  callArrow(sx(HE+9) + 40, 428, sx(HE+9), 280);
 }
 
 function drawMFD(m) {
@@ -1286,7 +1307,7 @@ function animateCockpit(dt) {
     d.tex.needsUpdate = true;
   }
   const k = 1 - Math.exp(-dt*18);
-  const state = { rad: radDeployed, stab: rcsStab, arm: laserArmed };
+  const state = { rad: radDeployed, stab: rcsStab, arm: laserArmed, master: masterArm };
   for (const s of switchDefs) {
     if (s.id in state) {
       const target = state[s.id] ? -0.45 : 0.45;
@@ -1445,6 +1466,11 @@ function assignBinding(actionId, code) {
   bindings[actionId] = code; saveBinds(); rebinding = null; buildTable();
 }
 
+function jettisonPods() {
+  if (!podsOn) return;
+  podsOn = false; podProp = 0;
+  sfx.hullThump(); log('FUEL PODS JETTISONED');
+}
 function onEdge(code) {
   for (const a of ACTIONS) {
     if (bindings[a.id] !== code || !a.edge) continue;
@@ -1460,6 +1486,8 @@ function onEdge(code) {
         log(radDeployed ? 'RADIATORS DEPLOYED' : 'RADIATORS STOWED'); break;
       case 'cycleTarget': if (targets.length) curTarget = (curTarget+1) % targets.length; break;
       case 'cycleRange': rangeIdx = (rangeIdx+1) % RANGES.length; break;
+      case 'masterArm': masterArm = !masterArm; sfx.click(); log(masterArm ? 'MASTER ARM ON' : 'MASTER ARM SAFE'); break;
+      case 'jettison': jettisonPods(); break;
       case 'warpUp': warpIdx = Math.min(warpIdx+1, WARPS.length-1); break;
       case 'warpDown': warpIdx = Math.max(warpIdx-1, 0); break;
       case 'pause': paused = !paused; break;
