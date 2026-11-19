@@ -84,6 +84,7 @@ const ACTIONS = [
   { id:'transDown',  label:'RCS translate down',       def:'PageDown' },
   { id:'mainEngine', label:'Main drive (hold)',        def:'Space' },
   { id:'rcsStab',    label:'RCS rate damping (toggle)',def:'KeyX', edge:true },
+  { id:'leadHold',   label:'Lead hold: point nose at lead (toggle)', def:'KeyL', edge:true },
   { id:'fireRail',   label:'Fire railgun',             def:'Mouse0', edge:true },
   { id:'fireLaser',  label:'Fire laser (hold)',        def:'Mouse2' },
   { id:'guardLaser', label:'Laser arm guard (toggle)', def:'KeyG', edge:true },
@@ -123,6 +124,7 @@ let radDeployed = true, rcsStab = true, laserArmed = false, guardOpen = false, b
 let lampTestT = 0;   // seconds of lamp test remaining
 let keyBuf = '';     // keypad entry buffer, shown on the COMMS page
 let irOn = false;    // scope thermal (IR) mode
+let leadHold = false; // fire-control hold: RCS points the nose at the lead point
 let scopeAz = 0, scopeEl = 0;   // telescope gimbal angles relative to the ship's nose (rad)
 let simT = 0, warpIdx = 0, paused = false, menuOpen = false, started = false;
 let railCD = 0, railReq = false, thrustFrac = 0, rcsActive = false, laserFiring = false;
@@ -258,11 +260,45 @@ function controlState() {
   };
 }
 
+// Lead point for the current target, relative to the ship (world axes), or null without an intercept
+function leadVector() {
+  const tgt = targets[curTarget];
+  if (!tgt || tgt.gone) return null;
+  const rel = new THREE.Vector3(tgt.x-ship.x, tgt.y-ship.y, tgt.z-ship.z);
+  const relV = new THREE.Vector3(tgt.vx-ship.vx, tgt.vy-ship.vy, tgt.vz-ship.vz);
+  const tt = leadTime(rel, relV);
+  return tt === null ? null : rel.addScaledVector(relV, tt);
+}
+// Lead point in body axes (nose is -Z), unit length, or null
+function leadBodyDir() {
+  const L = leadVector();
+  return L ? L.applyQuaternion(toBodyQ()).normalize() : null;
+}
+// Fire-control hold: body-axis RCS commands (-1..1) that rotate the nose onto the lead point.
+// Uses the same torque path as manual control, so it spends RCS propellant and respects the torque limit.
+const LEAD_GAIN = 0.8, LEAD_MAX_RATE = 0.25, LEAD_TAU_TIME = 0.5;   // 1/s, rad/s, s
+function leadHoldCmd() {
+  const Lb = leadBodyDir();
+  if (!Lb) return null;
+  const fwd = new THREE.Vector3(0, 0, -1);
+  const ang = Math.acos(clamp(fwd.dot(Lb), -1, 1));
+  const axis = new THREE.Vector3().crossVectors(fwd, Lb);
+  if (axis.lengthSq() < 1e-12) axis.set(0, 1, 0);          // exactly behind: any axis turns it around
+  const wdes = axis.normalize().multiplyScalar(Math.min(LEAD_MAX_RATE, ang*LEAD_GAIN));
+  const wm = [omega.x, omega.y, omega.z], wd = [wdes.x, wdes.y, wdes.z];
+  return wd.map((v, i) => clamp(SHIP.I*(v - wm[i])/LEAD_TAU_TIME/SHIP.rcsTorque, -1, 1));
+}
+
 function physicsStep(h) {
   const c = controlState();
 
   /* --- attitude: RCS torque, rate damping, body-frame integration --- */
   const cmd = [c.pitch, c.yaw, c.roll];
+  if (leadHold) {
+    // Manual input on an axis overrides the hold on that axis
+    const hc = leadHoldCmd();
+    if (hc) for (let i = 0; i < 3; i++) if (cmd[i] === 0) cmd[i] = hc[i];
+  }
   const w = [omega.x, omega.y, omega.z];
   const tau = [0, 0, 0];
   for (let i = 0; i < 3; i++) {
@@ -1418,21 +1454,23 @@ function drawScope(g, W, H, idx) {
   }
   // Lead indicator: where the target will be when a railgun shot fired now arrives.
   // Point the nose (and the spinal reticle) at this diamond to hit a moving target.
-  if (lockOk) {
-    const rel = new THREE.Vector3(tgt.x-ship.x, tgt.y-ship.y, tgt.z-ship.z);
-    const relV = new THREE.Vector3(tgt.vx-ship.vx, tgt.vy-ship.vy, tgt.vz-ship.vz);
-    const tt = leadTime(rel, relV);
-    if (tt !== null) {
-      const L = rel.clone().addScaledVector(relV, tt);
-      const p = proj(L.applyQuaternion(bq));
-      if (p) {
-        g.strokeStyle = masterMode !== 'OFF' ? (irOn ? '#ffffff' : AMB) : (irOn ? '#777' : DIM);
-        g.lineWidth = 2;
-        g.beginPath();
-        g.moveTo(p.x, p.y - 8); g.lineTo(p.x + 8, p.y); g.lineTo(p.x, p.y + 8); g.lineTo(p.x - 8, p.y); g.closePath();
-        g.stroke();
-      }
+  const leadW = leadVector();
+  const leadP = leadW ? proj(leadW.clone().applyQuaternion(bq)) : null;
+  if (leadP) {
+    // Steering cue: dashed line from the unclamped aim point to the lead diamond, when both are in the frame
+    const wv = new THREE.Vector3(0, 0, -1).applyQuaternion(bq);
+    const rx = cx + Math.atan2(wv.x, -wv.z)/SCOPE_FOV*R;
+    const ry = cy - Math.atan2(wv.y, -wv.z)/SCOPE_FOV*R;
+    if (rx > FX && rx < FX + FW && ry > FY && ry < FY + FH) {
+      g.strokeStyle = AMB; g.lineWidth = 1.5; g.setLineDash([6, 6]);
+      g.beginPath(); g.moveTo(rx, ry); g.lineTo(leadP.x, leadP.y); g.stroke();
+      g.setLineDash([]);
     }
+    g.strokeStyle = masterMode !== 'OFF' ? (irOn ? '#ffffff' : AMB) : (irOn ? '#777' : DIM);
+    g.lineWidth = 2;
+    g.beginPath();
+    g.moveTo(leadP.x, leadP.y - 8); g.lineTo(leadP.x + 8, leadP.y); g.lineTo(leadP.x, leadP.y + 8); g.lineTo(leadP.x - 8, leadP.y); g.closePath();
+    g.stroke();
   }
   g.restore();
   // Frame and aim box
@@ -1446,6 +1484,17 @@ function drawScope(g, W, H, idx) {
   txt(g, cx, 92, `${irOn ? 'WHOT' : 'VIS'}   AZ ${(scopeAz*180/Math.PI).toFixed(0)}  EL ${(scopeEl*180/Math.PI).toFixed(0)}`, PH, '20px monospace', 'center');
   txt(g, 700, 92, lockOk ? fmtDist(Math.hypot(tgt.x-ship.x, tgt.y-ship.y, tgt.z-ship.z)) : '--', PH, '20px monospace', 'right');
   txt(g, cx, FY + FH + 20, lockOk ? 'TRACK' : 'POINT', PH, '20px monospace', 'center');
+  // Steering readout: angle from the nose to the lead point, with the direction to turn
+  const Lb = leadBodyDir();
+  let leadTxt = 'LEAD --';
+  if (Lb) {
+    const deg = Math.acos(clamp(-Lb.z, -1, 1))*180/Math.PI;
+    const dv = Lb.y > 0.02 ? 'UP' : Lb.y < -0.02 ? 'DN' : '';
+    const dh = Lb.x < -0.02 ? 'LEFT' : Lb.x > 0.02 ? 'RIGHT' : '';
+    leadTxt = `LEAD ${[dv, dh].filter(Boolean).join(' ') || 'ON'}  ${deg.toFixed(1)} DEG`;
+  }
+  txt(g, FX, FY + FH + 20, leadTxt, Lb ? PH : DIM, '20px monospace');
+  txt(g, 700, FY + FH + 20, leadHold ? 'HOLD' : '', AMB, '20px monospace', 'right');
   // Softkeys, with the active page (TGP) inverted
   const keys = [['SWAP', 110], ['SMS', 220], ['HSD', 320], ['TGP', 420], ['DCLT', 540]];
   g.font = '20px monospace';
@@ -1766,6 +1815,8 @@ function onAction(id) {
   switch (id) {
     case 'fireRail': railReq = true; break;
     case 'rcsStab': rcsStab = !rcsStab; sfx.click(); break;
+    case 'leadHold': leadHold = !leadHold; sfx.click();
+      log(leadHold ? 'LEAD HOLD ON' : 'LEAD HOLD OFF'); break;
     case 'guardLaser': guardOpen = !guardOpen; sfx.click(); break;
     case 'armLaser':
       if (guardOpen) { laserArmed = !laserArmed; sfx.click(); log(laserArmed ? 'LASER ARMED' : 'LASER SAFED'); }
