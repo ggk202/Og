@@ -1404,13 +1404,47 @@ function animateCockpit(dt) {
 /* ================= AUDIO (interior sounds; hull-conducted via low-pass bus) ================= */
 let actx = null, noiseBuf = null, intBus, hullBus, hullLP;
 let engineG, engineLP, rcsG, laserG, pumpG, alarmG;
+// Hull shudder after a railgun shot: a deep sawtooth boom plus a rattle that is tremolo-modulated.
+// Everything goes through the hull bus, so it is heard as conducted vibration.
+function hullShudder(delay = 0) {
+  const t = actx.currentTime + delay;
+  const o = actx.createOscillator(); o.type = 'sawtooth';
+  o.frequency.setValueAtTime(34, t); o.frequency.exponentialRampToValueAtTime(22, t + 1.6);
+  const oF = actx.createBiquadFilter(); oF.type = 'lowpass'; oF.frequency.value = 150;
+  const oG = actx.createGain();
+  oG.gain.setValueAtTime(0.0001, t); oG.gain.exponentialRampToValueAtTime(0.35, t + 0.02); oG.gain.exponentialRampToValueAtTime(0.0001, t + 1.8);
+  o.connect(oF).connect(oG).connect(hullBus); o.start(t); o.stop(t + 1.85);
+
+  const n = actx.createBufferSource(); n.buffer = noiseBuf;
+  const nF = actx.createBiquadFilter(); nF.type = 'bandpass'; nF.frequency.value = 160; nF.Q.value = 0.8;
+  const nG = actx.createGain();
+  nG.gain.setValueAtTime(0.0001, t); nG.gain.exponentialRampToValueAtTime(0.4, t + 0.02); nG.gain.exponentialRampToValueAtTime(0.0001, t + 1.2);
+  const trem = actx.createGain(); trem.gain.value = 0.5;
+  const tLFO = actx.createOscillator(); tLFO.frequency.value = 14;
+  const tAmp = actx.createGain(); tAmp.gain.value = 0.45;
+  tLFO.connect(tAmp).connect(trem.gain);
+  n.connect(nF).connect(nG).connect(trem).connect(hullBus);
+  n.start(t, Math.random()*1.5, 1.3); tLFO.start(t); tLFO.stop(t + 1.3);
+}
 const sfx = {
   railShot() {
     if (!actx) return;
-    thump(hullBus, 46, 0.9, 1.0);
-    thump(hullBus, 110, 0.4, 0.3, 0.05);
-    burst(hullBus, 'lowpass', 250, 0.7, 0.5, 0.8);
-    burst(intBus, 'bandpass', 140, 1, 0.12, 0.25);
+    const t0 = actx.currentTime, C = 0.28;   // charge time before the shot
+    // Charge whine, rising in pitch and muffled in the cabin
+    const ch = actx.createOscillator(); ch.type = 'sawtooth';
+    ch.frequency.setValueAtTime(700, t0); ch.frequency.exponentialRampToValueAtTime(2200, t0 + C);
+    const chF = actx.createBiquadFilter(); chF.type = 'lowpass'; chF.frequency.value = 900;
+    const chG = actx.createGain();
+    chG.gain.setValueAtTime(0.0001, t0); chG.gain.exponentialRampToValueAtTime(0.05, t0 + C - 0.03); chG.gain.exponentialRampToValueAtTime(0.0001, t0 + C + 0.02);
+    ch.connect(chF).connect(chG).connect(intBus); ch.start(t0); ch.stop(t0 + C + 0.05);
+    // Launch: a sharp crack through the hull, plus a muffled click in the cabin
+    burst(hullBus, 'bandpass', 3000, 0.9, 0.02, 0.35, C);
+    burst(intBus, 'bandpass', 2000, 1.0, 0.02, 0.05, C);
+    thump(hullBus, 46, 0.9, 1.0, C);
+    thump(hullBus, 110, 0.4, 0.3, C + 0.05);
+    burst(hullBus, 'lowpass', 250, 0.7, 0.5, 0.8, C);
+    burst(intBus, 'bandpass', 140, 1, 0.12, 0.25, C);
+    hullShudder(C);
   },
   hullThump(big = false) {
     if (!actx) return;
