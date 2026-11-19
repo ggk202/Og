@@ -132,7 +132,51 @@ const MODULE_CATALOG = {
                stats: { rounds: 2000 }, desc: 'Gatling point defence · 2000 rds · 5 km' },
   tank_mk1:  { name: 'DROP TANK',      short: 'TANK', role: 'tank', fits: ['pylon'], file: 'att_drop_tank.glb',
                mass: 36.5, prop: 303.5, com: [0, 0.57, 0], desc: '303 kg propellant · jettisonable' },
+  // Spinal alternative: cold-launch heavy torpedoes at the selected target (fire with the spinal weapon key)
+  torp_mk1:  { name: 'HTL-1 TORPEDO TUBE', short: 'TORP', role: 'torpedo', fits: ['spinal'], file: 'att_spinal_torpedo.glb',
+               mass: 1100, com: [0, -0.24, -0.24], muzzle: [0, 0, 2.16],
+               stats: { magazine: 4, reload: 8 }, desc: '4 heavy torpedoes · 8 s autoloader · capital-ship warhead' },
+  // Nose alternative: fire-control radar and IRST
+  radar_mk1: { name: 'AN/OSG-7 RADAR',  short: 'RADAR', role: 'radar', fits: ['gimbal'], file: 'att_bow_radar.glb',
+               mass: 180, com: [0, -0.06, 0.28],
+               stats: { sensorRange: 500e3, warnRange: 20e3 }, desc: 'Sensors and fire control to 500 km · earlier torpedo warning' },
+  // Turret alternatives
+  lpd_mk1:   { name: 'LPD-40 LASER PD', short: 'LPD', role: 'laserpd', fits: ['turret'], file: 'att_laser_pd.glb',
+               mass: 280, com: [0, 0.46, 0], emitter: [0, 0.62, 0],
+               stats: { range: 8000, dwell: 0.6, elec: 400e3 }, desc: 'Burns torpedoes in 0.6 s at 8 km · 400 kW while lasing' },
+  rim4_mk1:  { name: 'RIM-4 INTERCEPTORS', short: 'INTCP', role: 'interceptor', fits: ['turret'], file: 'att_pdc_interceptor.glb',
+               mass: 320, com: [0.015, 0.52, 0], launch: [0, 0.95, 0],
+               stats: { rounds: 4, range: 15000 }, desc: '4 guided interceptors · hard kill on torpedoes to 15 km' },
+  // Pylon alternatives
+  vls_mk1:   { name: 'EXT VLS 8-CELL',   short: 'VLS', role: 'vls', fits: ['pylon'], file: 'att_vls_pod.glb',
+               mass: 650, com: [0, 0.45, 0], launch: [0, 0.95, 0],
+               stats: { cells: 8 }, desc: '8 guided anti-ship missiles · fire with the missile key' },
+  cap_mk1:   { name: 'AUX CAPACITOR POD', short: 'CAP', role: 'capacitor', fits: ['pylon'], file: 'att_capacitor_pod.glb',
+               mass: 420, com: [0, 0.47, 0],
+               stats: { battery: 5e6, railCycle: 0.8 }, desc: '+5 MJ capacitor bank · railgun cycles 20% faster' },
+  ecm_mk1:   { name: 'TACTICAL ECM POD', short: 'ECM', role: 'ecm', fits: ['pylon'], file: 'att_ecm_pod.glb',
+               mass: 260, com: [0, 0.65, -0.02],
+               stats: { decoys: 16, range: 4000, pSeduce: 0.45, warnRange: 30e3 }, desc: '16 decoy salvos break torpedo locks · ELINT warning to 30 km' },
 };
+// Player ordnance. Each flies with the supplied computeTorpedoGuidance (unchanged): these values are only the
+// inputs it takes (thrust limit, burn seconds) plus launch speed, lifetime, proximity fuse and warhead.
+const ORD = {
+  torpedo:     { name: 'TORPEDO',     launchV: 30, maxAccel: 60,  burn: 60, life: 400, killR: 6, dmg: 400, color: '#ff7ad9' },
+  missile:     { name: 'MISSILE',     launchV: 20, maxAccel: 120, burn: 20, life: 200, killR: 4, dmg: 120, color: '#ffe36a' },
+  interceptor: { name: 'INTERCEPTOR', launchV: 40, maxAccel: 200, burn: 8,  life: 40,  killR: 3, dmg: 0,   color: '#7fd7ff' },
+};
+let ordnance = [];
+// ECM decoy clouds: released from the ship at DECOY_V in a random direction, coasting, lasting DECOY_LIFE s
+const DECOY_V = 40, DECOY_LIFE = 40;
+let decoys = [];
+// Per-launch state of the new modules (rebuilt with the PDC mounts at launch)
+const INT_MOUNTS = [], LPD_MOUNTS = [];
+let spinalAmmo = 0, spinalReload = 0, vlsCells = {}, ecmDecoys = 0, missileReq = false, lpdFiring = false, lpdLoadE = 0;
+const statOf = (role, key) => { const sl = roleSlot(role); return sl && modAt(sl).stats ? modAt(sl).stats[key] : undefined; };
+// Own-sensor range (the bow radar extends it) and the torpedo warning range (radar or ECM extend it)
+const sensorRange = () => (roleDamage('radar') > 0 && statOf('radar', 'sensorRange')) || LOCAL_R;
+const warnRange = () => Math.max(TORP_WARN_R, roleDamage('radar') > 0 ? statOf('radar', 'warnRange') || 0 : 0,
+  roleDamage('ecm') > 0 ? statOf('ecm', 'warnRange') || 0 : 0);
 const DEFAULT_LOADOUT = { spinal: 'rail_mk1', nose: 'laser_mk1', pdcTop: 'pdc_mk1', pdcBot: 'pdc_mk1', tankTop: 'tank_mk1', tankBot: 'tank_mk1' };
 const LOADOUT_KEY = 'og-loadout-v2';
 // Modules that can go on a hardpoint
@@ -206,6 +250,22 @@ function resetPdcMounts() {
     PDC_MOUNTS.push({ name: `${mod.short} ${hp.tag}`, tag: hp.tag[0], sys: slot, pos: hpToBody(slot, mod.barrel),
       dir: [0, hp.flip ? -1 : 1, 0], cd: 0, rounds: (mod.stats && mod.stats.rounds) || PDC_ROUNDS, heat: 0, hot: false });
   }
+  // Interceptor and laser point-defence turrets, torpedo tube, VLS cells and ECM decoys
+  INT_MOUNTS.length = 0; LPD_MOUNTS.length = 0;
+  for (const slot of slotsWithRole('interceptor')) {
+    const mod = modAt(slot), hp = HARDPOINTS[slot];
+    INT_MOUNTS.push({ name: `${mod.short} ${hp.tag}`, tag: hp.tag[0], sys: slot, pos: hpToBody(slot, mod.launch),
+      dir: [0, hp.flip ? -1 : 1, 0], rounds: mod.stats.rounds, cd: 0 });
+  }
+  for (const slot of slotsWithRole('laserpd')) {
+    const mod = modAt(slot), hp = HARDPOINTS[slot];
+    LPD_MOUNTS.push({ name: `${mod.short} ${hp.tag}`, tag: hp.tag[0], sys: slot, pos: hpToBody(slot, mod.emitter),
+      dir: [0, hp.flip ? -1 : 1, 0], target: null, ...mod.stats });
+  }
+  spinalAmmo = statOf('torpedo', 'magazine') || 0; spinalReload = 0;
+  vlsCells = Object.fromEntries(slotsWithRole('vls').map(sl => [sl, modAt(sl).stats.cells]));
+  ecmDecoys = slotsWithRole('ecm').reduce((a, sl) => a + modAt(sl).stats.decoys, 0);
+  ordnance = []; missileReq = false; decoys = [];
 }
 resetPdcMounts();
 // Short status for displays: OFF (destroyed), HOT (overheated), EMPTY, or the normal state
@@ -223,7 +283,7 @@ let torpedoes = [], tracers = [], hullHits = 0;
 let pdcActive = false, pdcSlewRate = 0, pdcLastFire = -1e9;   // sound state set by the physics step
 let torpWarn = false;                 // a torpedo is inbound within TORP_WARN_R
 let torpMute = false;                 // mute button: silences the warning tone (the lamp still blinks)
-const TORP_WARN_R = 10000;
+const TORP_WARN_R = 10000;   // without radar or ECM (see warnRange)
 
 /* ---------- Damage model ----------
    Each torpedo that reaches the hull costs HIT_HULL of hull integrity and damages one system. The system is
@@ -256,7 +316,8 @@ const dmgState = v => v >= 0.999 ? 'OK' : v > 0 ? 'DEGR' : 'OFF';
 const anyDamage = () => hullInt < 1 || DMG_SYSTEMS.some(s => damage[s.id] < 1);
 // Values that depend on damage
 const reactorOut = () => POWER.reactor*damage.reactor;
-const battCapEff = () => POWER.battCap*(0.3 + 0.7*damage.capacitors);
+const battCapEff = () => POWER.battCap*(0.3 + 0.7*damage.capacitors)
+  + slotsWithRole('capacitor').reduce((a, sl) => a + modAt(sl).stats.battery*(damage[sl] ?? 1), 0);   // aux capacitor pods
 const radAreaEff = () => radDeployed ? THERM.radArea*Math.max(0.1, damage.radiators) : THERM.radStowedArea;
 const rcsK = () => 0.2 + 0.8*damage.rcs;
 // Returns true when the hit destroyed the ship (the caller stops processing this step)
@@ -306,7 +367,7 @@ function restartAfterDeath() {
   // frigate must too, or they are left hundreds of km away (resetTargets also clears torpedoes and flashes)
   applyModuleStats(); resetShip(); resetDamage(); resetPdcMounts(); resetTargets();
   projectiles = [];
-  battery = POWER.battCap; hullT = THERM.tStart; railCD = 0; warpIdx = 0;
+  battery = battCapEff(); hullT = THERM.tStart; railCD = 0; warpIdx = 0;
   mainProp = SHIP.mainProp0; rcsProp = SHIP.rcsProp0; podProp = tankProp0Total(); podsOn = tankCount() > 0;
   leadHold = false; leadPrev = null; hullHits = 0;
   for (const t of targets) if (t.hostile) t.fireT = 10;
@@ -459,7 +520,8 @@ const ACTIONS = [
   { id:'mainEngine', label:'Main drive (hold)',        def:'Space' },
   { id:'rcsStab',    label:'RCS rate damping (toggle)',def:'KeyX', edge:true },
   { id:'leadHold',   label:'Lead hold: point nose at lead (toggle)', def:'KeyL', edge:true },
-  { id:'fireRail',   label:'Fire railgun',             def:'Mouse0', edge:true },
+  { id:'fireRail',   label:'Fire spinal weapon (railgun / torpedo)', def:'Mouse0', edge:true },
+  { id:'fireMissile',label:'Fire VLS missile',         def:'KeyF', edge:true },
   { id:'fireLaser',  label:'Fire laser (hold)',        def:'Mouse2' },
   { id:'guardLaser', label:'Laser arm guard (toggle)', def:'KeyG', edge:true },
   { id:'armLaser',   label:'Laser arm switch (toggle)',def:'KeyB', edge:true },
@@ -575,7 +637,7 @@ function resetSats() {
   dlQueue = []; dlClock = 0; dlWasUp = null;
 }
 const rangeTo = o => Math.hypot(o.x-ship.x, o.y-ship.y, o.z-ship.z);
-const isLocal = t => !!t && !t.gone && rangeTo(t) <= LOCAL_R;
+const isLocal = t => !!t && !t.gone && rangeTo(t) <= sensorRange();
 // Line of sight between two points: the segment must clear Earth by LOS_MARGIN (atmosphere)
 function losClear(a, b) {
   const dx = b.x-a.x, dy = b.y-a.y, dz = b.z-a.z, dd = dx*dx + dy*dy + dz*dz;
@@ -637,7 +699,7 @@ function cycleTarget() {
     const i = (curTarget + k) % n;
     if (isLocal(targets[i])) { curTarget = i; return; }
   }
-  log('NO TARGETS WITHIN 200 KM · ENTER TRACK NUMBER');
+  log(`NO TARGETS WITHIN ${(sensorRange()/1e3).toFixed(0)} KM · ENTER TRACK NUMBER`);
 }
 // Keypad: a four-digit number selects that track (any range); other entries are transmitted as before
 function selectTrack(num) {
@@ -771,7 +833,8 @@ function fireRail() {
   ship.vx -= fwd.x*dv; ship.vy -= fwd.y*dv; ship.vz -= fwd.z*dv;
   battery -= WEAPON.railEnergy;
   hullT += WEAPON.railHeat/THERM.capacity;
-  railCD = WEAPON.railCooldown/Math.max(0.34, roleDamage('railgun'));   // a damaged railgun cycles slower
+  railCD = WEAPON.railCooldown/Math.max(0.34, roleDamage('railgun'))     // a damaged railgun cycles slower,
+    *(roleDamage('capacitor') > 0 ? statOf('capacitor', 'railCycle') : 1);    // an aux capacitor bank faster
   sfx.railShot();
   log(`RAIL FIRED  MUZZLE ${V} m/s`);
 }
@@ -900,6 +963,44 @@ function leadHoldCmd(h) {
   return wd.map((v, i) => clamp(In[i]*((v - wm[i])/LEAD_TAU_TIME + dd[i])/rcsTorqueAxis(i), -1, 1));
 }
 
+/* ---------- Player ordnance: torpedoes, missiles, interceptors ----------
+   Launched from the module's launch point; each step it flies with computeTorpedoGuidance (as supplied) toward
+   its target, with the thrust limit and burn of its ORD type. Hits are swept proximity checks. */
+function launchOrdnance(kind, fromBody, dirBody, target, src) {
+  const T = ORD[kind], p = bodyOff(fromBody), d = bodyOff(dirBody).normalize();
+  const o = { kind, src, target, age: 0, burn: T.burn, dead: false,
+    x: ship.x + p.x, y: ship.y + p.y, z: ship.z + p.z, vx: ship.vx + d.x*T.launchV, vy: ship.vy + d.y*T.launchV, vz: ship.vz + d.z*T.launchV };
+  o.px = o.x; o.py = o.y; o.pz = o.z;
+  ordnance.push(o);
+  return o;
+}
+// The guidance needs a target the ship knows about: own sensors, or a datalink track
+function ordnanceTarget(label) {
+  const t = targets[curTarget];
+  if (!t || t.gone || !tgtKnown(t)) { log(`${label} · NO TARGET`); return null; }
+  return t;
+}
+function fireSpinalTorpedo() {
+  const sl = roleSlot('torpedo');
+  if (masterMode === 'OFF') { log('TORP · MASTER ARM OFF'); return; }
+  if (roleDamage('torpedo') <= 0) { log('TORP TUBE OFFLINE'); return; }
+  if (spinalAmmo <= 0) { log('TORP MAGAZINE EMPTY'); return; }
+  if (spinalReload > 0) { log(`TORP RELOADING ${spinalReload.toFixed(1)} s`); return; }
+  const t = ordnanceTarget('TORP'); if (!t) return;
+  launchOrdnance('torpedo', hpToBody(sl, modAt(sl).muzzle), [0, 0, -1], t, sl);
+  spinalAmmo--; spinalReload = statOf('torpedo', 'reload')/Math.max(0.34, roleDamage('torpedo'));
+  log(`TORPEDO AWAY · ${t.name} · ${spinalAmmo} LEFT`); sfx.torpLaunch();
+}
+function fireMissile() {
+  if (masterMode === 'OFF') { log('VLS · MASTER ARM OFF'); return; }
+  const sl = slotsWithRole('vls').find(s2 => vlsCells[s2] > 0 && (damage[s2] ?? 1) > 0);
+  if (!sl) { log(hasRole('vls') ? 'VLS EMPTY OR OFFLINE' : 'VLS NOT FITTED'); return; }
+  const t = ordnanceTarget('VLS'); if (!t) return;
+  launchOrdnance('missile', hpToBody(sl, modAt(sl).launch), [0, HARDPOINTS[sl].flip ? -1 : 1, 0], t, sl);
+  vlsCells[sl]--;
+  log(`MISSILE AWAY · ${t.name} · VLS ${Object.values(vlsCells).reduce((a, b) => a + b, 0)} LEFT`); sfx.missileLaunch();
+}
+
 function physicsStep(h) {
   const c = controlState();
 
@@ -943,9 +1044,12 @@ function physicsStep(h) {
   /* --- railgun: fires from the state at the start of this step, the same time the target and projectile
      integrate from, so the fire-control solution and the flight agree --- */
   railCD = Math.max(0, railCD - h);
+  spinalReload = Math.max(0, spinalReload - h);
+  if (railReq && hasRole('torpedo')) { railReq = false; fireSpinalTorpedo(); }
+  if (missileReq) { missileReq = false; fireMissile(); }
   if (railReq) {
     railReq = false;
-    if (!hasRole('railgun')) log('RAIL NOT FITTED');
+    if (!hasRole('railgun')) log('SPINAL WEAPON NOT FITTED');
     else if (roleDamage('railgun') <= 0) log('RAIL OFFLINE');
     else if (railCD <= 0 && battery >= WEAPON.railEnergy && masterMode !== 'OFF') fireRail();
     else if (railCD > 0) log(`RAIL CYCLING ${railCD.toFixed(1)} s`);
@@ -981,10 +1085,23 @@ function physicsStep(h) {
       if (tp.dead) continue;
       const rel = new THREE.Vector3(tp.x-ship.x, tp.y-ship.y, tp.z-ship.z);
       const d = rel.length();
-      if (d > TORP_WARN_R) continue;
+      if (d > warnRange()) continue;
       const relV = new THREE.Vector3(tp.vx-ship.vx, tp.vy-ship.vy, tp.vz-ship.vz);
       if (-rel.dot(relV)/d > 0) {
         torpWarn = true;
+        // ECM: a decoy salvo at each torpedo entering decoy range; it may break the torpedo's lock
+        const ecmR = statOf('ecm', 'range');
+        if (ecmR && d < ecmR && !tp.ecmTried && ecmDecoys > 0 && masterMode !== 'OFF' && roleDamage('ecm') > 0) {
+          tp.ecmTried = true; ecmDecoys--;
+          const pS = statOf('ecm', 'pSeduce')*roleDamage('ecm');
+          // The decoy cloud drifts away from the ship; a seduced torpedo homes on it instead of the ship
+          const side = new THREE.Vector3(Math.random()-0.5, Math.random()-0.5, Math.random()-0.5).normalize().multiplyScalar(DECOY_V);
+          const dc = { x: ship.x, y: ship.y, z: ship.z, vx: ship.vx + side.x, vy: ship.vy + side.y, vz: ship.vz + side.z, age: 0 };
+          decoys.push(dc);
+          if (Math.random() < pS) { tp.seduced = dc; log(`DECOYS · TORPEDO SEDUCED · ${ecmDecoys} LEFT`); }
+          else log(`DECOYS · NO EFFECT · ${ecmDecoys} LEFT`);
+          sfx.decoy();
+        }
         if (!tp.warned) { tp.warned = true; log(`INCOMING TORPEDO  ${(d/1000).toFixed(1)} KM`); }
       }
     }
@@ -1042,19 +1159,50 @@ function physicsStep(h) {
   rk4(ship, h, fw.x/mass, fw.y/mass, fw.z/mass);
 
   /* --- other bodies and projectiles (gravity only) --- */
-  for (const t of targets) { t.px = t.x; t.py = t.y; t.pz = t.z; rk4(t, h, 0, 0, 0); }
+  for (const t of targets) { t.px = t.x; t.py = t.y; t.pz = t.z; t.s0 = { x: t.x, y: t.y, z: t.z, vx: t.vx, vy: t.vy, vz: t.vz }; rk4(t, h, 0, 0, 0); }
   datalinkStep(h);
+  // Interceptors launch automatically at closing torpedoes in range (not in TNG: they are expendable)
+  for (const m of INT_MOUNTS) {
+    m.cd = Math.max(0, m.cd - h);
+    if (m.cd > 0 || m.rounds <= 0 || masterMode !== 'ON' || (damage[m.sys] ?? 1) <= 0) continue;
+    const nW = new THREE.Vector3(...m.dir).applyQuaternion(shipQ);
+    let best = null, bestR = Infinity;
+    for (const tp of torpedoes) {
+      if (tp.dead || tp.intBy) continue;
+      const rel = new THREE.Vector3(tp.x-ship.x, tp.y-ship.y, tp.z-ship.z), r = rel.length();
+      const relV = new THREE.Vector3(tp.vx-ship.vx, tp.vy-ship.vy, tp.vz-ship.vz);
+      if (r > modAt(m.sys).stats.range || -rel.dot(relV)/r <= 0 || rel.dot(nW) < r*Math.cos(PDC_ARC) || r >= bestR) continue;
+      best = tp; bestR = r;
+    }
+    if (!best) continue;
+    best.intBy = launchOrdnance('interceptor', m.pos, m.dir, best, m.sys);
+    m.rounds--; m.cd = 1.5;
+    log(`${m.name} · INTERCEPTOR AWAY · ${m.rounds} LEFT`); sfx.missileLaunch(true);
+  }
+  // Player ordnance flies on the supplied guidance toward its target's start-of-step state (targets have moved
+  // already: their s0 snapshot; hostile torpedoes have not yet moved this step)
+  for (const o of ordnance) {
+    o.px = o.x; o.py = o.y; o.pz = o.z;
+    const tg = o.target, alive = tg && !tg.gone && !tg.dead;
+    const ts = alive ? (tg.s0 || tg) : null;
+    const a = ts ? computeTorpedoGuidance(o, ts, h, { maxAccel: ORD[o.kind].maxAccel, gravFn: gravAcc, t: simT }) : [0, 0, 0];
+    o.cmd = a;
+    rk4(o, h, a[0], a[1], a[2]); o.age += h;
+  }
   for (const p of projectiles) { p.px = p.x; p.py = p.y; p.pz = p.z; rk4(p, h, 0, 0, 0); p.age += h; }
   // Torpedoes: thrust from computeTorpedoGuidance (tp.burn = seconds of full thrust left), gravity added by rk4
   const shipThrustA = [fw.x/mass, fw.y/mass, fw.z/mass];
   for (const tp of torpedoes) {
     tp.px = tp.x; tp.py = tp.y; tp.pz = tp.z;
-    const [ax, ay, az] = computeTorpedoGuidance(tp, shipStart, h,
-      { maxAccel: TORP_ACCEL, gravFn: gravAcc, t: simT, targetAccel: shipThrustA });
+    // Decoyed by ECM: the guidance homes on the decoy cloud instead of the ship
+    const [ax, ay, az] = tp.seduced ? computeTorpedoGuidance(tp, tp.seduced, h, { maxAccel: TORP_ACCEL, gravFn: gravAcc, t: simT }) :
+      computeTorpedoGuidance(tp, shipStart, h, { maxAccel: TORP_ACCEL, gravFn: gravAcc, t: simT, targetAccel: shipThrustA });
     tp.cmd = [ax, ay, az];                           // kept for the thruster plume on the telescope
     rk4(tp, h, ax, ay, az); tp.age += h;
   }
   for (const tr of tracers) { tr.px = tr.x; tr.py = tr.y; tr.pz = tr.z; rk4(tr, h, 0, 0, 0); tr.age += h; }
+  for (const dc of decoys) { rk4(dc, h, 0, 0, 0); dc.age += h; }
+  decoys = decoys.filter(dc => dc.age < DECOY_LIFE);
 
   /* --- projectile hits (swept test over the step) --- */
   for (const p of projectiles) {
@@ -1100,6 +1248,32 @@ function physicsStep(h) {
     if (best && masterMode === 'ON') best.integrity -= WEAPON.laserDmgRate*h;
   }
 
+  /* --- laser point defence: each turret holds its beam on the nearest closing torpedo in range and arc;
+     after `dwell` seconds on it the torpedo is destroyed (in TNG: a practice burn) --- */
+  lpdFiring = false; lpdLoadE = 0;
+  for (const m of LPD_MOUNTS) {
+    m.target = null;
+    if (masterMode === 'OFF' || (damage[m.sys] ?? 1) <= 0 || battery <= 0 || brownout || hullT >= THERM.tMax) continue;
+    const nW = new THREE.Vector3(...m.dir).applyQuaternion(shipQ);
+    let best = null, bestR = Infinity;
+    for (const tp of torpedoes) {
+      if (tp.dead || tp.lpdDone) continue;
+      const rel = new THREE.Vector3(tp.x-ship.x, tp.y-ship.y, tp.z-ship.z), r = rel.length();
+      const relV = new THREE.Vector3(tp.vx-ship.vx, tp.vy-ship.vy, tp.vz-ship.vz);
+      if (r > m.range || -rel.dot(relV)/r <= 0 || rel.dot(nW) < r*Math.cos(PDC_ARC) || r >= bestR) continue;
+      best = tp; bestR = r;
+    }
+    if (!best) continue;
+    m.target = best; lpdFiring = true; lpdLoadE += m.elec;
+    best.lpdT = (best.lpdT || 0) + h*(damage[m.sys] ?? 1);   // a damaged turret burns slower
+    if (best.lpdT >= m.dwell) {
+      best.lpdDone = true;
+      if (masterMode === 'ON') { best.dead = true; log(`${m.name} · TORPEDO BURNED`); }
+      else log(`${m.name} · PRACTICE BURN`);
+      flashes.push({ x: best.x, y: best.y, z: best.z, age: 0, dur: 0.5, peak: 0.7, kind: 'hit' });
+    }
+  }
+
   /* --- point-defence hits on torpedoes (in TNG the tracers pass through: practice, no kill) --- */
   for (const tr of tracers) {
     if (tr.dead) continue;
@@ -1114,6 +1288,28 @@ function physicsStep(h) {
       }
     }
   }
+  /* --- player ordnance: proximity fuse against its own target (swept over the step), lifetime --- */
+  for (const o of ordnance) {
+    if (o.dead) continue;
+    const T = ORD[o.kind], tg = o.target;
+    if (tg && !tg.gone && !tg.dead && segDist(o, tg) < T.killR + (tg.radius || 0)) {
+      o.dead = true;
+      flashes.push({ x: o.x, y: o.y, z: o.z, age: 0, dur: 0.8, peak: 0.9, kind: 'hit' });
+      if (o.kind === 'interceptor') {
+        if (masterMode === 'ON') tg.dead = true;
+        log(masterMode === 'ON' ? 'INTERCEPT · TORPEDO KILLED' : 'INTERCEPT · PRACTICE');
+      } else {
+        if (masterMode === 'ON') tg.integrity -= T.dmg;
+        log(`${T.name} HIT ${tg.name}${masterMode === 'ON' ? '' : ' · PRACTICE'}`);
+      }
+      continue;
+    }
+    if (o.age > T.life) { o.dead = true; if (o.kind !== 'interceptor') log(`${T.name} LOST · SELF-DESTRUCT`); }
+    else if (tg && (tg.gone || tg.dead) && o.kind === 'interceptor') o.dead = true;   // its torpedo is gone
+  }
+  for (const tp of torpedoes) if (tp.intBy && tp.intBy.dead && !tp.dead) tp.intBy = null;   // free for another try
+  ordnance = ordnance.filter(o => !o.dead);
+
   /* --- torpedo impacts on the hull --- */
   for (const tp of torpedoes) {
     if (tp.dead) continue;
@@ -1142,7 +1338,7 @@ function physicsStep(h) {
   projectiles = projectiles.filter(p => !p.dead && p.age < 300 && Math.hypot(p.x, p.y, p.z) < 3e8);
 
   /* --- power --- */
-  const loadE = POWER.avionics + (laserFiring ? WEAPON.laserElec : 0);
+  const loadE = POWER.avionics + (laserFiring ? WEAPON.laserElec : 0) + lpdLoadE;
   battery += (reactorOut() - loadE)*h;
   brownout = battery <= 0 && loadE > reactorOut();
   battery = clamp(battery, 0, battCapEff());           // damaged capacitors hold less
@@ -1804,6 +2000,11 @@ function drawTactical(g, W, H, idx) {
     const b = toB(tr.x-ship.x, tr.y-ship.y, tr.z-ship.z);
     g.fillRect(sx(b) - 1.5, sy(b) - 1.5, 3, 3);
   }
+  for (const o of ordnance) {
+    const b = toB(o.x-ship.x, o.y-ship.y, o.z-ship.z);
+    g.fillStyle = ORD[o.kind].color; g.beginPath();
+    g.moveTo(sx(b), sy(b) - 5); g.lineTo(sx(b) + 5, sy(b)); g.lineTo(sx(b), sy(b) + 5); g.lineTo(sx(b) - 5, sy(b)); g.closePath(); g.fill();
+  }
   for (const tp of torpedoes) {
     if (tp.dead) continue;
     const rv = [tp.x-ship.x, tp.y-ship.y, tp.z-ship.z], vv = [tp.vx-ship.vx, tp.vy-ship.vy, tp.vz-ship.vz];
@@ -1851,7 +2052,7 @@ function drawTactical(g, W, H, idx) {
   if (!cur && selT && !selT.gone && !isLocal(selT)) {   // far target: datalink track
     const k = tgtKnown(selT), age = trackAge(selT);
     tgtLines = [`TGT ${selT.name}`, `TRK ${selT.trk} ${age > DL_STALE ? 'STALE' : 'DL'} ${age.toFixed(0)}s`,
-      `RNG ${k ? fmtDist(rangeTo(k)) : '--'}`, 'FCS NO SOL >200KM'];
+      `RNG ${k ? fmtDist(rangeTo(k)) : '--'}`, `FCS NO SOL >${(sensorRange()/1e3).toFixed(0)}KM`];
   }
   if (cur) {
     const { t, b, r } = cur;
@@ -1882,8 +2083,10 @@ function drawTactical(g, W, H, idx) {
   const line = (s, col = PH) => { txt(g, RX, y, s, col, '24px monospace'); y += 31; };
   line(`ALT ${((Math.hypot(ship.x,ship.y,ship.z)-R_E)/1e3).toFixed(1)} km`);
   line(`DV  ${dvRemaining().toFixed(0)} m/s`);
-  if (!hasRole('railgun')) line('RAIL NOT FITTED', DIM); else line(roleDamage('railgun') <= 0 ? 'RAIL OFFLINE' : `RAIL ${railCD > 0 ? 'CYC ' + railCD.toFixed(1) + 's' : 'READY'}`, roleDamage('railgun') <= 0 ? RED : PH);
-  if (!hasRole('laser')) line('LASER NOT FITTED', DIM); else line(roleDamage('laser') <= 0 ? 'LASER OFFLINE' : `LASER ${laserArmed ? (laserFiring ? 'FIRING' : 'ARMED') : 'SAFE'}`, laserArmed || roleDamage('laser') <= 0 ? RED : PH);
+  if (hasRole('torpedo')) line(roleDamage('torpedo') <= 0 ? 'TORP OFFLINE' : `TORP ${spinalAmmo} ${spinalReload > 0 ? 'RLD ' + spinalReload.toFixed(0) + 's' : spinalAmmo ? 'READY' : 'EMPTY'}`, roleDamage('torpedo') <= 0 ? RED : PH);
+  else if (!hasRole('railgun')) line('SPINAL EMPTY', DIM); else line(roleDamage('railgun') <= 0 ? 'RAIL OFFLINE' : `RAIL ${railCD > 0 ? 'CYC ' + railCD.toFixed(1) + 's' : 'READY'}`, roleDamage('railgun') <= 0 ? RED : PH);
+  if (hasRole('radar')) line(roleDamage('radar') <= 0 ? 'RADAR OFFLINE' : `RADAR ${(sensorRange()/1e3).toFixed(0)} KM`, roleDamage('radar') <= 0 ? RED : PH);
+  else if (!hasRole('laser')) line('NOSE EMPTY', DIM); else line(roleDamage('laser') <= 0 ? 'LASER OFFLINE' : `LASER ${laserArmed ? (laserFiring ? 'FIRING' : 'ARMED') : 'SAFE'}`, laserArmed || roleDamage('laser') <= 0 ? RED : PH);
   y += 10;
   for (const l of tgtLines) line(l);
   y += 10;
@@ -1963,14 +2166,35 @@ function drawWeapons(g, W, H, idx) {
   const line = (s, col = PH) => { txt(g, 30, y, s, col, '25px monospace'); y += 27; };
   const dmgTag = id => damage[id] < 1 && damage[id] > 0 ? '  DMG' : '';
   const rs = roleSlot('railgun'), ls = roleSlot('laser');
-  if (!rs) line('RAIL  NOT FITTED', DIM);
+  const ts = roleSlot('torpedo'), ra = roleSlot('radar');
+  if (ts) {
+    if (damage[ts] <= 0) line('TORP  OFFLINE', RED);
+    else line(`TORP  ${spinalAmmo}/${statOf('torpedo', 'magazine')} ${spinalReload > 0 ? 'RELOAD ' + spinalReload.toFixed(1) + ' s' : spinalAmmo ? 'READY' : 'EMPTY'}${dmgTag(ts)}`, spinalAmmo ? PH : AMB);
+  }
+  else if (!rs) line('SPINAL EMPTY', DIM);
   else if (damage[rs] <= 0) line('RAIL  OFFLINE', RED);
   else line(`RAIL  ${railCD > 0 ? 'CYCLING ' + railCD.toFixed(1) + ' s' : 'READY'}${dmgTag(rs)}`, railCD > 0 || damage[rs] < 1 ? AMB : PH);
-  if (!ls) line('LASER NOT FITTED', DIM);
+  if (ra) line(damage[ra] <= 0 ? 'RADAR OFFLINE' : `RADAR ${(sensorRange()/1e3).toFixed(0)} KM  WARN ${(warnRange()/1e3).toFixed(0)} KM${dmgTag(ra)}`, damage[ra] <= 0 ? RED : PH);
+  else if (!ls) line('NOSE  EMPTY', DIM);
   else if (damage[ls] <= 0) line('LASER OFFLINE', RED);
   else line(`LASER ${laserArmed ? (guardOpen ? 'ARMED' : 'ARMED (GUARD)') : 'SAFE'}${laserFiring ? ' FIRING' : ''}${dmgTag(ls)}`, laserArmed ? RED : PH);
-  line(`IN FLIGHT ${projectiles.length}`);
-  if (!PDC_MOUNTS.length) line('PDC   NOT FITTED', DIM);
+  line(`IN FLIGHT ${projectiles.length + ordnance.length}`);
+  // Turrets: interceptors and laser PD (PDC lines follow)
+  for (const m of INT_MOUNTS) {
+    const off = (damage[m.sys] ?? 1) <= 0;
+    line(`${m.name} ${off ? 'OFFLINE' : m.rounds ? (masterMode === 'ON' ? 'AUTO' : 'SAFE') : 'EMPTY'}  ${m.rounds} READY`, off || !m.rounds ? RED : PH);
+  }
+  for (const m of LPD_MOUNTS) {
+    const off = (damage[m.sys] ?? 1) <= 0;
+    line(`${m.name} ${off ? 'OFFLINE' : m.target ? 'LASING' : masterMode === 'OFF' ? 'SAFE' : 'READY'}  ${(m.elec/1e3).toFixed(0)} kW`, off ? RED : m.target ? AMB : PH);
+  }
+  // Pylons: one summary line
+  const pyl = Object.keys(HARDPOINTS).filter(sl => HARDPOINTS[sl].type === 'pylon').map(sl => {
+    const m = modAt(sl); if (!m) return '--';
+    return m.role === 'vls' ? `VLS ${vlsCells[sl] ?? 0}` : m.role === 'ecm' ? 'ECM' : m.short;
+  });
+  line(`PYLONS ${pyl.join(' / ')}${hasRole('ecm') ? `  DECOYS ${ecmDecoys}` : ''}`);
+  if (!PDC_MOUNTS.length && !INT_MOUNTS.length && !LPD_MOUNTS.length) line('TURRETS EMPTY', DIM);
   for (const m of PDC_MOUNTS) {
     const st = pdcStatus(m);
     const col = st === 'OFFLINE' || st === 'EMPTY' || st === 'OVERHEAT' ? RED : st === 'SAFE' ? PH : AMB;
@@ -1978,9 +2202,9 @@ function drawWeapons(g, W, H, idx) {
   }
   line(`HULL ${(hullInt*100).toFixed(0)}%  HITS ${hullHits}`, hullInt < 1 ? RED : PH);
   y += 12;
-  txt(g, 30, y, 'TARGETS WITHIN 200 KM', DIM, '21px monospace'); y += 26;
+  txt(g, 30, y, `TARGETS WITHIN ${(sensorRange()/1e3).toFixed(0)} KM`, DIM, '21px monospace'); y += 26;
   targets.forEach((t, i) => {
-    if (!isLocal(t)) return;
+    if (!isLocal(t) || y > H - 40) return;            // as many as fit
     const b = toBodyQ();
     const rel = new THREE.Vector3(t.x-ship.x, t.y-ship.y, t.z-ship.z);
     const rng = rel.length();
@@ -2161,9 +2385,10 @@ function drawMap(g, W, H, idx) {
         label(t === sel ? `${t.trk} ${t.name}` : t.trk + (stale ? '?' : ''), q.X, q.Y, t === sel ? AMB : col); });
     }
     for (const tp of torpedoes) {
-      if (tp.dead || rangeTo(tp) > LOCAL_R) continue;
+      if (tp.dead || rangeTo(tp) > sensorRange()) continue;
       plot(tp, q => { g.fillStyle = RED; g.beginPath(); g.moveTo(q.X, q.Y - 6); g.lineTo(q.X + 5, q.Y + 4); g.lineTo(q.X - 5, q.Y + 4); g.closePath(); g.fill(); });
     }
+    for (const o of ordnance) plot(o, q => { g.fillStyle = ORD[o.kind].color; g.fillRect(q.X - 3, q.Y - 3, 6, 6); });
     // Own ship at the centre
     const q0 = P(0, 0, 0);
     g.strokeStyle = PH; g.fillStyle = PH; g.lineWidth = 2;
@@ -2606,6 +2831,7 @@ function drawScope(g, W, H, idx) {
     if (dotR && p1) { g.fillStyle = col; g.beginPath(); g.arc(p1.x, p1.y, dotR, 0, Math.PI*2); g.fill(); }
   };
   for (const tr of tracers) drawTrail(tr, irOn ? '#ffffff' : '#ffd060', 2, 0);
+  for (const o of ordnance) drawTrail(o, irOn ? '#ffffff' : ORD[o.kind].color, 2, 2.5);
   for (const tp of torpedoes) {
     drawTrail(tp, irOn ? '#ffffff' : '#ff8a4a', 2, 3);
     // Thruster plume: a flickering streak opposite the commanded thrust, sized to the range so it stays visible
@@ -2960,6 +3186,21 @@ const sfx = {
     thump(hullBus, 48, 0.12, 0.3);
   },
   tick() { if (actx) burst(hullBus, 'lowpass', 600, 0.7, 0.012, 0.25); },
+  // Torpedo cold launch: a heavy gas slam through the hull, then the tube venting
+  torpLaunch() {
+    if (!actx) return;
+    thump(hullBus, 38, 1.0, 1.0); burst(hullBus, 'lowpass', 220, 0.7, 0.4, 0.8);
+    burst(intBus, 'bandpass', 700, 0.7, 0.9, 0.06, 0.15);
+  },
+  // Missile or interceptor launch: a booster roar conducted through the pylon or turret, fading
+  missileLaunch(small = false) {
+    if (!actx) return;
+    burst(hullBus, 'lowpass', small ? 380 : 280, 0.7, small ? 0.5 : 1.1, small ? 0.45 : 0.8);
+    thump(hullBus, small ? 70 : 50, 0.3, small ? 0.4 : 0.7);
+    burst(intBus, 'bandpass', 1100, 0.8, small ? 0.25 : 0.5, 0.05);
+  },
+  // Decoy mortars: a quick ripple of pops
+  decoy() { if (actx) for (let i = 0; i < 4; i++) thump(hullBus, 95, 0.09, 0.45, i*0.07); },
   rcsPuff() { if (actx) burst(intBus, 'bandpass', 1500, 1.2, 0.06, 0.03); },
   click() { if (actx) burst(intBus, 'bandpass', 2800, 2, 0.02, 0.35); },
   chime() {
@@ -3085,8 +3326,8 @@ function audioFrame() {
   engineG.gain.setTargetAtTime(0.5*thrustFrac, t, 0.05);
   engineLP.frequency.setTargetAtTime(80 + 120*thrustFrac, t, 0.1);
   rcsG.gain.setTargetAtTime(rcsOn ? 0.1 : 0, t, rcsOn ? 0.02 : 0.06);   // slower fade-out
-  laserG.gain.setTargetAtTime(laserFiring ? 0.05 : 0, t, 0.05);
-  pumpG.gain.setTargetAtTime(laserFiring ? 0.1 : 0, t, 0.05);
+  laserG.gain.setTargetAtTime(laserFiring || lpdFiring ? 0.05 : 0, t, 0.05);   // laser PD turrets use the same plant
+  pumpG.gain.setTargetAtTime(laserFiring || lpdFiring ? 0.1 : 0, t, 0.05);
   const warn = hullT > THERM.tWarn || battery < 0.15*POWER.battCap;
   alarmG.gain.setTargetAtTime(warn && (Math.floor(t*2) % 2 === 0) ? 0.02 : 0, t, 0.01);
   // PDC: motor spin-up and wind-down, slew whine, and the hull rumble while rounds are going out
@@ -3162,6 +3403,7 @@ let auxOn = { aux1: false, aux2: false, aux3: false };
 function onAction(id) {
   switch (id) {
     case 'fireRail': railReq = true; break;
+    case 'fireMissile': missileReq = true; break;
     case 'rcsStab': rcsStab = !rcsStab; sfx.click(); break;
     case 'leadHold': leadHold = !leadHold; leadPrev = null; sfx.click();
       log(leadHold ? 'LEAD HOLD ON' : 'LEAD HOLD OFF'); break;
