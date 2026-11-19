@@ -1381,6 +1381,22 @@ function drawScope(g, W, H, idx) {
     const vt = new THREE.Vector3(t.x-ship.x, t.y-ship.y, t.z-ship.z);
     blob(vt.clone().applyQuaternion(bq), t.radius, vt.length(), irLevel(t));
   }
+  // Spinal weapon aim point: the ship's boresight (body -Z), where the railgun and laser fire.
+  // When the gimbal has turned away from it, the reticle is held at the nearest frame edge.
+  {
+    const wv = new THREE.Vector3(0, 0, -1).applyQuaternion(bq);
+    const rx = cx + Math.atan2(wv.x, -wv.z)/SCOPE_FOV*R;
+    const ry = cy - Math.atan2(wv.y, -wv.z)/SCOPE_FOV*R;
+    const ax = clamp(rx, FX + 16, FX + FW - 16), ay = clamp(ry, FY + 16, FY + FH - 16);
+    g.strokeStyle = masterMode !== 'OFF' ? (irOn ? '#ffffff' : AMB) : (irOn ? '#777' : DIM);
+    g.lineWidth = 2;
+    g.beginPath(); g.arc(ax, ay, 9, 0, Math.PI*2); g.stroke();
+    g.beginPath();
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      g.moveTo(ax + dx*13, ay + dy*13); g.lineTo(ax + dx*20, ay + dy*20);
+    }
+    g.stroke();
+  }
   // Lock brackets on the current target
   if (lockOk) {
     const vt = new THREE.Vector3(tgt.x-ship.x, tgt.y-ship.y, tgt.z-ship.z);
