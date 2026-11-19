@@ -224,6 +224,16 @@ function fireRail() {
   const mass = shipMass();
   const fwd = new THREE.Vector3(0,0,-1).applyQuaternion(shipQ);
   const V = WEAPON.railV, m = WEAPON.railMass;
+  // Diagnostic: nose error to the solver's direction, and the miss the solver predicts for this exact shot
+  const Ls = leadVector();
+  if (Ls && targets[curTarget]) {
+    const off = Math.acos(clamp(fwd.dot(Ls.clone().normalize()), -1, 1))*180/Math.PI;
+    const tt = Ls.length()/V;
+    const P = propagateTo({ x: ship.x+fwd.x*4, y: ship.y+fwd.y*4, z: ship.z+fwd.z*4,
+      vx: ship.vx+fwd.x*V, vy: ship.vy+fwd.y*V, vz: ship.vz+fwd.z*V }, tt);
+    const T = propagateTo(targets[curTarget], tt);
+    log(`SOLUTION  NOSE OFF ${off.toFixed(3)} DEG  PREDICTED MISS ${Math.hypot(T.x-P.x, T.y-P.y, T.z-P.z).toFixed(1)} M  TOF ${tt.toFixed(1)} S`);
+  }
   projectiles.push({ x: ship.x+fwd.x*4, y: ship.y+fwd.y*4, z: ship.z+fwd.z*4,
     vx: ship.vx+fwd.x*V, vy: ship.vy+fwd.y*V, vz: ship.vz+fwd.z*V,
     px:0, py:0, pz:0, age: 0, dead: false });
