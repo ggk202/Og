@@ -545,8 +545,17 @@ lampDefs.forEach((d, i) => {
 });
 
 /* ---------- Four MFDs in a 2x2 grid, with softkeys under each ---------- */
+// Raised metal bezel around a screen: four frame bars, so the rim catches light
+function bezelFrame(x, y, w, h, z) {
+  const t = 0.012, d = 0.02;
+  add(box(w, t, d), M.metal, x, y + h/2 - t/2, z);
+  add(box(w, t, d), M.metal, x, y - h/2 + t/2, z);
+  add(box(t, h, d), M.metal, x - w/2 + t/2, y, z);
+  add(box(t, h, d), M.metal, x + w/2 - t/2, y, z);
+}
 const clickables = [];
 function makeButton(x, y, label, onPress) {
+  add(box(0.072, 0.046, 0.006), M.dark, x, y, PANEL_Z + 0.003);   // recessed housing
   const pivot = new THREE.Group(); pivot.position.set(x, y, PANEL_Z + 0.008);
   const cap = new THREE.Mesh(box(0.06, 0.034, 0.016), M.btn);
   cap.position.z = 0.008;
@@ -573,7 +582,7 @@ const mfdBtnX = [-0.24, -0.12, 0, 0.12, 0.24];
 const mfds = mfdDefs.map((d, i) => {
   const T = canvasTex(MFD_TEX_W, MFD_TEX_H);
   const mat = new THREE.MeshBasicMaterial({ map: T.tex, toneMapped: false });
-  add(box(d.w + 0.03, d.h + 0.03, 0.02), M.bezel, d.x, d.y, PANEL_Z + 0.006);
+  bezelFrame(d.x, d.y, d.w + 0.03, d.h + 0.03, PANEL_Z + 0.006);
   add(new THREE.PlaneGeometry(d.w, d.h), mat, d.x, d.y, PANEL_Z + 0.0165);
   const m = { i, page: d.page, on: true, T };
   const by = d.y - d.h/2 - 0.035;
@@ -665,6 +674,8 @@ for (const s of switchDefs) {
   add(box(0.05, 0.035, 0.02), M.dark, s.x, SW_Y, PANEL_Z + 0.005);
   const pivot = new THREE.Group(); pivot.position.set(s.x, SW_Y, PANEL_Z + 0.01);
   const lever = new THREE.Mesh(leverGeo, M.metal); pivot.add(lever);
+  const knob = new THREE.Mesh(new THREE.SphereGeometry(0.008, 12, 8), M.metal); knob.position.set(0, 0, 0.05); pivot.add(knob);
+  add(box(0.07, 0.05, 0.006), M.bezel, s.x, SW_Y, PANEL_Z + 0.003);   // switch housing plate
   cockpit.add(pivot); s.pivot = pivot;
   labelMesh(s.label, 0.16, 0.022, s.x, -0.64, PANEL_Z + 0.003, '#d9d2b8');
   if (s.guard) {
