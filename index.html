@@ -399,8 +399,111 @@ const msgs = [];
 let pending = [];
 const telem = { loadE: 0, qin: 0, qout: 0 };
 
-function mkTarget(name, r, phase, radius, integrity) {
-  return { name, radius, integrity, maxInt: integrity, gone: false, ...orbitState(r, phase) };
+// Circular orbit of radius r, `phase` rad along it from the x axis, in a plane tilted `inc` rad about the x axis
+// (the line of nodes runs through the ship's start point, so every orbit here passes near it)
+function orbitStateInc(r, phase, inc = 0) {
+  const s = orbitState(r, phase), c = Math.cos(inc), n = Math.sin(inc);
+  return { x: s.x, y: s.y*c, z: s.y*n, vx: s.vx, vy: s.vy*c, vz: s.vy*n };
+}
+// side: HOSTILE / NEUTRAL / UNKNOWN (display only). `hostile: true` additionally means it fires torpedoes.
+function mkTarget(name, r, phase, radius, integrity, side = 'UNKNOWN', inc = 0) {
+  return { name, radius, integrity, maxInt: integrity, gone: false, side, ...orbitStateInc(r, phase, inc) };
+}
+
+/* ---------- Sensor coverage, datalink and track numbers ----------
+   Own sensors see everything within LOCAL_R; TGT cycles only through those. Beyond that, positions come from
+   observation satellites over a laser datalink: each satellite reports what it can see (clear line of sight,
+   within DL_SAT_RANGE) every DL_PERIOD s, arriving after DL_LATENCY s plus light time. Reports need a relay:
+   at least one satellite with line of sight to the ship (satellites crosslink to each other). Between reports a
+   track coasts on gravity alone; after DL_STALE s without a report it is shown as stale. Far targets are
+   selected by their four-digit track number on the keypad. */
+const LOCAL_R = 200e3;
+const DL_PERIOD = 4, DL_LATENCY = 1.5, DL_STALE = 15, DL_SAT_RANGE = 9000e3, LOS_MARGIN = 80e3;
+// Four satellites at 900 km: the relay to the ship is up about 92% of each orbit, with one ~7 min blackout,
+// and each distant track is covered 74-92% of the time
+const SAT_DEFS = [   // name, altitude, phase, inclination
+  ['OBS-1', 900e3, 0.9, 0.0], ['OBS-2', 900e3, -2.2, 0.0],
+  ['OBS-3', 900e3, 0.4, 1.05], ['OBS-4', 900e3, 2.6, 1.05],
+];
+let sats = [], dlQueue = [], dlUp = false, dlWasUp = null, dlClock = 0, dlRelay = [];
+function resetSats() {
+  sats = SAT_DEFS.map(([name, alt, ph, inc]) => ({ name, ...orbitStateInc(R_E + alt, ph, inc) }));
+  dlQueue = []; dlClock = 0; dlWasUp = null;
+}
+const rangeTo = o => Math.hypot(o.x-ship.x, o.y-ship.y, o.z-ship.z);
+const isLocal = t => !!t && !t.gone && rangeTo(t) <= LOCAL_R;
+// Line of sight between two points: the segment must clear Earth by LOS_MARGIN (atmosphere)
+function losClear(a, b) {
+  const dx = b.x-a.x, dy = b.y-a.y, dz = b.z-a.z, dd = dx*dx + dy*dy + dz*dz;
+  const u = dd > 0 ? clamp(-(a.x*dx + a.y*dy + a.z*dz)/dd, 0, 1) : 0;
+  return Math.hypot(a.x + u*dx, a.y + u*dy, a.z + u*dz) > R_E + LOS_MARGIN;
+}
+// What the ship knows about a target: its own sensors within LOCAL_R, otherwise the datalink track (or nothing)
+function tgtKnown(t) { if (!t || t.gone) return null; return isLocal(t) ? t : (t.track || null); }
+// Fire control and the laser need own-sensor quality data
+const tgtLocal = t => isLocal(t) ? t : null;
+const trackAge = t => t && t.track ? simT - t.track.tRep : Infinity;
+function datalinkStep(h) {
+  // Called after the targets have advanced this step, so their states are at time T = simT + h
+  const T = simT + h;
+  for (const sat of sats) rk4(sat, h, 0, 0, 0);
+  for (const t of targets) if (t.track) rk4(t.track, h, 0, 0, 0);   // tracks coast on gravity to T
+  dlRelay = sats.filter(sat => losClear(sat, ship));
+  dlUp = dlRelay.length > 0;
+  if (dlWasUp !== null && dlUp !== dlWasUp) log(dlUp ? `DATALINK UP · RELAY ${dlRelay[0].name}` : 'DATALINK LOST · NO RELAY IN VIEW');
+  dlWasUp = dlUp;
+  dlClock += h;
+  if (dlClock >= DL_PERIOD) {
+    dlClock -= DL_PERIOD;
+    if (dlUp) {
+      const relayD = Math.min(...dlRelay.map(rangeTo));
+      for (const t of targets) {
+        if (t.gone) continue;
+        const obs = sats.find(sat => losClear(sat, t) && Math.hypot(sat.x-t.x, sat.y-t.y, sat.z-t.z) < DL_SAT_RANGE);
+        if (!obs) continue;
+        const light = (Math.hypot(obs.x-t.x, obs.y-t.y, obs.z-t.z) + relayD)/C;
+        dlQueue.push({ t, at: T + DL_LATENCY + light, tm: T, sat: obs.name,
+          st: { x: t.x, y: t.y, z: t.z, vx: t.vx, vy: t.vy, vz: t.vz } });
+      }
+    }
+  }
+  // Deliveries: the report is propagated from its measurement time to T (gravity only) and replaces the track.
+  // The track inherits the target's other properties (name, side, radius) through its prototype.
+  dlQueue = dlQueue.filter(q => {
+    if (q.at > T) return true;
+    if (q.t.gone) return false;
+    const tr = Object.assign(Object.create(q.t), q.st, { tRep: q.tm, sat: q.sat });
+    for (let tt = q.tm; tt < T - 1e-9; ) { const dt = Math.min(0.25, T - tt); rk4(tr, dt, 0, 0, 0); tt += dt; }
+    q.t.track = tr;
+    return false;
+  });
+}
+// Four-digit track numbers, unique per target
+function assignTrackNumbers() {
+  const used = new Set();
+  for (const t of targets) {
+    let n; do { n = 1000 + Math.floor(Math.random()*9000); } while (used.has(n));
+    used.add(n); t.trk = String(n);
+  }
+}
+// TGT: next target within own-sensor range
+function cycleTarget() {
+  const n = targets.length;
+  for (let k = 1; k <= n; k++) {
+    const i = (curTarget + k) % n;
+    if (isLocal(targets[i])) { curTarget = i; return; }
+  }
+  log('NO TARGETS WITHIN 200 KM · ENTER TRACK NUMBER');
+}
+// Keypad: a four-digit number selects that track (any range); other entries are transmitted as before
+function selectTrack(num) {
+  const i = targets.findIndex(t => t.trk === num && !t.gone);
+  if (i < 0) { log(`TRK ${num} · NO SUCH TRACK`); return; }
+  const t = targets[i];
+  if (!isLocal(t) && !t.track) { log(`TRK ${num} · NO DATALINK TRACK`); return; }
+  curTarget = i;
+  const k = tgtKnown(t);
+  log(`TRK ${num} SELECTED · ${t.name} · ${fmtDist(rangeTo(k))}${isLocal(t) ? '' : ' · DL'}`);
 }
 function resetTargets() {
   targets = [
@@ -408,9 +511,17 @@ function resetTargets() {
     mkTarget('DEBRIS 9F-22',    LEO_R,        -0.0008, 0.8, 15),   // ~5 km behind
     mkTarget('TUG MERIDIAN',    LEO_R + 6000, 0.0045,  5,   120),  // ~27 km ahead
     mkTarget('FRAGMENT C-3',    LEO_R,        0.0003,  0.5, 8),    // ~2 km ahead
-    { ...mkTarget('HOSTILE FRIGATE', LEO_R + 4000, 0.0025, 6, 300), hostile: true, fireT: 5 },   // fires torpedoes
+    { ...mkTarget('HOSTILE FRIGATE', LEO_R + 4000, 0.0025, 6, 300, 'HOSTILE'), hostile: true, fireT: 5 },   // fires torpedoes
+    // Distant tracks, beyond own-sensor range: known only through the datalink
+    mkTarget('CORVETTE VASK',      LEO_R + 50e3,  0.06,  5, 200, 'HOSTILE'),            // ~450 km ahead
+    mkTarget('GUNSHIP ORDA',       LEO_R + 120e3, -0.12, 6, 250, 'HOSTILE', 0.05),      // ~850 km behind
+    mkTarget('TANKER HALCYON',     LEO_R + 300e3, 0.25,  8, 150, 'NEUTRAL', 0.3),       // ~1800 km
+    mkTarget('SURVEY MERIDIAN-2',  LEO_R + 800e3, 0.45,  3, 60,  'NEUTRAL', 0.9),       // ~3500 km
+    mkTarget('DESTROYER KORSAKOV', LEO_R + 20e3,  1.1,   9, 400, 'HOSTILE'),            // behind Earth's limb
   ];
   curTarget = 0;
+  assignTrackNumbers();
+  resetSats();
   flashes = [];
   torpedoes = []; tracers = []; hullHits = 0;
 }
@@ -588,8 +699,8 @@ function shootingSolution(tgt) {
 }
 // Lead point for the current target, relative to the ship (world axes), or null without an intercept
 function leadVector() {
-  const tgt = targets[curTarget];
-  if (!tgt || tgt.gone) return null;
+  const tgt = tgtLocal(targets[curTarget]);   // no fire-control solution beyond own-sensor range
+  if (!tgt) return null;
   if (leadCache && leadCache.simT === simT && leadCache.tgt === tgt) return leadCache.L ? leadCache.L.clone() : null;
   const sol = shootingSolution(tgt);
   leadCache = { simT, tgt, L: sol ? sol.L.clone() : null };
@@ -781,6 +892,7 @@ function physicsStep(h) {
 
   /* --- other bodies and projectiles (gravity only) --- */
   for (const t of targets) { t.px = t.x; t.py = t.y; t.pz = t.z; rk4(t, h, 0, 0, 0); }
+  datalinkStep(h);
   for (const p of projectiles) { p.px = p.x; p.py = p.y; p.pz = p.z; rk4(p, h, 0, 0, 0); p.age += h; }
   // Torpedoes: thrust from computeTorpedoGuidance (tp.burn = seconds of full thrust left), gravity added by rk4
   const shipThrustA = [fw.x/mass, fw.y/mass, fw.z/mass];
@@ -1204,19 +1316,37 @@ const mfdDefs = [
   { x:-0.54, y: 0.302,   w: 0.5, h: 0.306, page: 0 },  // top-left:    TACTICAL
   { x: 0.00, y: 0.302,   w: 0.5, h: 0.306, page: 6 },  // top-centre: SHIP (top-down)
   { x: 0.54, y: 0.302,   w: 0.5, h: 0.306, page: 1 },  // top-right:   ORBIT
-  { x:-0.45, y:-0.1135,  w: 0.6, h: 0.367, page: 2 },  // bottom-left: POWER / THERMAL
+  { x:-0.45, y:-0.1135,  w: 0.6, h: 0.367, page: 2, map: true },  // bottom-left: dedicated 3D MAP (own buttons)
   { x: 0.45, y:-0.1135,  w: 0.6, h: 0.367, page: 3 },  // bottom-right:WEAPONS
 ];
 const mfdBtnLabels = ['PG+', 'PG-', 'RNG', 'TGT', 'PWR'];
+// Map screen buttons: switch view, zoom in/out, rotate 30 degrees, cycle camera tilt
+const MAP_BTNS = ['VIEW', 'ZM+', 'ZM-', 'ROT', 'TILT'];
+let mapView = 'ORBIT', mapYaw = 0.6, mapTiltIdx = 1;
+const MAP_TILTS = [20, 45, 70, 90].map(d => d*Math.PI/180);
+const MAP_ZOOM = { ORBIT: [8000e3, 14000e3, 30000e3, 420000e3], LOCAL: [10e3, 50e3, 200e3, 1000e3, 4000e3] };   // half-height of the view
+const mapZoom = { ORBIT: 0, LOCAL: 1 };
+function mapSoftkey(m, k) {
+  switch (k) {
+    case 0: mapView = mapView === 'ORBIT' ? 'LOCAL' : 'ORBIT'; break;
+    case 1: mapZoom[mapView] = Math.max(0, mapZoom[mapView] - 1); break;
+    case 2: mapZoom[mapView] = Math.min(MAP_ZOOM[mapView].length - 1, mapZoom[mapView] + 1); break;
+    case 3: mapYaw += Math.PI/6; break;
+    case 4: mapTiltIdx = (mapTiltIdx + 1) % MAP_TILTS.length; break;
+  }
+  sfx.click();
+  drawMFD(m);
+}
 const mfdBtnX = [-0.24, -0.12, 0, 0.12, 0.24];
 const mfds = mfdDefs.map((d, i) => {
   const T = canvasTex(MFD_TEX_W, MFD_TEX_H);
   const mat = new THREE.MeshBasicMaterial({ map: T.tex, toneMapped: false });
   bezelFrame(d.x, d.y, d.w + 0.03, d.h + 0.03, PANEL_Z + 0.006);
   add(new THREE.PlaneGeometry(d.w, d.h), mat, d.x, d.y, PANEL_Z + 0.0165);
-  const m = { i, page: d.page, on: true, T };
+  const m = { i, page: d.page, on: true, T, map: !!d.map };
   const by = d.y - d.h/2 - 0.035;
-  mfdBtnLabels.forEach((lbl, k) => makeButton(d.x + mfdBtnX[k]*d.w/0.6, by, lbl, () => mfdSoftkey(m, k)));
+  (d.map ? MAP_BTNS : mfdBtnLabels).forEach((lbl, k) =>
+    makeButton(d.x + mfdBtnX[k]*d.w/0.6, by, lbl, () => d.map ? mapSoftkey(m, k) : mfdSoftkey(m, k)));
   return m;
 });
 function mfdSoftkey(m, k) {
@@ -1224,7 +1354,7 @@ function mfdSoftkey(m, k) {
     case 0: m.page = (m.page + 1) % MFD_PAGES.length; break;
     case 1: m.page = (m.page + MFD_PAGES.length - 1) % MFD_PAGES.length; break;
     case 2: rangeIdx = (rangeIdx + 1) % RANGES.length; break;
-    case 3: if (targets.length) curTarget = (curTarget + 1) % targets.length; break;
+    case 3: cycleTarget(); break;
     case 4: m.on = !m.on; break;
   }
   sfx.click();
@@ -1415,7 +1545,8 @@ makeButton(0.26, -0.43, 'RESET', () => {
 function keypadPress(k) {
   if (k === 'CLR') keyBuf = '';
   else if (k === 'ENT') {
-    if (keyBuf) log(`TX ${keyBuf}`);
+    if (/^\d{4}$/.test(keyBuf)) selectTrack(keyBuf);
+    else if (keyBuf) log(`TX ${keyBuf}`);
     keyBuf = '';
   } else if (keyBuf.length < 8) keyBuf += k;
   drawKP();
@@ -1547,12 +1678,13 @@ function drawTactical(g, W, H, idx) {
 
   let cur = null;
   targets.forEach((t, i) => {
+    if (!isLocal(t)) return;                         // beyond own sensors: on the map only
     const b = toB(t.x-ship.x, t.y-ship.y, t.z-ship.z);
     if (b.z >= 0) return;
     const isCur = i === curTarget;
     if (isCur) cur = { t, b, r: [t.x-ship.x, t.y-ship.y, t.z-ship.z] };
     const px = sx(b), py = sy(b);
-    if (t.hostile) {                                  // hostile: red diamond
+    if (t.side === 'HOSTILE') {                       // hostile: red diamond
       g.strokeStyle = RED; g.lineWidth = isCur ? 3 : 2;
       g.beginPath(); g.moveTo(px, py-10); g.lineTo(px+10, py); g.lineTo(px, py+10); g.lineTo(px-10, py); g.closePath(); g.stroke();
     } else {
@@ -1563,6 +1695,12 @@ function drawTactical(g, W, H, idx) {
   });
 
   let tgtLines = ['TGT  --'];
+  const selT = targets[curTarget];
+  if (!cur && selT && !selT.gone && !isLocal(selT)) {   // far target: datalink track
+    const k = tgtKnown(selT), age = trackAge(selT);
+    tgtLines = [`TGT ${selT.name}`, `TRK ${selT.trk} ${age > DL_STALE ? 'STALE' : 'DL'} ${age.toFixed(0)}s`,
+      `RNG ${k ? fmtDist(rangeTo(k)) : '--'}`, 'FCS NO SOL >200KM'];
+  }
   if (cur) {
     const { t, b, r } = cur;
     const rv = [t.vx-ship.vx, t.vy-ship.vy, t.vz-ship.vz];
@@ -1684,8 +1822,9 @@ function drawWeapons(g, W, H, idx) {
   }
   line(`HULL ${(hullInt*100).toFixed(0)}%  HITS ${hullHits}`, hullInt < 1 ? RED : PH);
   y += 12;
-  txt(g, 30, y, 'TARGETS', DIM, '21px monospace'); y += 26;
+  txt(g, 30, y, 'TARGETS WITHIN 200 KM', DIM, '21px monospace'); y += 26;
   targets.forEach((t, i) => {
+    if (!isLocal(t)) return;
     const b = toBodyQ();
     const rel = new THREE.Vector3(t.x-ship.x, t.y-ship.y, t.z-ship.z);
     const rng = rel.length();
@@ -1696,6 +1835,195 @@ function drawWeapons(g, W, H, idx) {
     g.fillStyle = ratio > 0.4 ? PH : AMB; g.fillRect(522, y+6, 206*ratio, 12);
     y += 40;
   });
+}
+
+/* ---------- 3D wireframe map (dedicated screen) ----------
+   ORBIT: Earth-centred, inertial axes (z = north), orthographic. Earth hides what is behind it.
+   LOCAL: ship-centred local frame: x along-track, y orbit normal, z radial up; objects stand on stalks above
+   or below the ship's local horizon plane. Both use the same camera: yaw about the vertical, then tilt. */
+function mapProj(x, y, z, k, cx, cy) {
+  const cw = Math.cos(mapYaw), sw = Math.sin(mapYaw);
+  const X = x*cw - y*sw, Y = x*sw + y*cw;
+  const el = MAP_TILTS[mapTiltIdx], se = Math.sin(el), ce = Math.cos(el);
+  const sy = Y*se + z*ce, d = z*se - Y*ce;          // d > 0: toward the viewer
+  return { X: cx + X*k, Y: cy - sy*k, sx: X, sy, d };
+}
+const earthHides = q => q.sx*q.sx + q.sy*q.sy < R_E*R_E && q.d < 0;
+// Closed orbit through a state (Keplerian, Earth only), as points; null if open
+function orbitPath(o, n = 120) {
+  const r = new THREE.Vector3(o.x, o.y, o.z), v = new THREE.Vector3(o.vx, o.vy, o.vz);
+  const hv = new THREE.Vector3().crossVectors(r, v), hm = hv.length();
+  const ev = new THREE.Vector3().crossVectors(v, hv).multiplyScalar(1/GM_E).sub(r.clone().normalize());
+  const e = ev.length();
+  if (e >= 0.99 || hm === 0) return null;
+  const pl = hm*hm/GM_E;
+  const P = e > 1e-6 ? ev.clone().divideScalar(e) : r.clone().normalize();
+  const Q = new THREE.Vector3().crossVectors(hv.clone().divideScalar(hm), P);
+  const pts = [];
+  for (let i = 0; i <= n; i++) {
+    const nu = i/n*2*Math.PI, rr = pl/(1 + e*Math.cos(nu));
+    pts.push([rr*Math.cos(nu)*P.x + rr*Math.sin(nu)*Q.x, rr*Math.cos(nu)*P.y + rr*Math.sin(nu)*Q.y, rr*Math.cos(nu)*P.z + rr*Math.sin(nu)*Q.z]);
+  }
+  return pts;
+}
+// Marker for a track: hostile red diamond, neutral square, unknown dim square; hollow and dim when stale
+function mapMarker(g, x, y, t, stale, sel) {
+  const col = stale ? DIM : t.side === 'HOSTILE' ? RED : t.side === 'NEUTRAL' ? PH : DIM;
+  g.strokeStyle = col; g.fillStyle = col; g.lineWidth = 2;
+  g.beginPath();
+  if (t.side === 'HOSTILE') { g.moveTo(x, y-6); g.lineTo(x+6, y); g.lineTo(x, y+6); g.lineTo(x-6, y); g.closePath(); }
+  else g.rect(x-5, y-5, 10, 10);
+  stale ? g.stroke() : g.fill();
+  if (sel) {   // selection brackets
+    g.strokeStyle = AMB; g.lineWidth = 2;
+    for (const [sx2, sy2] of [[-1,-1],[1,-1],[1,1],[-1,1]]) {
+      g.beginPath(); g.moveTo(x + sx2*11, y + sy2*5); g.lineTo(x + sx2*11, y + sy2*11); g.lineTo(x + sx2*5, y + sy2*11); g.stroke();
+    }
+  }
+  return col;
+}
+function drawMap(g, W, H, idx) {
+  const ext = MAP_ZOOM[mapView][mapZoom[mapView]];
+  mfdHeader(g, W, `MAP ${mapView === 'ORBIT' ? 'ORBITAL' : 'LOCAL'} ±${fmtDist(ext)}`, idx);
+  txt(g, W - 120, 30, dlUp ? `DL UP ${dlRelay.length}` : 'DL LOST', dlUp ? PH : RED, 'bold 26px monospace', 'right');
+  const cx = W/2, cy = 246, k = 190/ext;
+  g.save(); g.beginPath(); g.rect(4, 44, W - 8, 396); g.clip();
+  const sel = targets[curTarget];
+  const known = targets.filter(t => !t.gone).map(t => ({ t, o: tgtKnown(t), stale: !isLocal(t) && trackAge(t) > DL_STALE }));
+  let beyond = 0;
+  const label = (s2, x, y, col) => txt(g, x + 9, y - 7, s2, col, '18px monospace');
+
+  if (mapView === 'ORBIT') {
+    const P = (x, y, z) => mapProj(x, y, z, k, cx, cy);
+    // Earth: dark disc, outline, latitude and meridian lines on the facing side (meridians turn with Earth)
+    g.fillStyle = '#03170b'; g.beginPath(); g.arc(cx, cy, R_E*k, 0, Math.PI*2); g.fill();
+    g.strokeStyle = PH; g.lineWidth = 1.5; g.stroke();
+    g.strokeStyle = 'rgba(125,255,154,0.35)'; g.lineWidth = 1;
+    const rot = 7.2921e-5*simT;
+    const ring = f => {
+      let prev = null;
+      for (let i = 0; i <= 72; i++) {
+        const q = P(...f(i/72*2*Math.PI));
+        if (prev && q.d >= 0 && prev.d >= 0) { g.beginPath(); g.moveTo(prev.X, prev.Y); g.lineTo(q.X, q.Y); g.stroke(); }
+        prev = q;
+      }
+    };
+    for (const lat of [-60, -30, 0, 30, 60]) {
+      const la = lat*Math.PI/180, rc = R_E*Math.cos(la), zc = R_E*Math.sin(la);
+      ring(a => [rc*Math.cos(a), rc*Math.sin(a), zc]);
+    }
+    for (let m2 = 0; m2 < 12; m2++) {
+      const lo = m2*Math.PI/6 + rot;
+      ring(a => [R_E*Math.cos(a)*Math.cos(lo), R_E*Math.cos(a)*Math.sin(lo), R_E*Math.sin(a)]);
+    }
+    // Orbits: own (bright), tracks (by side), satellites (faint). Segments behind Earth are skipped.
+    const drawOrbit2 = (o, col, w, dash) => {
+      const pts = orbitPath(o); if (!pts) return;
+      g.strokeStyle = col; g.lineWidth = w; g.setLineDash(dash);
+      let prev = null;
+      for (const pt of pts) {
+        const q = P(...pt), vis = !earthHides(q);
+        if (prev && vis && prev.vis) { g.beginPath(); g.moveTo(prev.X, prev.Y); g.lineTo(q.X, q.Y); g.stroke(); }
+        prev = { ...q, vis };
+      }
+      g.setLineDash([]);
+    };
+    for (const sat of sats) drawOrbit2(sat, 'rgba(125,255,154,0.18)', 1, [3, 5]);
+    for (const { t, o } of known) if (o && !isLocal(t)) drawOrbit2(o, t.side === 'HOSTILE' ? 'rgba(255,80,64,0.45)' : 'rgba(125,255,154,0.35)', 1.2, []);
+    drawOrbit2(ship, PH, 2, []);
+    // Laser relay links from the satellites in view of the ship
+    const qs = P(ship.x, ship.y, ship.z);
+    for (const sat of dlRelay) {
+      const q = P(sat.x, sat.y, sat.z);
+      g.strokeStyle = 'rgba(255,176,32,0.6)'; g.lineWidth = 1; g.setLineDash([2, 4]);
+      g.beginPath(); g.moveTo(qs.X, qs.Y); g.lineTo(q.X, q.Y); g.stroke(); g.setLineDash([]);
+    }
+    for (const sat of sats) {
+      const q = P(sat.x, sat.y, sat.z); if (earthHides(q)) continue;
+      g.strokeStyle = PH; g.lineWidth = 1.5; g.strokeRect(q.X - 3, q.Y - 3, 6, 6);
+      txt(g, q.X + 6, q.Y + 16, sat.name, DIM, '15px monospace');
+    }
+    // Tracks: far ones by datalink (track number shown), near ones cluster at the ship and are left unlabelled
+    for (const { t, o, stale } of known) {
+      if (!o) continue;
+      const q = P(o.x, o.y, o.z); if (earthHides(q)) continue;
+      const isSel = t === sel;
+      if (isLocal(t) && !isSel) continue;            // within 200 km: drawn at the ship's position anyway
+      const col = mapMarker(g, q.X, q.Y, t, stale, isSel);
+      label(isSel ? `${t.trk} ${t.name}` : t.trk + (stale ? '?' : ''), q.X, q.Y, isSel ? AMB : col);
+    }
+    // Own ship
+    g.strokeStyle = PH; g.fillStyle = PH; g.lineWidth = 2;
+    g.beginPath(); g.arc(qs.X, qs.Y, 5, 0, Math.PI*2); g.fill();
+    g.beginPath(); g.moveTo(qs.X - 11, qs.Y); g.lineTo(qs.X + 11, qs.Y); g.moveTo(qs.X, qs.Y - 11); g.lineTo(qs.X, qs.Y + 11); g.stroke();
+    txt(g, qs.X + 9, qs.Y + 20, 'OWN', PH, 'bold 17px monospace');
+    // Moon: direction marker at the edge (or the Moon itself at the widest zoom)
+    const mp = moonPos(simT), qm = P(mp[0], mp[1], mp[2]);
+    const mx = qm.X - cx, my = qm.Y - cy, ml = Math.hypot(mx, my);
+    if (ml < 185 && ml > 0) { g.strokeStyle = AMB; g.beginPath(); g.arc(qm.X, qm.Y, Math.max(3, 1.737e6*k), 0, Math.PI*2); g.stroke(); txt(g, qm.X + 8, qm.Y, 'MOON', AMB, '16px monospace'); }
+    else if (ml > 0) txt(g, cx + mx/ml*300, cy + my/ml*170, 'MOON ›', AMB, '16px monospace', 'center');
+  } else {
+    // Local frame at the ship: x along-track, y orbit normal, z radial up
+    const Rh = new THREE.Vector3(ship.x, ship.y, ship.z).normalize();
+    const Nn = new THREE.Vector3().crossVectors(new THREE.Vector3(ship.x, ship.y, ship.z), new THREE.Vector3(ship.vx, ship.vy, ship.vz)).normalize();
+    const Al = new THREE.Vector3().crossVectors(Nn, Rh);
+    const loc = (x, y, z) => { const d = new THREE.Vector3(x - ship.x, y - ship.y, z - ship.z); return [d.dot(Al), d.dot(Nn), d.dot(Rh)]; };
+    const locV = (vx, vy, vz) => { const d = new THREE.Vector3(vx - ship.vx, vy - ship.vy, vz - ship.vz); return [d.dot(Al), d.dot(Nn), d.dot(Rh)]; };
+    const P = (x, y, z) => mapProj(x, y, z, k, cx, cy);
+    // Horizon plane: range rings and the along-track / normal axes
+    g.strokeStyle = 'rgba(125,255,154,0.3)'; g.lineWidth = 1;
+    for (const f of [0.25, 0.5, 1]) {
+      g.beginPath();
+      for (let i = 0; i <= 72; i++) { const a = i/72*2*Math.PI, q = P(ext*f*Math.cos(a), ext*f*Math.sin(a), 0); i ? g.lineTo(q.X, q.Y) : g.moveTo(q.X, q.Y); }
+      g.stroke();
+      const ql = P(ext*f, 0, 0); txt(g, ql.X + 4, ql.Y - 4, fmtDist(ext*f), DIM, '15px monospace');
+    }
+    for (const [ax, ay, lb] of [[1, 0, 'PRO'], [-1, 0, 'RETRO'], [0, 1, 'NRM'], [0, -1, 'ANTI']]) {
+      const q0 = P(0, 0, 0), q1 = P(ax*ext, ay*ext, 0);
+      g.beginPath(); g.moveTo(q0.X, q0.Y); g.lineTo(q1.X, q1.Y); g.stroke();
+      txt(g, q1.X, q1.Y - 6, lb, DIM, '15px monospace', 'center');
+    }
+    const qUp = P(0, 0, ext*0.35);
+    g.setLineDash([3, 4]); g.beginPath(); const q00 = P(0, 0, 0); g.moveTo(q00.X, q00.Y); g.lineTo(qUp.X, qUp.Y); g.stroke(); g.setLineDash([]);
+    txt(g, qUp.X, qUp.Y - 6, 'UP', DIM, '15px monospace', 'center');
+    // An object on its stalk, with a leader for 20 s of relative motion
+    const plot = (o, draw) => {
+      const [x, y, z] = loc(o.x, o.y, o.z);
+      if (Math.hypot(x, y, z) > ext*1.15) { beyond++; return; }
+      const q = P(x, y, z), f = P(x, y, 0);
+      g.strokeStyle = 'rgba(125,255,154,0.45)'; g.lineWidth = 1; g.setLineDash([2, 3]);
+      g.beginPath(); g.moveTo(f.X, f.Y); g.lineTo(q.X, q.Y); g.stroke(); g.setLineDash([]);
+      g.fillStyle = 'rgba(125,255,154,0.6)'; g.fillRect(f.X - 1.5, f.Y - 1.5, 3, 3);
+      const [vx, vy, vz] = locV(o.vx, o.vy, o.vz), qL = P(x + vx*20, y + vy*20, z + vz*20);
+      g.strokeStyle = 'rgba(255,176,32,0.5)'; g.beginPath(); g.moveTo(q.X, q.Y); g.lineTo(qL.X, qL.Y); g.stroke();
+      draw(q);
+    };
+    for (const sat of sats) plot(sat, q => { g.strokeStyle = PH; g.lineWidth = 1.5; g.strokeRect(q.X - 3, q.Y - 3, 6, 6); txt(g, q.X + 6, q.Y + 16, sat.name, DIM, '15px monospace'); });
+    for (const { t, o, stale } of known) {
+      if (!o) continue;
+      plot(o, q => { const col = mapMarker(g, q.X, q.Y, t, stale, t === sel);
+        label(t === sel ? `${t.trk} ${t.name}` : t.trk + (stale ? '?' : ''), q.X, q.Y, t === sel ? AMB : col); });
+    }
+    for (const tp of torpedoes) {
+      if (tp.dead || rangeTo(tp) > LOCAL_R) continue;
+      plot(tp, q => { g.fillStyle = RED; g.beginPath(); g.moveTo(q.X, q.Y - 6); g.lineTo(q.X + 5, q.Y + 4); g.lineTo(q.X - 5, q.Y + 4); g.closePath(); g.fill(); });
+    }
+    // Own ship at the centre
+    const q0 = P(0, 0, 0);
+    g.strokeStyle = PH; g.fillStyle = PH; g.lineWidth = 2;
+    g.beginPath(); g.arc(q0.X, q0.Y, 5, 0, Math.PI*2); g.fill();
+    txt(g, q0.X + 9, q0.Y + 20, 'OWN', PH, 'bold 17px monospace');
+    if (beyond) txt(g, W - 14, 432, `${beyond} BEYOND`, DIM, '17px monospace', 'right');
+  }
+  g.restore();
+  // Bottom line: selected target and the track number being typed
+  g.strokeStyle = DIM; g.lineWidth = 2; g.beginPath(); g.moveTo(10, 442); g.lineTo(W - 10, 442); g.stroke();
+  if (sel && !sel.gone) {
+    const o = tgtKnown(sel), local = isLocal(sel), age = trackAge(sel);
+    const src = local ? 'OWN SENS' : !o ? 'NO TRACK' : age > DL_STALE ? `STALE ${age.toFixed(0)}s` : `DL ${age.toFixed(0)}s`;
+    txt(g, 14, 464, `TGT ${sel.trk} ${sel.name}  ${o ? fmtDist(rangeTo(o)) : '--'}  ${src}`, local ? PH : AMB, '20px monospace');
+  } else txt(g, 14, 464, 'TGT --', DIM, '20px monospace');
+  if (keyBuf) txt(g, W - 14, 464, `TRK ${keyBuf.padEnd(4, '_')}`, AMB, 'bold 20px monospace', 'right');
 }
 
 // Damage control: hull integrity, then every system with its state (OK / degraded % / OFFLINE)
@@ -1762,7 +2090,7 @@ function drawShip(g, W, H, idx) {
   // state
   const recentShot = railCD > WEAPON.railCooldown - 0.4;
   const firing = laserFiring || recentShot;
-  const tgtNow = targets[curTarget];
+  const tgtNow = tgtLocal(targets[curTarget]);
   const tracking = !!tgtNow && new THREE.Vector3(tgtNow.x-ship.x, tgtNow.y-ship.y, tgtNow.z-ship.z).applyQuaternion(toBodyQ()).z < 0;
   const fcsState = firing ? 'FIRING' : tracking ? 'TRACKING' : 'STANDBY';
   const fcsCol = firing ? RED : tracking ? AMB : PH;
@@ -2063,8 +2391,8 @@ function drawScope(g, W, H, idx) {
   // Frame and view area, following the reference layout: status text above, labels at the sides, softkeys below
   const FX = 60, FY = 108, FW = 640, FH = 292, cx = FX + FW/2, cy = FY + FH/2, R = 150;
   const bq = scopeViewQ();
-  const tgt = targets[curTarget];
-  const lockOk = !!tgt && !tgt.gone;
+  const tgt = tgtKnown(targets[curTarget]);         // far targets: the datalink estimate
+  const lockOk = !!tgt;
   const proj = v => {
     if (v.z >= 0) return null;                       // behind the scope (forward is -Z)
     const az = Math.atan2(v.x, -v.z), el = Math.atan2(v.y, -v.z);
@@ -2204,7 +2532,8 @@ function drawScope(g, W, H, idx) {
   txt(g, 14, 128, irOn ? 'GRAY' : 'COLOR', PH, '20px monospace');
   txt(g, 14, 150, 'AGC', PH, '20px monospace');
   txt(g, 14, 172, 'OFF', PH, '20px monospace');
-  txt(g, 80, 92, lockOk ? 'LOCK' : 'NO LOCK', lockOk ? AMB : PH, '20px monospace');
+  const dlOnly = lockOk && !isLocal(targets[curTarget]);   // pointing at a datalink estimate, not a sensor lock
+  txt(g, 80, 92, dlOnly ? 'DL TRK' : lockOk ? 'LOCK' : 'NO LOCK', lockOk ? AMB : PH, '20px monospace');
   txt(g, cx, 92, `${irOn ? 'WHOT' : 'VIS'}   AZ ${(scopeAz*180/Math.PI).toFixed(0)}  EL ${(scopeEl*180/Math.PI).toFixed(0)}`, PH, '20px monospace', 'center');
   txt(g, 700, 92, lockOk ? fmtDist(Math.hypot(tgt.x-ship.x, tgt.y-ship.y, tgt.z-ship.z)) : '--', PH, '20px monospace', 'right');
   txt(g, cx, FY + FH + 20, lockOk ? 'TRACK' : 'POINT', PH, '20px monospace', 'center');
@@ -2251,6 +2580,8 @@ function drawMFD(m) {
   if (!m.on) {
     g.fillStyle = '#000'; g.fillRect(0, 0, W, H);
     txt(g, W/2, H/2+12, 'OFF', 'rgba(125,255,154,0.2)', 'bold 36px monospace', 'center');
+  } else if (m.map) {
+    drawMap(g, W, H, m.i);
   } else {
     switch (MFD_PAGES[m.page]) {
       case 'TACTICAL': drawTactical(g, W, H, m.i); break;
@@ -2285,7 +2616,7 @@ function updateDisplays() {
     larm: laserArmed,
     radst: !radDeployed,
     tgt: targets.length > 0 && (() => {
-      const t = targets[curTarget]; if (!t) return false;
+      const t = tgtKnown(targets[curTarget]); if (!t) return false;
       const b = new THREE.Vector3(t.x-ship.x, t.y-ship.y, t.z-ship.z).applyQuaternion(toBodyQ());
       return b.z < 0;
     })(),
@@ -2302,7 +2633,7 @@ function updateDisplays() {
 function updateNavball() {
   const orbQ = orbitalFrame();
   ball.quaternion.copy(shipQ.clone().invert().multiply(orbQ));
-  const t = targets[curTarget];
+  const t = tgtKnown(targets[curTarget]);
   if (t) {
     const dir = new THREE.Vector3(t.x-ship.x, t.y-ship.y, t.z-ship.z).normalize().applyQuaternion(orbQ.clone().invert());
     placeOnBall(markerTgt, dir);
@@ -2331,7 +2662,7 @@ function animateCockpit(dt) {
     // (curTarget then points at a different target); otherwise the locked target
     const tg = targets[curTarget];
     const kill = flashes.filter(f => f.kind === 'kill').pop();
-    const aimAt = kill || (tg && !tg.gone ? tg : null);
+    const aimAt = kill || tgtKnown(tg);           // far targets: the datalink estimate
     let azT = 0, elT = 0;
     if (aimAt) {
       const vb = new THREE.Vector3(aimAt.x-ship.x, aimAt.y-ship.y, aimAt.z-ship.z).applyQuaternion(toBodyQ());
@@ -2350,9 +2681,9 @@ function animateCockpit(dt) {
   }
   // Laser gimbal: slaved to the locked target within a few degrees of the nose, stowed when unlocked
   {
-    const tg = targets[curTarget];
+    const tg = tgtLocal(targets[curTarget]);
     let azT = 0, elT = 0;
-    if (tg && !tg.gone) {
+    if (tg) {
       const vb = new THREE.Vector3(tg.x-ship.x, tg.y-ship.y, tg.z-ship.z).applyQuaternion(toBodyQ());
       azT = Math.atan2(vb.x, -vb.z); elT = Math.atan2(vb.y, -vb.z);
     }
@@ -2679,7 +3010,7 @@ function onAction(id) {
       break;
     case 'toggleRad': radDeployed = !radDeployed; sfx.click();
       log(radDeployed ? 'RADIATORS DEPLOYED' : 'RADIATORS STOWED'); break;
-    case 'cycleTarget': if (targets.length) curTarget = (curTarget+1) % targets.length; break;
+    case 'cycleTarget': cycleTarget(); break;
     case 'cycleRange': rangeIdx = (rangeIdx+1) % RANGES.length; break;
     case 'guardMaster': masterGuardOpen = !masterGuardOpen; sfx.click(); break;
     case 'masterArm':
