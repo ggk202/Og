@@ -882,9 +882,13 @@ for (const s of switchDefs) {
   }
 }
 
-// Utility buttons beside the placard: lamp test, MFD page reset, fuel pod jettison, scope IR toggle
+// Utility buttons beside the placard: lamp test, MFD page reset, fuel pod jettison, scope IR toggle,
+// lead hold toggle (lit while engaged)
 makeButton(0.34, -0.43, 'JETT', () => jettisonPods());
 makeButton(0.42, -0.43, 'IR', () => onAction('toggleIR'));
+makeButton(0.50, -0.43, 'LEAD', () => onAction('leadHold'));
+const leadLampMat = new THREE.MeshStandardMaterial({ color: '#2a1600', emissive: '#ffb000', emissiveIntensity: 0, roughness: 0.4 });
+add(new THREE.SphereGeometry(0.008, 16, 12), leadLampMat, 0.50, -0.39, PANEL_Z + 0.012);
 makeButton(-0.26, -0.43, 'TEST', () => { lampTestT = 3; sfx.click(); });
 makeButton(0.26, -0.43, 'RESET', () => {
   mfds.forEach((m, i) => { m.page = mfdDefs[i].page; m.on = true; drawMFD(m); });
@@ -1552,6 +1556,7 @@ function updateDisplays() {
     })(),
   };
   for (const d of lampDefs) d.mat.emissiveIntensity = (lampOn[d.id] || lampTestT > 0) ? 2.5 : 0;
+  leadLampMat.emissiveIntensity = (leadHold || lampTestT > 0) ? 2.5 : 0;
   for (const m of mfds) drawMFD(m);
 }
 
