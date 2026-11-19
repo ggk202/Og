@@ -826,6 +826,23 @@ for (const s of switchDefs) {
 }
 
 
+// Mouse hit areas for switches and guard covers. They are invisible and call the same action as the key.
+const switchHits = [];
+const hitMat = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false });
+const switchActions = {
+  rad: () => onAction('toggleRad'), stab: () => onAction('rcsStab'), arm: () => onAction('armLaser'),
+  master: () => onAction('masterArm'), aux1: () => onAction('aux1'), aux2: () => onAction('aux2'), aux3: () => onAction('aux3'),
+};
+for (const s of switchDefs) {
+  const h = new THREE.Mesh(box(0.08, 0.1, 0.04), hitMat); h.position.set(s.x, SW_Y, PANEL_Z + 0.02);
+  h.userData = { onPress: switchActions[s.id] }; cockpit.add(h); switchHits.push(h);
+  if (s.guard) {
+    const gh = new THREE.Mesh(box(0.08, 0.08, 0.02), hitMat); gh.position.set(s.x, -0.52, PANEL_Z + 0.08);
+    gh.userData = { onPress: () => onAction(s.id === 'master' ? 'guardMaster' : 'guardLaser') };
+    cockpit.add(gh); switchHits.push(gh);
+  }
+}
+
 // Utility buttons beside the placard: lamp test, MFD page reset, and fuel pod jettison
 makeButton(0.34, -0.43, 'JETT', () => jettisonPods());
 makeButton(-0.26, -0.43, 'TEST', () => { lampTestT = 3; sfx.click(); });
@@ -1359,7 +1376,7 @@ function animateCockpit(dt) {
     d.tex.needsUpdate = true;
   }
   const k = 1 - Math.exp(-dt*18);
-  const state = { rad: radDeployed, stab: rcsStab, arm: laserArmed, master: true };
+  const state = { rad: radDeployed, stab: rcsStab, arm: laserArmed, master: true, ...auxOn };
   for (const s of switchDefs) {
     if (s.id in state) {
       // Master arm is a three-position lever: ON up, OFF centre, TNG down
@@ -1538,34 +1555,40 @@ function jettisonPods() {
   podsOn = false; podProp = 0;
   sfx.hullThump(); log('FUEL PODS JETTISONED');
 }
+// Flavour toggles for the auxiliary switches (they move the lever and click; no other effect)
+let auxOn = { aux1: false, aux2: false, aux3: false };
+// One action handler for both keys and mouse clicks on switches
+function onAction(id) {
+  switch (id) {
+    case 'fireRail': railReq = true; break;
+    case 'rcsStab': rcsStab = !rcsStab; sfx.click(); break;
+    case 'guardLaser': guardOpen = !guardOpen; sfx.click(); break;
+    case 'armLaser':
+      if (guardOpen) { laserArmed = !laserArmed; sfx.click(); log(laserArmed ? 'LASER ARMED' : 'LASER SAFED'); }
+      else log('ARM GUARD CLOSED');
+      break;
+    case 'toggleRad': radDeployed = !radDeployed; sfx.click();
+      log(radDeployed ? 'RADIATORS DEPLOYED' : 'RADIATORS STOWED'); break;
+    case 'cycleTarget': if (targets.length) curTarget = (curTarget+1) % targets.length; break;
+    case 'cycleRange': rangeIdx = (rangeIdx+1) % RANGES.length; break;
+    case 'guardMaster': masterGuardOpen = !masterGuardOpen; sfx.click(); break;
+    case 'masterArm':
+      if (masterGuardOpen) {
+        masterMode = { OFF: 'ON', ON: 'TNG', TNG: 'OFF' }[masterMode];
+        sfx.click(); log(masterMode === 'OFF' ? 'MASTER ARM SAFE' : `MASTER ARM ${masterMode}`);
+      }
+      else log('MASTER ARM COVER CLOSED');
+      break;
+    case 'jettison': jettisonPods(); break;
+    case 'warpUp': warpIdx = Math.min(warpIdx+1, WARPS.length-1); break;
+    case 'warpDown': warpIdx = Math.max(warpIdx-1, 0); break;
+    case 'pause': paused = !paused; break;
+    case 'aux1': case 'aux2': case 'aux3': auxOn[id] = !auxOn[id]; sfx.click(); break;
+  }
+}
 function onEdge(code) {
   for (const a of ACTIONS) {
-    if (bindings[a.id] !== code || !a.edge) continue;
-    switch (a.id) {
-      case 'fireRail': railReq = true; break;
-      case 'rcsStab': rcsStab = !rcsStab; sfx.click(); break;
-      case 'guardLaser': guardOpen = !guardOpen; sfx.click(); break;
-      case 'armLaser':
-        if (guardOpen) { laserArmed = !laserArmed; sfx.click(); log(laserArmed ? 'LASER ARMED' : 'LASER SAFED'); }
-        else log('ARM GUARD CLOSED');
-        break;
-      case 'toggleRad': radDeployed = !radDeployed; sfx.click();
-        log(radDeployed ? 'RADIATORS DEPLOYED' : 'RADIATORS STOWED'); break;
-      case 'cycleTarget': if (targets.length) curTarget = (curTarget+1) % targets.length; break;
-      case 'cycleRange': rangeIdx = (rangeIdx+1) % RANGES.length; break;
-      case 'guardMaster': masterGuardOpen = !masterGuardOpen; sfx.click(); break;
-      case 'masterArm':
-        if (masterGuardOpen) {
-          masterMode = { OFF: 'ON', ON: 'TNG', TNG: 'OFF' }[masterMode];
-          sfx.click(); log(masterMode === 'OFF' ? 'MASTER ARM SAFE' : `MASTER ARM ${masterMode}`);
-        }
-        else log('MASTER ARM COVER CLOSED');
-        break;
-      case 'jettison': jettisonPods(); break;
-      case 'warpUp': warpIdx = Math.min(warpIdx+1, WARPS.length-1); break;
-      case 'warpDown': warpIdx = Math.max(warpIdx-1, 0); break;
-      case 'pause': paused = !paused; break;
-    }
+    if (bindings[a.id] === code && a.edge) onAction(a.id);
   }
 }
 function anyFlightInput(c) {
@@ -1598,7 +1621,7 @@ window.addEventListener('pointerdown', e => {
   // Panel buttons take the click; anything else is a weapon trigger
   ndc.set(e.clientX/window.innerWidth*2 - 1, -(e.clientY/window.innerHeight)*2 + 1);
   raycaster.setFromCamera(ndc, camera);
-  const hit = raycaster.intersectObjects(clickables, false)[0];
+  const hit = raycaster.intersectObjects([...clickables, ...switchHits], false)[0];
   if (hit) { hit.object.userData.onPress(); hit.object.userData.pressT = 0.12; return; }
   held.add(code);
   onEdge(code);
