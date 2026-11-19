@@ -71,6 +71,8 @@ const PDC_RANGE = 5000, PDC_V = 1500, PDC_RATE = 8, PDC_ENERGY = 2e4, PDC_SPREAD
 const TORP_ACCEL = 40, TORP_BURN = 30, TORP_KILL_R = 1.5, TORP_HULL_R = 20, HOSTILE_SALVO_T = 15;
 let torpedoes = [], tracers = [], hullHits = 0;
 let pdcActive = false, pdcSlewRate = 0, pdcLastFire = -1e9;   // sound state set by the physics step
+let torpWarn = false;                 // a torpedo is inbound within TORP_WARN_R
+const TORP_WARN_R = 10000;
 const POWER = { reactor: 200e3, reactorWaste: 200e3, avionics: 40e3, battCap: 5e6 };
 const THERM = { capacity: 2e5, radArea: 600, radStowedArea: 40, eps: 0.9, sigma: 5.670374e-8,
   tSpace: 3, tMax: 400, tWarn: 380, tStart: 297 };
@@ -468,6 +470,19 @@ function physicsStep(h) {
       if (tp.dead) continue;
       const r = Math.hypot(tp.x-ship.x, tp.y-ship.y, tp.z-ship.z);
       if (r < PDC_RANGE && r < nearR) { near = tp; nearR = r; }
+    }
+    // Inbound torpedoes: within warning range and closing on the ship
+    torpWarn = false;
+    for (const tp of torpedoes) {
+      if (tp.dead) continue;
+      const rel = new THREE.Vector3(tp.x-ship.x, tp.y-ship.y, tp.z-ship.z);
+      const d = rel.length();
+      if (d > TORP_WARN_R) continue;
+      const relV = new THREE.Vector3(tp.vx-ship.vx, tp.vy-ship.vy, tp.vz-ship.vz);
+      if (-rel.dot(relV)/d > 0) {
+        torpWarn = true;
+        if (!tp.warned) { tp.warned = true; log(`INCOMING TORPEDO  ${(d/1000).toFixed(1)} KM`); }
+      }
     }
     pdcActive = !!near;
     pdcSlewRate = 0;
@@ -1902,12 +1917,16 @@ function animateCockpit(dt) {
   const t = performance.now()/1000;
   camera.position.y = 0.05 + 0.0015*Math.sin(t*0.9) + 0.001*Math.sin(t*2.3);
   camera.position.x = 0.001*Math.sin(t*0.6);
+  // Slight shake of the whole cockpit while the PDCs fire
+  const pdcShake = simT - pdcLastFire < 0.25 ? 0.0012 : 0;
+  camera.position.x += (Math.random()*2 - 1)*pdcShake;
+  camera.position.y += (Math.random()*2 - 1)*pdcShake;
 }
 
 /* ================= AUDIO (interior sounds; hull-conducted via low-pass bus) ================= */
 let actx = null, noiseBuf = null, intBus, hullBus, hullLP;
 let engineG, engineLP, rcsG, laserG, pumpG, alarmG;
-let pdcMotorO, pdcMotorG, pdcSlewO, pdcSlewG, pdcRumbleG;
+let pdcMotorO, pdcMotorG, pdcSlewO, pdcSlewG, pdcRumbleG, pdcChatG, torpWarnO, torpWarnG;
 // Hull shudder after a railgun shot: a deep sawtooth boom plus a rattle that is tremolo-modulated.
 // Everything goes through the hull bus, so it is heard as conducted vibration.
 function hullShudder(delay = 0) {
@@ -1956,11 +1975,11 @@ const sfx = {
     burst(hullBus, 'lowpass', 180, 0.7, big ? 1.2 : 0.3, big ? 0.9 : 0.4);
   },
   // One PDC round: a mechanical clack in the cabin, a breech slam and a thump through the hull
+  // Gatling round: a muffled clack in the cabin and a soft thump through the hull. The chatter loop carries the rate.
   pdcRound() {
     if (!actx) return;
-    burst(intBus, 'bandpass', 1800, 1.2, 0.015, 0.25);
-    burst(hullBus, 'lowpass', 400, 0.7, 0.05, 0.5);
-    thump(hullBus, 48, 0.14, 0.7);
+    burst(intBus, 'bandpass', 1100, 1.5, 0.012, 0.05);
+    thump(hullBus, 48, 0.12, 0.3);
   },
   tick() { if (actx) burst(hullBus, 'lowpass', 600, 0.7, 0.012, 0.25); },
   rcsPuff() { if (actx) burst(intBus, 'bandpass', 1500, 1.2, 0.06, 0.03); },
@@ -2043,12 +2062,14 @@ function initAudio() {
   const pdcMotorF = actx.createBiquadFilter(); pdcMotorF.type = 'bandpass'; pdcMotorF.frequency.value = 1600; pdcMotorF.Q.value = 1.5;
   pdcMotorG = actx.createGain(); pdcMotorG.gain.value = 0;
   pdcMotorO.connect(pdcMotorF); pdcMotorH.connect(pdcMotorF);
-  pdcMotorF.connect(pdcMotorG).connect(intBus);
+  const pdcMotorLP = actx.createBiquadFilter(); pdcMotorLP.type = 'lowpass'; pdcMotorLP.frequency.value = 1100;
+  pdcMotorF.connect(pdcMotorLP).connect(pdcMotorG).connect(intBus);
   pdcMotorO.start(); pdcMotorH.start();
   // Slew whine: a sine whose pitch follows how fast the line of sight to the target turns
   pdcSlewO = actx.createOscillator(); pdcSlewO.type = 'sine'; pdcSlewO.frequency.value = 800;
   pdcSlewG = actx.createGain(); pdcSlewG.gain.value = 0;
-  pdcSlewO.connect(pdcSlewG).connect(intBus); pdcSlewO.start();
+  const pdcSlewLP = actx.createBiquadFilter(); pdcSlewLP.type = 'lowpass'; pdcSlewLP.frequency.value = 1000;
+  pdcSlewO.connect(pdcSlewLP).connect(pdcSlewG).connect(intBus); pdcSlewO.start();
   // Sustained hull rumble while the PDCs fire: a low sawtooth and noise, conducted through the hull
   const rumO = actx.createOscillator(); rumO.type = 'sawtooth'; rumO.frequency.value = 26;
   const rumN = loopNoise();
@@ -2057,6 +2078,21 @@ function initAudio() {
   rumO.connect(rumF); rumN.connect(rumF);
   rumF.connect(pdcRumbleG).connect(hullBus);
   rumO.start(); rumN.start();
+  // Gatling chatter: noise through a bandpass, gated by a 42 Hz tremolo, muffled through the structure
+  const chatN = loopNoise();
+  const chatF = actx.createBiquadFilter(); chatF.type = 'bandpass'; chatF.frequency.value = 1300; chatF.Q.value = 1.2;
+  const chatLP = actx.createBiquadFilter(); chatLP.type = 'lowpass'; chatLP.frequency.value = 900;
+  const chatTrem = actx.createGain(); chatTrem.gain.value = 0.5;
+  const chatLFO = actx.createOscillator(); chatLFO.frequency.value = 42;
+  const chatDepth = actx.createGain(); chatDepth.gain.value = 0.5;
+  chatLFO.connect(chatDepth).connect(chatTrem.gain);
+  pdcChatG = actx.createGain(); pdcChatG.gain.value = 0;
+  chatN.connect(chatF).connect(chatLP).connect(chatTrem).connect(pdcChatG).connect(intBus);
+  chatN.start(); chatLFO.start();
+  // Torpedo warning: a square tone pulsing fast, alternating between two pitches
+  torpWarnO = actx.createOscillator(); torpWarnO.type = 'square'; torpWarnO.frequency.value = 1000;
+  torpWarnG = actx.createGain(); torpWarnG.gain.value = 0;
+  torpWarnO.connect(torpWarnG).connect(intBus); torpWarnO.start();
   const al = actx.createOscillator(); al.type = 'square'; al.frequency.value = 880;
   alarmG = actx.createGain(); alarmG.gain.value = 0; al.connect(alarmG).connect(intBus); al.start();
 }
@@ -2077,11 +2113,15 @@ function audioFrame() {
   alarmG.gain.setTargetAtTime(warn && (Math.floor(t*2) % 2 === 0) ? 0.02 : 0, t, 0.01);
   // PDC: motor spin-up and wind-down, slew whine, and the hull rumble while rounds are going out
   pdcMotorO.frequency.setTargetAtTime(pdcActive ? 1400 : 300, t, pdcActive ? 0.35 : 0.5);
-  pdcMotorG.gain.setTargetAtTime(pdcActive ? 0.05 : 0, t, pdcActive ? 0.25 : 0.4);
+  pdcMotorG.gain.setTargetAtTime(pdcActive ? 0.02 : 0, t, pdcActive ? 0.25 : 0.4);
   pdcSlewO.frequency.setTargetAtTime(800 + 2400*Math.min(1, pdcSlewRate/0.1), t, 0.05);
-  pdcSlewG.gain.setTargetAtTime(pdcActive ? 0.01 + 0.05*Math.min(1, pdcSlewRate/0.05) : 0, t, 0.05);
+  pdcSlewG.gain.setTargetAtTime(pdcActive ? 0.004 + 0.02*Math.min(1, pdcSlewRate/0.05) : 0, t, 0.05);
   const pdcFiring = simT - pdcLastFire < 0.25;
   pdcRumbleG.gain.setTargetAtTime(pdcFiring ? 0.35 : 0, t, pdcFiring ? 0.03 : 0.15);
+  pdcChatG.gain.setTargetAtTime(pdcFiring ? 0.08 : 0, t, pdcFiring ? 0.02 : 0.08);
+  // Torpedo warning: a fast two-pitch pulse while a torpedo is inbound within the warning range
+  torpWarnO.frequency.setTargetAtTime(Math.floor(t*4) % 2 ? 1300 : 1000, t, 0.005);
+  torpWarnG.gain.setTargetAtTime(torpWarn && Math.floor(t*8) % 2 === 0 ? 0.06 : 0, t, 0.005);
 }
 
 /* ================= CONTROLS, MENU, POINTER ================= */
