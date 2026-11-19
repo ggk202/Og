@@ -115,6 +115,7 @@ let mainProp = SHIP.mainProp0, rcsProp = SHIP.rcsProp0;
 let battery = POWER.battCap, hullT = THERM.tStart;
 let radDeployed = true, rcsStab = true, laserArmed = false, guardOpen = false, brownout = false;
 let lampTestT = 0;   // seconds of lamp test remaining
+let keyBuf = '';     // keypad entry buffer, shown on the COMMS page
 let simT = 0, warpIdx = 0, paused = false, menuOpen = false, started = false;
 let railCD = 0, railReq = false, thrustFrac = 0, rcsActive = false, laserFiring = false;
 let curTarget = 0, rangeIdx = 1, tickAcc = 0;
@@ -775,6 +776,19 @@ makeButton(0.26, -0.43, 'RESET', () => {
   sfx.click();
 });
 
+// Keypad below the navball: digits, CLR and ENT. ENT transmits the entry (logged to COMMS) and clears it.
+// Digits are kept in a buffer so the same keypad can enter values for weapons and modules later.
+function keypadPress(k) {
+  if (k === 'CLR') keyBuf = '';
+  else if (k === 'ENT') {
+    if (keyBuf) log(`TX ${keyBuf}`);
+    keyBuf = '';
+  } else if (keyBuf.length < 8) keyBuf += k;
+  sfx.click();
+}
+const keypadKeys = [['1', '2', '3'], ['4', '5', '6'], ['7', '8', '9'], ['CLR', '0', 'ENT']];
+keypadKeys.forEach((row, r) => row.forEach((k, c) => makeButton(-0.08 + c*0.08, -0.19 - r*0.05, k, () => keypadPress(k))));
+
 /* ================= DISPLAY HELPERS ================= */
 function dvRemaining() {
   const m0 = SHIP.dry + mainProp + rcsProp, m1 = SHIP.dry + rcsProp;
@@ -1015,6 +1029,7 @@ function drawComms(g, W, H, idx) {
   const mp = moonPos(simT);
   txt(g, 30, 74, `EARTH LINK ${(Math.hypot(ship.x,ship.y,ship.z)/C*1000).toFixed(2)} ms   MOON LINK ${(Math.hypot(mp[0]-ship.x,mp[1]-ship.y,mp[2]-ship.z)/C).toFixed(2)} s`, PH, '22px monospace');
   txt(g, 30, 100, `QUEUED GROUND MESSAGES ${pending.length}`, DIM, '22px monospace');
+  txt(g, 30, 126, `KEYPAD ${keyBuf}_`, AMB, '24px monospace');
   let y = 140;
   for (const m of msgs.slice(-12)) {
     txt(g, 30, y, `${fmtTime(m.t)}  ${m.text}`, m.text.startsWith('[GND]') ? AMB : PH, '24px monospace');
