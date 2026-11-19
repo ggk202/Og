@@ -1351,9 +1351,16 @@ function drawShip(g, W, H, idx) {
 const SCOPE_FOV = 4 * Math.PI/180;
 const SCOPE_AZ_MAX = 60 * Math.PI/180, SCOPE_EL_MAX = 45 * Math.PI/180, SCOPE_SLEW = 25 * Math.PI/180;
 // Scope view rotation: the gimbal turns the boresight, so the view is taken in the gimbal's frame
+function scopeGimbalQ() {
+  return new THREE.Quaternion().setFromEuler(new THREE.Euler(scopeEl, -scopeAz, 0, 'YXZ'));
+}
 function scopeViewQ() {
-  const gq = new THREE.Quaternion().setFromEuler(new THREE.Euler(scopeEl, -scopeAz, 0, 'YXZ'));
-  return gq.invert().multiply(toBodyQ());
+  return scopeGimbalQ().invert().multiply(toBodyQ());
+}
+// The spinal boresight (body -Z) in gimbal axes. It is already a body vector, so only the gimbal rotates it;
+// scopeViewQ() is for world vectors and would apply the ship attitude twice.
+function boresightInScope() {
+  return new THREE.Vector3(0, 0, -1).applyQuaternion(scopeGimbalQ().invert());
 }
 const STAR_DIRS = Array.from({ length: 260 }, () => ({
   v: new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize(),
@@ -1432,7 +1439,7 @@ function drawScope(g, W, H, idx) {
   // Spinal weapon aim point: the ship's boresight (body -Z), where the railgun and laser fire.
   // When the gimbal has turned away from it, the reticle is held at the nearest frame edge.
   {
-    const wv = new THREE.Vector3(0, 0, -1).applyQuaternion(bq);
+    const wv = boresightInScope();
     const rx = cx + Math.atan2(wv.x, -wv.z)/SCOPE_FOV*R;
     const ry = cy - Math.atan2(wv.y, -wv.z)/SCOPE_FOV*R;
     const ax = clamp(rx, FX + 16, FX + FW - 16), ay = clamp(ry, FY + 16, FY + FH - 16);
@@ -1465,7 +1472,7 @@ function drawScope(g, W, H, idx) {
   const leadP = leadW ? proj(leadW.clone().applyQuaternion(bq)) : null;
   if (leadP) {
     // Steering cue: dashed line from the unclamped aim point to the lead diamond, when both are in the frame
-    const wv = new THREE.Vector3(0, 0, -1).applyQuaternion(bq);
+    const wv = boresightInScope();
     const rx = cx + Math.atan2(wv.x, -wv.z)/SCOPE_FOV*R;
     const ry = cy - Math.atan2(wv.y, -wv.z)/SCOPE_FOV*R;
     if (rx > FX && rx < FX + FW && ry > FY && ry < FY + FH) {
