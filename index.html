@@ -70,6 +70,7 @@ const PDC_RANGE = 5000, PDC_V = 1500, PDC_RATE = 8, PDC_ENERGY = 2e4, PDC_SPREAD
 // Hostile torpedoes: accelerate toward the ship for TORP_BURN seconds, then coast
 const TORP_ACCEL = 40, TORP_BURN = 30, TORP_KILL_R = 1.5, TORP_HULL_R = 20, HOSTILE_SALVO_T = 15;
 let torpedoes = [], tracers = [], hullHits = 0;
+let pdcActive = false, pdcSlewRate = 0, pdcLastFire = -1e9;   // sound state set by the physics step
 const POWER = { reactor: 200e3, reactorWaste: 200e3, avionics: 40e3, battCap: 5e6 };
 const THERM = { capacity: 2e5, radArea: 600, radStowedArea: 40, eps: 0.9, sigma: 5.670374e-8,
   tSpace: 3, tMax: 400, tWarn: 380, tStart: 297 };
@@ -459,6 +460,23 @@ function physicsStep(h) {
     }
     log('HOSTILE LAUNCH  4 TORPEDOES');
   }
+  // Engagement state for the sound: the nearest torpedo in range spins the motors up, and its line-of-sight
+  // rate drives the slew whine
+  {
+    let near = null, nearR = Infinity;
+    for (const tp of torpedoes) {
+      if (tp.dead) continue;
+      const r = Math.hypot(tp.x-ship.x, tp.y-ship.y, tp.z-ship.z);
+      if (r < PDC_RANGE && r < nearR) { near = tp; nearR = r; }
+    }
+    pdcActive = !!near;
+    pdcSlewRate = 0;
+    if (near) {
+      const rel = new THREE.Vector3(near.x-ship.x, near.y-ship.y, near.z-ship.z);
+      const relV = new THREE.Vector3(near.vx-ship.vx, near.vy-ship.vy, near.vz-ship.vz);
+      pdcSlewRate = rel.clone().cross(relV).length() / rel.lengthSq();
+    }
+  }
   for (const m of PDC_MOUNTS) {
     m.cd = Math.max(0, m.cd - h);
     if (m.cd > 0 || masterMode === 'OFF' || battery < PDC_ENERGY) continue;
@@ -484,6 +502,7 @@ function physicsStep(h) {
     tracers.push({ x: mP.x+aim.x*2, y: mP.y+aim.y*2, z: mP.z+aim.z*2,
       vx: ship.vx+aim.x*PDC_V, vy: ship.vy+aim.y*PDC_V, vz: ship.vz+aim.z*PDC_V, age: 0, dead: false });
     m.cd = 1/PDC_RATE; battery -= PDC_ENERGY;
+    sfx.pdcRound(); pdcLastFire = simT;
   }
 
   const mass = shipMass();
@@ -1888,6 +1907,7 @@ function animateCockpit(dt) {
 /* ================= AUDIO (interior sounds; hull-conducted via low-pass bus) ================= */
 let actx = null, noiseBuf = null, intBus, hullBus, hullLP;
 let engineG, engineLP, rcsG, laserG, pumpG, alarmG;
+let pdcMotorO, pdcMotorG, pdcSlewO, pdcSlewG, pdcRumbleG;
 // Hull shudder after a railgun shot: a deep sawtooth boom plus a rattle that is tremolo-modulated.
 // Everything goes through the hull bus, so it is heard as conducted vibration.
 function hullShudder(delay = 0) {
@@ -1934,6 +1954,13 @@ const sfx = {
     if (!actx) return;
     thump(hullBus, big ? 35 : 60, big ? 2.0 : 0.6, big ? 1.2 : 0.5);
     burst(hullBus, 'lowpass', 180, 0.7, big ? 1.2 : 0.3, big ? 0.9 : 0.4);
+  },
+  // One PDC round: a mechanical clack in the cabin, a breech slam and a thump through the hull
+  pdcRound() {
+    if (!actx) return;
+    burst(intBus, 'bandpass', 1800, 1.2, 0.015, 0.25);
+    burst(hullBus, 'lowpass', 400, 0.7, 0.05, 0.5);
+    thump(hullBus, 48, 0.14, 0.7);
   },
   tick() { if (actx) burst(hullBus, 'lowpass', 600, 0.7, 0.012, 0.25); },
   rcsPuff() { if (actx) burst(intBus, 'bandpass', 1500, 1.2, 0.06, 0.03); },
@@ -2009,6 +2036,27 @@ function initAudio() {
   laserG = actx.createGain(); laserG.gain.value = 0;
   humO1.connect(humLP); humO2.connect(humLP); humLP.connect(laserG).connect(intBus);
   humO1.start(); humO2.start();
+  // PDC motor whine: a sawtooth with a harmonic, through a bandpass. The pitch and level are set per frame
+  // in audioFrame, so it spins up on engagement and winds down afterwards.
+  pdcMotorO = actx.createOscillator(); pdcMotorO.type = 'sawtooth'; pdcMotorO.frequency.value = 300;
+  const pdcMotorH = actx.createOscillator(); pdcMotorH.type = 'sine'; pdcMotorH.frequency.value = 600;
+  const pdcMotorF = actx.createBiquadFilter(); pdcMotorF.type = 'bandpass'; pdcMotorF.frequency.value = 1600; pdcMotorF.Q.value = 1.5;
+  pdcMotorG = actx.createGain(); pdcMotorG.gain.value = 0;
+  pdcMotorO.connect(pdcMotorF); pdcMotorH.connect(pdcMotorF);
+  pdcMotorF.connect(pdcMotorG).connect(intBus);
+  pdcMotorO.start(); pdcMotorH.start();
+  // Slew whine: a sine whose pitch follows how fast the line of sight to the target turns
+  pdcSlewO = actx.createOscillator(); pdcSlewO.type = 'sine'; pdcSlewO.frequency.value = 800;
+  pdcSlewG = actx.createGain(); pdcSlewG.gain.value = 0;
+  pdcSlewO.connect(pdcSlewG).connect(intBus); pdcSlewO.start();
+  // Sustained hull rumble while the PDCs fire: a low sawtooth and noise, conducted through the hull
+  const rumO = actx.createOscillator(); rumO.type = 'sawtooth'; rumO.frequency.value = 26;
+  const rumN = loopNoise();
+  const rumF = actx.createBiquadFilter(); rumF.type = 'lowpass'; rumF.frequency.value = 130; rumF.Q.value = 0.8;
+  pdcRumbleG = actx.createGain(); pdcRumbleG.gain.value = 0;
+  rumO.connect(rumF); rumN.connect(rumF);
+  rumF.connect(pdcRumbleG).connect(hullBus);
+  rumO.start(); rumN.start();
   const al = actx.createOscillator(); al.type = 'square'; al.frequency.value = 880;
   alarmG = actx.createGain(); alarmG.gain.value = 0; al.connect(alarmG).connect(intBus); al.start();
 }
@@ -2027,6 +2075,13 @@ function audioFrame() {
   pumpG.gain.setTargetAtTime(laserFiring ? 0.1 : 0, t, 0.05);
   const warn = hullT > THERM.tWarn || battery < 0.15*POWER.battCap;
   alarmG.gain.setTargetAtTime(warn && (Math.floor(t*2) % 2 === 0) ? 0.02 : 0, t, 0.01);
+  // PDC: motor spin-up and wind-down, slew whine, and the hull rumble while rounds are going out
+  pdcMotorO.frequency.setTargetAtTime(pdcActive ? 1400 : 300, t, pdcActive ? 0.35 : 0.5);
+  pdcMotorG.gain.setTargetAtTime(pdcActive ? 0.05 : 0, t, pdcActive ? 0.25 : 0.4);
+  pdcSlewO.frequency.setTargetAtTime(800 + 2400*Math.min(1, pdcSlewRate/0.1), t, 0.05);
+  pdcSlewG.gain.setTargetAtTime(pdcActive ? 0.01 + 0.05*Math.min(1, pdcSlewRate/0.05) : 0, t, 0.05);
+  const pdcFiring = simT - pdcLastFire < 0.25;
+  pdcRumbleG.gain.setTargetAtTime(pdcFiring ? 0.35 : 0, t, pdcFiring ? 0.03 : 0.15);
 }
 
 /* ================= CONTROLS, MENU, POINTER ================= */
