@@ -247,7 +247,7 @@ function controlState() {
   const h = a => (held.has(bindings[a]) ? 1 : 0);
   return {
     pitch: h('pitchUp') - h('pitchDown'),
-    yaw:   h('yawRight') - h('yawLeft'),
+    yaw:   h('yawLeft') - h('yawRight'),
     roll:  h('rollLeft') - h('rollRight'),
     tx: h('transRight') - h('transLeft'),
     ty: h('transUp') - h('transDown'),
@@ -1319,9 +1319,12 @@ function irLevel(t) {
   return n.includes('TUG') ? 0.85 : n.includes('DERELICT') ? 0.35 : n.includes('DEBRIS') ? 0.2 : 0.4;
 }
 function drawScope(g, W, H, idx) {
-  mfdHeader(g, W, `SCOPE  ${irOn ? 'IR' : 'VIS'}  FOV 4 DEG`, idx);
-  const cx = W/2, cy = H/2 + 12, R = 170;
+  mfdHeader(g, W, `SCOPE  ${irOn ? 'IR' : 'VIS'}`, idx);
+  // Frame and view area, following the reference layout: status text above, labels at the sides, softkeys below
+  const FX = 60, FY = 108, FW = 640, FH = 292, cx = FX + FW/2, cy = FY + FH/2, R = 150;
   const bq = toBodyQ();
+  const tgt = targets[curTarget];
+  const lockOk = !!tgt && !tgt.gone;
   const proj = v => {
     if (v.z >= 0) return null;                       // behind the scope (forward is -Z)
     const az = Math.atan2(v.x, -v.z), el = Math.atan2(v.y, -v.z);
@@ -1333,20 +1336,29 @@ function drawScope(g, W, H, idx) {
     const sr = Math.max(3, (radius/dist)/SCOPE_FOV*R);
     if (irOn) {
       const gr = g.createRadialGradient(p.x, p.y, 0, p.x, p.y, sr*2.2);
-      gr.addColorStop(0, `rgba(255,255,255,${0.4 + heat*0.6})`);
-      gr.addColorStop(0.5, `rgba(255,190,120,${heat*0.5})`);
+      gr.addColorStop(0, `rgba(255,255,255,${0.5 + heat*0.5})`);
+      gr.addColorStop(0.5, `rgba(230,230,230,${heat*0.6})`);
       gr.addColorStop(1, 'rgba(0,0,0,0)');
       g.fillStyle = gr; g.beginPath(); g.arc(p.x, p.y, sr*2.2, 0, Math.PI*2); g.fill();
     } else {
-      g.fillStyle = '#9aa6b0'; g.beginPath(); g.arc(p.x, p.y, sr, 0, Math.PI*2); g.fill();
+      g.fillStyle = '#b8c4cc'; g.beginPath(); g.arc(p.x, p.y, sr, 0, Math.PI*2); g.fill();
     }
   };
+  // View area
   g.save();
-  g.beginPath(); g.arc(cx, cy, R, 0, Math.PI*2); g.clip();
-  g.fillStyle = irOn ? '#030303' : '#02070d'; g.fillRect(0, 0, W, H);
-  if (!irOn) for (const s of STAR_DIRS) {
-    const p = proj(s.v.clone().applyQuaternion(bq));
-    if (p) { g.fillStyle = `rgba(220,235,255,${s.b})`; g.fillRect(p.x, p.y, 1.5, 1.5); }
+  g.beginPath(); g.rect(FX, FY, FW, FH); g.clip();
+  g.fillStyle = irOn ? '#222' : '#061016'; g.fillRect(FX, FY, FW, FH);
+  if (irOn) {
+    // Sensor grain on the grey background
+    for (let i = 0; i < 900; i++) {
+      const v = 40 + Math.random()*50 | 0;
+      g.fillStyle = `rgba(${v},${v},${v},0.5)`; g.fillRect(FX + Math.random()*FW, FY + Math.random()*FH, 2, 2);
+    }
+  } else {
+    for (const s of STAR_DIRS) {
+      const p = proj(s.v.clone().applyQuaternion(bq));
+      if (p) { g.fillStyle = `rgba(220,235,255,${s.b})`; g.fillRect(p.x, p.y, 1.5, 1.5); }
+    }
   }
   const mp = moonPos(simT);
   const vM = new THREE.Vector3(mp[0]-ship.x, mp[1]-ship.y, mp[2]-ship.z);
@@ -1356,23 +1368,13 @@ function drawScope(g, W, H, idx) {
     const vt = new THREE.Vector3(t.x-ship.x, t.y-ship.y, t.z-ship.z);
     blob(vt.clone().applyQuaternion(bq), t.radius, vt.length(), irLevel(t));
   }
-  // Reticle
-  g.strokeStyle = irOn ? 'rgba(255,255,255,0.5)' : PH; g.lineWidth = 1.5;
-  g.beginPath();
-  g.moveTo(cx - R, cy); g.lineTo(cx - 10, cy); g.moveTo(cx + 10, cy); g.lineTo(cx + R, cy);
-  g.moveTo(cx, cy - R); g.lineTo(cx, cy - 10); g.moveTo(cx, cy + 10); g.lineTo(cx, cy + R);
-  g.stroke();
-  g.restore();
   // Lock brackets on the current target
-  const tgt = targets[curTarget];
-  let lockText = 'NO LOCK';
-  if (tgt && !tgt.gone) {
+  if (lockOk) {
     const vt = new THREE.Vector3(tgt.x-ship.x, tgt.y-ship.y, tgt.z-ship.z);
-    lockText = `LOCK ${tgt.name}  ${fmtDist(vt.length())}`;
     const p = proj(vt.clone().applyQuaternion(bq));
     if (p) {
       const b = 18;
-      g.strokeStyle = irOn ? '#ffd27a' : AMB; g.lineWidth = 2.5;
+      g.strokeStyle = irOn ? '#ffffff' : PH; g.lineWidth = 2;
       g.beginPath();
       for (const sx of [-1, 1]) for (const sy of [-1, 1]) {
         g.moveTo(p.x + sx*b, p.y + sy*(b - 8)); g.lineTo(p.x + sx*b, p.y + sy*b); g.lineTo(p.x + sx*(b - 8), p.y + sy*b);
@@ -1380,8 +1382,30 @@ function drawScope(g, W, H, idx) {
       g.stroke();
     }
   }
-  g.strokeStyle = PH; g.lineWidth = 3; g.beginPath(); g.arc(cx, cy, R, 0, Math.PI*2); g.stroke();
-  txt(g, cx, 452, lockText, PH, '24px monospace', 'center');
+  g.restore();
+  // Frame and aim box
+  g.strokeStyle = PH; g.lineWidth = 2; g.strokeRect(FX, FY, FW, FH);
+  g.strokeStyle = irOn ? '#ffffff' : PH; g.lineWidth = 1.5; g.strokeRect(cx - 7, cy - 7, 14, 14);
+  // Status text
+  txt(g, 14, 128, irOn ? 'GRAY' : 'COLOR', PH, '20px monospace');
+  txt(g, 14, 150, 'AGC', PH, '20px monospace');
+  txt(g, 14, 172, 'OFF', PH, '20px monospace');
+  txt(g, 80, 92, lockOk ? 'LOCK' : 'NO LOCK', lockOk ? AMB : PH, '20px monospace');
+  txt(g, cx, 92, `${irOn ? 'WHOT' : 'VIS'}   FOV 4.0`, PH, '20px monospace', 'center');
+  txt(g, 700, 92, lockOk ? fmtDist(Math.hypot(tgt.x-ship.x, tgt.y-ship.y, tgt.z-ship.z)) : '--', PH, '20px monospace', 'right');
+  txt(g, cx, FY + FH + 20, lockOk ? 'TRACK' : 'POINT', PH, '20px monospace', 'center');
+  // Softkeys, with the active page (TGP) inverted
+  const keys = [['SWAP', 110], ['SMS', 220], ['HSD', 320], ['TGP', 420], ['DCLT', 540]];
+  g.font = '20px monospace';
+  for (const [k, x] of keys) {
+    if (k === 'TGP') {
+      const w = g.measureText(k).width;
+      g.fillStyle = PH; g.fillRect(x - w/2 - 5, 440, w + 10, 24);
+      txt(g, x, 452, k, '#06140c', '20px monospace', 'center');
+    } else {
+      txt(g, x, 452, k, PH, '20px monospace', 'center');
+    }
+  }
 }
 function drawMFD(m) {
   const g = m.T.g, W = MFD_TEX_W, H = MFD_TEX_H;
