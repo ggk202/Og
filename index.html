@@ -66,7 +66,7 @@ const PDC_MOUNTS = [
   { name: 'PDC TOP', pos: [0, 1.2, 0.5], dir: [0, 1, 0], cd: 0 },
   { name: 'PDC BOT', pos: [0, -1.2, 0.5], dir: [0, -1, 0], cd: 0 },
 ];
-const PDC_RANGE = 5000, PDC_V = 1500, PDC_RATE = 8, PDC_ENERGY = 2e4, PDC_SPREAD = 0.0002, PDC_ARC = 80 * Math.PI/180;
+const PDC_RANGE = 5000, PDC_V = 1500, PDC_RATE = 8, PDC_ENERGY = 2e4, PDC_SPREAD = 0.0002, PDC_ARC = 100 * Math.PI/180;   // each mount reaches 10 deg past its horizon, so the two overlap around the hull
 // Hostile torpedoes: accelerate toward the ship for TORP_BURN seconds, then coast
 const TORP_ACCEL = 40, TORP_BURN = 30, TORP_KILL_R = 1.5, TORP_HULL_R = 20, HOSTILE_SALVO_T = 15;
 let torpedoes = [], tracers = [], hullHits = 0;
