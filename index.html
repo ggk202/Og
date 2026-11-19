@@ -36,6 +36,26 @@
   #hangar #launchBtn:hover { background:#2c4a2e; }
   #hangar .load { position:absolute; left:0; right:380px; top:48%; text-align:center; letter-spacing:.3em; font-size:15px; }
   #hangar .hint { position:absolute; left:18px; bottom:14px; font-size:12px; letter-spacing:.1em; opacity:.55; }
+  /* Mission select / briefing and debrief: full-screen panels in the same style */
+  .ovl { position:fixed; inset:0; display:none; z-index:13; background:rgba(3,5,4,.92); align-items:center; justify-content:center; }
+  .ovl .box { width:min(980px, 92vw); max-height:88vh; overflow:auto; background:#0b0f0c; border:1px solid #3c4a3a; padding:22px 26px; }
+  .ovl h2 { margin:0 0 4px; letter-spacing:.35em; font-size:18px; color:#d9e4cc; }
+  .ovl .sub { font-size:11px; letter-spacing:.2em; opacity:.6; margin-bottom:14px; }
+  .ovl .cols { display:flex; gap:20px; }
+  .ovl .list { flex:0 0 330px; }
+  .ovl .card { border:1px solid #2a352a; padding:10px 12px; margin-bottom:8px; cursor:pointer; user-select:none; }
+  .ovl .card:hover { background:#18261b; } .ovl .card.sel { border-color:#ffb020; background:#1d1a10; }
+  .ovl .card .t { font-size:14px; letter-spacing:.12em; } .ovl .card .s { font-size:11px; opacity:.65; margin-top:3px; letter-spacing:.08em; }
+  .ovl .detail { flex:1; font-size:13px; line-height:1.65; color:#c4d0bb; min-height:260px; }
+  .ovl .detail p { margin:0 0 6px; }
+  .ovl .btns { margin-top:16px; display:flex; gap:10px; }
+  .ovl .btns button { font-size:14px; padding:9px 18px; letter-spacing:.3em; }
+  .ovl .btns .go { background:#1f2e1f; border-color:#7dff9a; color:#d9ffe0; }
+  .ovl table { width:100%; font-size:13px; } .ovl td { padding:3px 6px; border-bottom:1px solid #1f2a20; }
+  .ovl td.n { text-align:right; font-variant-numeric:tabular-nums; }
+  .ovl .rank { font-size:92px; font-weight:bold; line-height:1; letter-spacing:.05em; color:#ffb020; text-align:center; }
+  .ovl .rank.s { color:#7dff9a; } .ovl .rank.f { color:#c8382c; }
+  .ovl .res { text-align:center; letter-spacing:.3em; font-size:14px; margin-top:6px; }
   /* Death: black at once; the message fades in when .show is added (2 s later) */
   #death { position:fixed; inset:0; display:none; flex-direction:column; align-items:center; justify-content:center;
     background:#000; z-index:15; text-align:center; cursor:default; }
@@ -71,7 +91,15 @@
   <div class="hint">DRAG TO ORBIT · WHEEL TO ZOOM · CLICK A HARDPOINT TO CHOOSE ITS MODULE</div>
   <div class="panel"><h2>HANGAR</h2><div class="sub">LOADOUT · SELECT A HARDPOINT, THEN A MODULE</div>
     <div id="hpList"></div><div class="stats" id="hangarStats"></div><button id="launchBtn">LAUNCH</button></div></div>
-<div id="death"><div class="msg"><h1>SHIP LOST</h1><div class="cause" id="deathCause"></div><div class="stats" id="deathStats"></div><small>CLICK TO RETURN TO THE HANGAR</small></div></div>
+<div id="missions" class="ovl"><div class="box"><h2>MISSIONS</h2><div class="sub">SELECT AN OPERATION · BEST RESULTS ARE SAVED IN THIS BROWSER</div>
+  <div class="cols"><div class="list" id="missionList"></div><div class="detail" id="missionDetail"></div></div>
+  <div class="btns"><button class="go" id="missionGo">TO HANGAR</button></div></div></div>
+<div id="debrief" class="ovl"><div class="box"><h2>DEBRIEF</h2><div class="sub" id="debriefSub"></div>
+  <div class="cols"><div class="list"><div class="rank" id="debriefRank"></div><div class="res" id="debriefRes"></div>
+    <div class="res" id="debriefBest" style="opacity:.7;font-size:12px"></div></div>
+    <div class="detail"><table id="debriefTable"></table><div class="sub" style="margin:14px 0 4px">PREVIOUS RUNS</div><table id="debriefRuns"></table></div></div>
+  <div class="btns"><button class="go" id="debriefRetry">RETRY · HANGAR</button><button id="debriefMissions">MISSIONS</button></div></div></div>
+<div id="death"><div class="msg"><h1>SHIP LOST</h1><div class="cause" id="deathCause"></div><div class="stats" id="deathStats"></div><small>CLICK TO CONTINUE</small></div></div>
 <div id="settings">
   <div class="panel">
     <h3>CONTROLS</h3>
@@ -162,7 +190,7 @@ const MODULE_CATALOG = {
 // inputs it takes (thrust limit, burn seconds) plus launch speed, lifetime, proximity fuse and warhead.
 const ORD = {
   torpedo:     { name: 'TORPEDO',     launchV: 30, maxAccel: 60,  burn: 60, life: 400, killR: 6, dmg: 400, color: '#ff7ad9' },
-  missile:     { name: 'MISSILE',     launchV: 20, maxAccel: 120, burn: 20, life: 200, killR: 4, dmg: 120, color: '#ffe36a' },
+  missile:     { name: 'MISSILE',     launchV: 20, maxAccel: 120, burn: 20, life: 400, killR: 4, dmg: 120, color: '#ffe36a' },
   interceptor: { name: 'INTERCEPTOR', launchV: 40, maxAccel: 200, burn: 8,  life: 40,  killR: 3, dmg: 0,   color: '#7fd7ff' },
 };
 let ordnance = [];
@@ -278,7 +306,7 @@ function pdcStatus(m) {
 }
 const PDC_RANGE = 5000, PDC_V = 1500, PDC_RATE = 8, PDC_ENERGY = 2e4, PDC_SPREAD = 0.0002, PDC_ARC = 100 * Math.PI/180;   // each mount reaches 10 deg past its horizon, so the two overlap around the hull
 // Hostile torpedoes: accelerate toward the ship for TORP_BURN seconds, then coast
-const TORP_ACCEL = 40, TORP_BURN = 30, TORP_KILL_R = 1.5, TORP_HULL_R = 20, HOSTILE_SALVO_T = 15;
+const TORP_ACCEL = 40, TORP_BURN = 30, TORP_KILL_R = 1.5, TORP_HULL_R = 20, HOSTILE_SALVO_T = 15, TORP_LIFE = 150;
 let torpedoes = [], tracers = [], hullHits = 0;
 let pdcActive = false, pdcSlewRate = 0, pdcLastFire = -1e9;   // sound state set by the physics step
 let torpWarn = false;                 // a torpedo is inbound within TORP_WARN_R
@@ -341,6 +369,8 @@ function applyTorpedoHit(tp) {
   if (damage[s.id] < 0.05) damage[s.id] = 0;
   log(`TORPEDO HIT  HULL ${(hullInt*100).toFixed(0)}%`);
   log(`${s.name} ${damage[s.id] > 0 ? 'DAMAGED ' + (damage[s.id]*100).toFixed(0) + '%' : 'OFFLINE'}`);
+  scoreAdd('HULL DAMAGE', SCORE.hullHit);
+  if (damage[s.id] <= 0) scoreAdd('SYSTEMS LOST', SCORE.systemLost);
   if (hullInt > 0) return false;
   shipDestroyed('HULL BREACH · TORPEDO IMPACT');
   return true;
@@ -353,6 +383,7 @@ let dead = false, deathTimer = null;
 function shipDestroyed(cause) {
   if (dead) return;
   dead = true;
+  endMission('KIA', cause);                          // a mission run ends here; its debrief follows the death screen
   log(`SHIP LOST · ${cause}`);
   const el = document.getElementById('death');
   el.classList.remove('show'); el.style.display = 'flex';
@@ -365,9 +396,11 @@ function shipDestroyed(cause) {
 function restartAfterDeath() {
   // The whole scenario restarts: the ship returns to its starting orbit position, so the targets and the
   // frigate must too, or they are left hundreds of km away (resetTargets also clears torpedoes and flashes)
+  missionPlan = scenario === 'sandbox' ? null : MISSIONS[scenario].plan(simT);
   applyModuleStats(); resetShip(); resetDamage(); resetPdcMounts(); resetTargets();
   projectiles = [];
   battery = battCapEff(); hullT = THERM.tStart; railCD = 0; warpIdx = 0;
+  telem.qout = 0; lastRailShotT = lastLaunchT = -1e9;   // no heat or weapon signature carried over from the last run
   mainProp = SHIP.mainProp0; rcsProp = SHIP.rcsProp0; podProp = tankProp0Total(); podsOn = tankCount() > 0;
   leadHold = false; leadPrev = null; hullHits = 0;
   for (const t of targets) if (t.hostile) t.fireT = 10;
@@ -653,7 +686,7 @@ function datalinkStep(h) {
   // Called after the targets have advanced this step, so their states are at time T = simT + h
   const T = simT + h;
   for (const sat of sats) rk4(sat, h, 0, 0, 0);
-  for (const t of targets) if (t.track) rk4(t.track, h, 0, 0, 0);   // tracks coast on gravity to T
+  for (const t of targets) if (t.track) { rk4(t.track, h, 0, 0, 0); if (t.track.intel) t.track.tRep = T; }   // tracks coast on gravity to T
   dlRelay = sats.filter(sat => losClear(sat, ship));
   dlUp = dlRelay.length > 0;
   if (dlWasUp !== null && dlUp !== dlWasUp) log(dlUp ? `DATALINK UP · RELAY ${dlRelay[0].name}` : 'DATALINK LOST · NO RELAY IN VIEW');
@@ -711,8 +744,11 @@ function selectTrack(num) {
   const k = tgtKnown(t);
   log(`TRK ${num} SELECTED · ${t.name} · ${fmtDist(rangeTo(k))}${isLocal(t) ? '' : ' · DL'}`);
 }
+// Scenario: 'sandbox' (LEO practice) or a mission id. A mission's plan holds the ship's start state and builds
+// its targets; it is computed at launch from the current time, because the Moon moves.
+let scenario = 'sandbox', missionPlan = null;
 function resetTargets() {
-  targets = [
+  targets = missionPlan ? missionPlan.targets() : [
     mkTarget('SAT-4 DERELICT',  LEO_R + 1200, 0.0015,  3,   100),  // ~10 km ahead
     mkTarget('DEBRIS 9F-22',    LEO_R,        -0.0008, 0.8, 15),   // ~5 km behind
     mkTarget('TUG MERIDIAN',    LEO_R + 6000, 0.0045,  5,   120),  // ~27 km ahead
@@ -728,14 +764,193 @@ function resetTargets() {
   curTarget = 0;
   assignTrackNumbers();
   resetSats();
+  // Mission intel: targets marked intel start with a track (their orbits are known before arrival)
+  for (const t of targets) if (t.intel) t.track = Object.assign(Object.create(t), { x: t.x, y: t.y, z: t.z, vx: t.vx, vy: t.vy, vz: t.vz }, { tRep: simT, sat: 'INTEL', intel: true });
+  if (missionPlan) curTarget = Math.max(0, targets.findIndex(t => t.objective));
   flashes = [];
   torpedoes = []; tracers = []; hullHits = 0;
 }
 resetTargets();
 
+/* ================= MISSIONS ================= */
+// RK4 with explicit time (gravity only), forwards or backwards: used to plan arrivals
+function integrateTo(s0, t0, t1, hMax = 2) {
+  const s = { x: s0.x, y: s0.y, z: s0.z, vx: s0.vx, vy: s0.vy, vz: s0.vz };
+  const dir = Math.sign(t1 - t0); let t = t0;
+  const d = (q, tt) => { const a = gravAcc(q[0], q[1], q[2], tt); return [q[3], q[4], q[5], a[0], a[1], a[2]]; };
+  while ((t1 - t)*dir > 1e-9) {
+    const h = dir*Math.min(hMax, Math.abs(t1 - t));
+    const q = [s.x, s.y, s.z, s.vx, s.vy, s.vz];
+    const k1 = d(q, t), k2 = d(q.map((v, i) => v + 0.5*h*k1[i]), t + 0.5*h), k3 = d(q.map((v, i) => v + 0.5*h*k2[i]), t + 0.5*h), k4 = d(q.map((v, i) => v + h*k3[i]), t + h);
+    const n = q.map((v, i) => v + h/6*(k1[i] + 2*k2[i] + 2*k3[i] + k4[i]));
+    s.x = n[0]; s.y = n[1]; s.z = n[2]; s.vx = n[3]; s.vy = n[4]; s.vz = n[5];
+    t += h;
+  }
+  return s;
+}
+const mkTargetAt = (name, st, radius, integrity, side, extra = {}) =>
+  ({ name, radius, integrity, maxInt: integrity, gone: false, side, ...st, ...extra });
+// Mission 1: arrive at the Moon, destroy the helium-3 depot in low lunar orbit, leave the Moon's sphere.
+// The ship starts ARRIVE s before closest approach (PERI_ALT above the surface, arriving at VINF), on a path
+// found by integrating that closest-approach state backwards. The depot is ST_LEAD ahead of the closest-
+// approach point at that moment, guarded by two corvettes; an ore hauler (neutral) is docked behind it.
+const M1 = { ARRIVE: 3600, PERI_ALT: 150e3, VINF: 800, ST_ALT: 100e3, ST_LEAD: 150e3 };
+function planMission1(t0) {
+  const tA = t0 + M1.ARRIVE, m = moonPos(tA), mv = moonVel(tA);
+  const thP = Math.atan2(m[1], m[0]) + Math.PI/2;           // closest approach on the Moon's leading side
+  const rp = R_MOON + M1.PERI_ALT, vp = Math.sqrt(M1.VINF*M1.VINF + 2*GM_M/rp);
+  const peri = { x: m[0] + rp*Math.cos(thP), y: m[1] + rp*Math.sin(thP), z: 0,
+    vx: mv[0] - vp*Math.sin(thP), vy: mv[1] + vp*Math.cos(thP), vz: 0 };
+  const start = integrateTo(peri, tA, t0);
+  const relV = new THREE.Vector3(start.vx - moonVel(t0)[0], start.vy - moonVel(t0)[1], start.vz - moonVel(t0)[2]).normalize();
+  const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, -1), relV);   // nose along the approach
+  // A circular lunar orbit body placed `ahead` m along its orbit from the closest-approach point at tA
+  const onOrbit = (alt, ahead) => {
+    const r = R_MOON + alt, n = Math.sqrt(GM_M/(r*r*r));
+    return lunarOrbitState(alt, thP + ahead/r - n*M1.ARRIVE, 0, t0);
+  };
+  const def = { hostile: true, needsAlert: true };
+  return {
+    ship: start, q, arrive: tA,
+    targets: () => [
+      mkTargetAt('HE-3 DEPOT KORVA', onOrbit(M1.ST_ALT, M1.ST_LEAD), 25, 600, 'HOSTILE',
+        { ...def, objective: true, intel: true, score: 5000, sensor: 1.0, salvo: 2, salvoT: 25, fireRange: 80e3, fireT: 4 }),
+      mkTargetAt('ORE HAULER MAREK', onOrbit(M1.ST_ALT, M1.ST_LEAD - 6e3), 10, 80, 'NEUTRAL', { score: -2000 }),
+      mkTargetAt('PATROL CORVETTE IRIS', onOrbit(M1.ST_ALT, M1.ST_LEAD + 60e3), 6, 200, 'HOSTILE',
+        { ...def, score: 1500, sensor: 1.5, salvo: 3, salvoT: 20, fireRange: 80e3, fireT: 6 }),
+      mkTargetAt('PATROL CORVETTE VEX', onOrbit(130e3, M1.ST_LEAD - 300e3), 6, 200, 'HOSTILE',   // 150 km behind the arrival point
+        { ...def, score: 1500, sensor: 1.5, salvo: 3, salvoT: 20, fireRange: 80e3, fireT: 8 }),
+    ],
+  };
+}
+const MISSIONS = {
+  m1: { id: 'm1', name: 'OPERATION LANTERN', title: 'HELIUM-3 DEPOT STRIKE', plan: planMission1,
+    brief: [
+      'Enemy forces store refined helium-3 at the KORVA depot in a 100 km lunar orbit.',
+      'You arrive on a lunar flyby in about one hour (closest approach 150 km).',
+      'Infiltrate lunar orbit, destroy the depot (track number on the map), and leave the',
+      "Moon's sphere of influence (66,000 km). Two patrol corvettes guard it.",
+      'Defences only react once they detect you: engine burns are visible from hundreds of km,',
+      'deployed radiators from tens of km; a cold, coasting ship from about 12 km.',
+      'Stowed radiators keep you hidden but the ship heats up. A civilian ore hauler is',
+      'docked near the depot: avoid hitting it.',
+    ] },
+};
+
+/* ---------- Mission run: detection, score, end, saved results ----------
+   Detection: the ship's signature is 1 when cold and coasting, plus its radiated heat (relative to a cold hull
+   with stowed radiators), engine burns, RCS, lasers, and short spikes after railgun shots, launches and PDC
+   fire. A sensor sees the ship within DET_BASE*sqrt(signature)*its sensor factor, with the Moon not in the way.
+   Score: kills and penalties as they happen; on success, bonuses for time, propellant, ammunition left and
+   staying undetected. Ranks F- .. A by fraction of MISSION_MAX; S for a perfect run. */
+const DET_BASE = 12e3, MISSION_MAX = 17500;
+const ATTACK_REACT = 20;   // s from the first hit on a defender until the defences react, if not detected first
+const RANKS = ['F-', 'F', 'F+', 'E-', 'E', 'E+', 'D-', 'D', 'D+', 'C-', 'C', 'C+', 'B-', 'B', 'B+', 'A-', 'A'];
+const SCORE = { torpedoKill: 25, hullHit: -450, systemLost: -150, stealth: 3000, unseen: 1000, time: 2000, prop: 2000, ammo: 1500,
+  timeFull: 8*3600, timeZero: 30*3600 };   // time bonus: full up to 8 h, none after 30 h (sim time; warp is allowed)
+let mission = null, lastRailShotT = -1e9, lastLaunchT = -1e9;
+function signature() {
+  let sg = 1 + (telem.qout || 0)/16.5e3;                // radiated heat; a cold hull with stowed radiators ~ 1
+  sg += 400*thrustFrac;
+  if (rcsActive) sg += 3;
+  if (laserFiring || lpdFiring) sg += 60;
+  if (simT - lastRailShotT < 5) sg += 150;
+  if (simT - lastLaunchT < 5) sg += 80;
+  if (simT - pdcLastFire < 2) sg += 40;
+  return sg;
+}
+const detectionRange = () => DET_BASE*Math.sqrt(signature());
+// Expendables: current and full counts of every magazine fitted (railgun and lasers don't run out)
+function ammoState() {
+  const a = [];
+  for (const m of PDC_MOUNTS) a.push([m.rounds, (modAt(m.sys).stats || {}).rounds || PDC_ROUNDS]);
+  for (const m of INT_MOUNTS) a.push([m.rounds, modAt(m.sys).stats.rounds]);
+  if (hasRole('torpedo')) a.push([spinalAmmo, statOf('torpedo', 'magazine')]);
+  for (const [sl, n] of Object.entries(vlsCells)) a.push([n, modAt(sl).stats.cells]);
+  if (hasRole('ecm')) a.push([ecmDecoys, slotsWithRole('ecm').reduce((x, sl) => x + modAt(sl).stats.decoys, 0)]);
+  return a;
+}
+function startMission() {
+  mission = { id: scenario, t0: simT, alert: false, alertT: null, undetT: 0, events: {}, stationDown: false,
+    stationBeforeAlert: false, neutrals: 0, ended: false, result: null, prop0: mainProp + rcsProp + podProp };
+  const M = MISSIONS[scenario];
+  log(`${M.name} · ${M.title}`);
+  const st = targets.find(t => t.objective);
+  log(`OBJECTIVE · DESTROY ${st.name} · TRK ${st.trk}`);
+  log(`CLOSEST APPROACH IN ${((missionPlan.arrive - simT)/60).toFixed(0)} MIN`);
+}
+function scoreAdd(label, pts) {
+  if (!mission || mission.ended) return;
+  mission.events[label] = (mission.events[label] || 0) + pts;
+}
+const missionScore = () => mission ? Object.values(mission.events).reduce((a, b) => a + b, 0) : 0;
+function raiseAlert(reason) {
+  if (!mission || mission.alert) return;
+  mission.alert = true; mission.alertT = simT;
+  log(`ALERT · ${reason}`); log('DEFENCES ACTIVE');
+  for (const t of targets) if (t.needsAlert) t.fireT = Math.min(t.fireT ?? 5, 3 + Math.random()*4);
+  sfx.klaxon();
+}
+function missionStep(h) {
+  if (!mission || mission.ended || dead) return;
+  if (!mission.alert) {
+    mission.undetT += h;
+    const dr = detectionRange();
+    for (const t of targets) {
+      if (t.gone) continue;
+      if (t.side === 'HOSTILE' && t.integrity < t.maxInt && mission.attackT === undefined) mission.attackT = simT;
+      if (t.sensor && rangeTo(t) < dr*t.sensor && losClearMoon(t, ship)) { raiseAlert(`DETECTED BY ${t.name}`); break; }
+    }
+    // A hit is noticed after a reaction delay: a salvo landing together can finish the depot before the alarm
+    if (!mission.alert && mission.attackT !== undefined && simT - mission.attackT > ATTACK_REACT) raiseAlert('DEFENDERS UNDER ATTACK');
+  }
+  if (!mission.stationDown && !targets.some(t => t.objective)) {
+    mission.stationDown = true; mission.stationBeforeAlert = !mission.alert;
+    log('OBJECTIVE COMPLETE · LEAVE THE LUNAR SPHERE (66,000 KM)'); sfx.chime();
+  }
+  if (moonDist(ship) > MOON_SOI) endMission(mission.stationDown ? 'SUCCESS' : 'ABANDONED');
+}
+// End of a run: bonuses (success only), rank, save, and the debrief (after the death screen for KIA)
+function endMission(result, cause = '') {
+  if (!mission || mission.ended) return;
+  const T = simT - mission.t0;
+  if (result === 'SUCCESS') {
+    const tf = clamp((SCORE.timeZero - T)/(SCORE.timeZero - SCORE.timeFull), 0, 1);
+    scoreAdd('MISSION TIME', Math.round(SCORE.time*tf));
+    scoreAdd('PROPELLANT LEFT', Math.round(SCORE.prop*clamp((mainProp + rcsProp + podProp)/mission.prop0, 0, 1)));
+    const am = ammoState(), af = am.length ? am.reduce((x, [c, m]) => x + (m ? c/m : 1), 0)/am.length : 1;
+    scoreAdd('AMMUNITION LEFT', Math.round(SCORE.ammo*af));
+    if (mission.stationBeforeAlert) scoreAdd('STRUCK BEFORE ALARM', SCORE.stealth);
+    scoreAdd('TIME UNDETECTED', Math.round(SCORE.unseen*clamp(mission.undetT/T, 0, 1)));
+  }
+  mission.ended = true; mission.result = result; mission.cause = cause; mission.T = T;
+  const score = missionScore(), pct = Math.max(0, score)/MISSION_MAX;
+  let rank = RANKS[clamp(Math.floor(pct/0.85*RANKS.length), 0, RANKS.length - 1)];
+  const perfect = result === 'SUCCESS' && hullHits === 0 && !anyDamage() && !mission.alert && mission.neutrals === 0;
+  if (perfect) rank = 'S';
+  if (result === 'KIA') rank = 'F-';
+  if (result === 'ABANDONED') rank = RANKS[Math.min(RANKS.indexOf(rank), 1)];
+  mission.score = score; mission.rank = rank;
+  saveMissionResult({ date: new Date().toISOString(), score, rank, result, time: T,
+    breakdown: { ...mission.events }, loadout: Object.keys(HARDPOINTS).filter(modAt).map(slotLabel).join(' · ') });
+  log(`MISSION ${result} · SCORE ${score} · RANK ${rank}`);
+  if (result !== 'KIA') openDebrief();
+}
+// Saved results, per mission: the best run and the last 10
+const SCORES_KEY = 'og-scores-v1';
+function loadScores() { try { return JSON.parse(localStorage.getItem(SCORES_KEY) || '{}') || {}; } catch (e) { return {}; } }
+const rankValue = r => r === 'S' ? 100 : RANKS.indexOf(r);
+function saveMissionResult(rec) {
+  const all = loadScores(), m = all[mission.id] || { best: null, runs: [] };
+  m.runs = [rec, ...(m.runs || [])].slice(0, 10);
+  if (!m.best || rankValue(rec.rank) > rankValue(m.best.rank) || (rec.rank === m.best.rank && rec.score > m.best.score)) { m.best = rec; rec.newBest = true; }
+  all[mission.id] = m;
+  try { localStorage.setItem(SCORES_KEY, JSON.stringify(all)); } catch (e) {}
+}
+
 function resetShip() {
-  ship = { ...SHIP_START };
-  shipQ.copy(SHIP_Q0);
+  ship = missionPlan ? { ...missionPlan.ship } : { ...SHIP_START };
+  shipQ.copy(missionPlan ? missionPlan.q : SHIP_Q0);
   omega.set(0,0,0);
 }
 
@@ -751,6 +966,35 @@ function groundMsg(text) {
 function moonPos(t) {
   const a = MOON_PHASE0 + 2*Math.PI*t/T_MOON;
   return [R_EM*Math.cos(a), R_EM*Math.sin(a), 0];
+}
+function moonVel(t) {
+  const a = MOON_PHASE0 + 2*Math.PI*t/T_MOON, w = 2*Math.PI/T_MOON;
+  return [-R_EM*w*Math.sin(a), R_EM*w*Math.cos(a), 0];
+}
+// Moon radius and sphere of influence (Laplace radius, about 66,100 km)
+const R_MOON = 1.7374e6, MOON_SOI = 6.61e7;
+const moonDist = o => { const m = moonPos(simT); return Math.hypot(o.x-m[0], o.y-m[1], o.z-m[2]); };
+const inMoonSOI = () => moonDist(ship) < MOON_SOI;
+// The body the ship is orbiting: the Moon inside its sphere of influence, otherwise Earth. Positions and
+// velocities relative to it are what the orbit page, navball and map show.
+function primary() {
+  if (inMoonSOI()) return { name: 'MOON', other: 'EARTH', R: R_MOON, GM: GM_M, c: moonPos(simT), v: moonVel(simT) };
+  return { name: 'EARTH', other: 'MOON', R: R_E, GM: GM_E, c: [0, 0, 0], v: [0, 0, 0] };
+}
+// Line of sight between two points that also clears the Moon
+function losClearMoon(a, b) {
+  const m = moonPos(simT);
+  const ax = a.x-m[0], ay = a.y-m[1], az = a.z-m[2], dx = b.x-a.x, dy = b.y-a.y, dz = b.z-a.z, dd = dx*dx + dy*dy + dz*dz;
+  const u = dd > 0 ? clamp(-(ax*dx + ay*dy + az*dz)/dd, 0, 1) : 0;
+  return Math.hypot(ax + u*dx, ay + u*dy, az + u*dz) > R_MOON;
+}
+// State on a circular orbit around the Moon (alt above the surface, phase from the +x axis, tilted `inc` about
+// that axis), in the Earth-centred frame at time t
+function lunarOrbitState(alt, phase, inc = 0, t = simT) {
+  const r = R_MOON + alt, v = Math.sqrt(GM_M/r), c = Math.cos(inc), n = Math.sin(inc);
+  const m = moonPos(t), mv = moonVel(t);
+  const px = r*Math.cos(phase), py = r*Math.sin(phase), vx = -v*Math.sin(phase), vy = v*Math.cos(phase);
+  return { x: m[0] + px, y: m[1] + py*c, z: m[2] + py*n, vx: mv[0] + vx, vy: mv[1] + vy*c, vz: mv[2] + vy*n };
 }
 function gravAcc(x, y, z, t) {
   const r2 = x*x + y*y + z*z, r = Math.sqrt(r2);
@@ -789,17 +1033,19 @@ function rk4(s, h, ex, ey, ez) {
 
 function clamp(v, a, b) { return v < a ? a : v > b ? b : v; }
 
+// Orbital elements around the primary body (Earth, or the Moon inside its sphere of influence)
 function orbitInfo() {
-  const r = new THREE.Vector3(ship.x, ship.y, ship.z);
-  const v = new THREE.Vector3(ship.vx, ship.vy, ship.vz);
+  const body = primary(), GM = body.GM;
+  const r = new THREE.Vector3(ship.x - body.c[0], ship.y - body.c[1], ship.z - body.c[2]);
+  const v = new THREE.Vector3(ship.vx - body.v[0], ship.vy - body.v[1], ship.vz - body.v[2]);
   const rm = r.length(), vm2 = v.lengthSq();
   const h = new THREE.Vector3().crossVectors(r, v);
-  const ev = new THREE.Vector3().crossVectors(v, h).multiplyScalar(1/GM_E).sub(r.clone().multiplyScalar(1/rm));
+  const ev = new THREE.Vector3().crossVectors(v, h).multiplyScalar(1/GM).sub(r.clone().multiplyScalar(1/rm));
   const e = ev.length();
-  const energy = vm2/2 - GM_E/rm;
-  const a = energy < 0 ? -GM_E/(2*energy) : Infinity;
-  const period = energy < 0 ? 2*Math.PI*Math.sqrt(a*a*a/GM_E) : Infinity;
-  return { r, v, h, ev, e, energy, a, rm, period };
+  const energy = vm2/2 - GM/rm;
+  const a = energy < 0 ? -GM/(2*energy) : Infinity;
+  const period = energy < 0 ? 2*Math.PI*Math.sqrt(a*a*a/GM) : Infinity;
+  return { r, v, h, ev, e, energy, a, rm, period, body };
 }
 
 function fireRail() {
@@ -833,6 +1079,7 @@ function fireRail() {
   ship.vx -= fwd.x*dv; ship.vy -= fwd.y*dv; ship.vz -= fwd.z*dv;
   battery -= WEAPON.railEnergy;
   hullT += WEAPON.railHeat/THERM.capacity;
+  lastRailShotT = simT;                              // a railgun shot is a bright signature spike
   railCD = WEAPON.railCooldown/Math.max(0.34, roleDamage('railgun'))     // a damaged railgun cycles slower,
     *(roleDamage('capacitor') > 0 ? statOf('capacitor', 'railCycle') : 1);    // an aux capacitor bank faster
   sfx.railShot();
@@ -971,7 +1218,7 @@ function launchOrdnance(kind, fromBody, dirBody, target, src) {
   const o = { kind, src, target, age: 0, burn: T.burn, dead: false,
     x: ship.x + p.x, y: ship.y + p.y, z: ship.z + p.z, vx: ship.vx + d.x*T.launchV, vy: ship.vy + d.y*T.launchV, vz: ship.vz + d.z*T.launchV };
   o.px = o.x; o.py = o.y; o.pz = o.z;
-  ordnance.push(o);
+  ordnance.push(o); lastLaunchT = simT;
   return o;
 }
 // The guidance needs a target the ship knows about: own sensors, or a datalink track
@@ -1059,16 +1306,19 @@ function physicsStep(h) {
   /* --- point defence and hostile torpedo launches: from the start-of-step state, like the railgun --- */
   for (const t of targets) {
     if (!t.hostile || t.gone) continue;
+    if (t.needsAlert && !(mission && mission.alert)) continue;   // mission defenders hold fire until alerted
+    if (t.fireRange && rangeTo(t) > t.fireRange) continue;
     t.fireT -= h;
     if (t.fireT > 0) continue;
-    t.fireT = HOSTILE_SALVO_T;
-    for (let k = 0; k < 4; k++) {
+    t.fireT = t.salvoT || HOSTILE_SALVO_T;
+    const nT = t.salvo || 4;
+    for (let k = 0; k < nT; k++) {
       const dir = new THREE.Vector3(ship.x-t.x, ship.y-t.y, ship.z-t.z).normalize()
         .add(new THREE.Vector3(Math.random()-0.5, Math.random()-0.5, Math.random()-0.5).multiplyScalar(0.3)).normalize();
       torpedoes.push({ x: t.x+dir.x*5, y: t.y+dir.y*5, z: t.z+dir.z*5,
         vx: t.vx+dir.x*200, vy: t.vy+dir.y*200, vz: t.vz+dir.z*200, age: 0, burn: TORP_BURN, dead: false });
     }
-    log('HOSTILE LAUNCH  4 TORPEDOES');
+    log(`HOSTILE LAUNCH  ${nT} TORPEDOES · ${t.name}`);
   }
   // Engagement state for the sound: the nearest torpedo in range spins the motors up, and its line-of-sight
   // rate drives the slew whine
@@ -1268,7 +1518,7 @@ function physicsStep(h) {
     best.lpdT = (best.lpdT || 0) + h*(damage[m.sys] ?? 1);   // a damaged turret burns slower
     if (best.lpdT >= m.dwell) {
       best.lpdDone = true;
-      if (masterMode === 'ON') { best.dead = true; log(`${m.name} · TORPEDO BURNED`); }
+      if (masterMode === 'ON') { best.dead = true; log(`${m.name} · TORPEDO BURNED`); scoreAdd('TORPEDOES DESTROYED', SCORE.torpedoKill); }
       else log(`${m.name} · PRACTICE BURN`);
       flashes.push({ x: best.x, y: best.y, z: best.z, age: 0, dur: 0.5, peak: 0.7, kind: 'hit' });
     }
@@ -1284,6 +1534,7 @@ function physicsStep(h) {
         if (masterMode === 'ON') tp.dead = true;
         flashes.push({ x: tp.x, y: tp.y, z: tp.z, age: 0, dur: 0.4, peak: 0.6, kind: 'hit' });
         log(masterMode === 'ON' ? 'PDC KILL  TORPEDO' : 'PDC PRACTICE HIT');
+        if (masterMode === 'ON') scoreAdd('TORPEDOES DESTROYED', SCORE.torpedoKill);
         break;
       }
     }
@@ -1298,6 +1549,7 @@ function physicsStep(h) {
       if (o.kind === 'interceptor') {
         if (masterMode === 'ON') tg.dead = true;
         log(masterMode === 'ON' ? 'INTERCEPT · TORPEDO KILLED' : 'INTERCEPT · PRACTICE');
+        if (masterMode === 'ON') scoreAdd('TORPEDOES DESTROYED', SCORE.torpedoKill);
       } else {
         if (masterMode === 'ON') tg.integrity -= T.dmg;
         log(`${T.name} HIT ${tg.name}${masterMode === 'ON' ? '' : ' · PRACTICE'}`);
@@ -1320,18 +1572,20 @@ function physicsStep(h) {
       if (applyTorpedoHit(tp)) break;               // ship lost: state was reset
     }
   }
-  torpedoes = torpedoes.filter(tp => !tp.dead && tp.age < 90);
+  torpedoes = torpedoes.filter(tp => !tp.dead && tp.age < TORP_LIFE);
   tracers = tracers.filter(tr => !tr.dead && tr.age < 4);
 
   /* --- kills --- */
   for (const t of targets) {
     if (!t.gone && t.integrity <= 0) {
       t.gone = true; groundMsg(`${t.name} CONFIRMED DESTROYED`);
+      if (mission && t.score) { scoreAdd(t.side === 'NEUTRAL' ? 'NEUTRALS DESTROYED' : `${t.name}`, t.score); if (t.side === 'NEUTRAL') mission.neutrals++; }
       // Reactor explosion: a bright, longer flash at the ship's last position
       flashes.push({ x: t.x, y: t.y, z: t.z, age: 0, dur: 4.0, peak: 1.0, kind: 'kill' });
     }
   }
   targets = targets.filter(t => !t.gone);
+  missionStep(h);
   for (const f of flashes) f.age += h;
   flashes = flashes.filter(f => f.age < f.dur);
   if (curTarget >= targets.length) curTarget = 0;
@@ -1353,6 +1607,7 @@ function physicsStep(h) {
   if (Math.abs(dT) > 0.001 && Math.random() < 0.02) sfx.tick();
 
   /* --- crash into Earth --- */
+  if (moonDist(ship) < R_MOON) shipDestroyed('LUNAR SURFACE IMPACT');
   if (Math.hypot(ship.x, ship.y, ship.z) < R_E) {
     shipDestroyed('SURFACE IMPACT · ORBIT DECAYED');
   }
@@ -1930,9 +2185,10 @@ function fmtTime(s) {
 }
 function toBodyQ() { return shipQ.clone().invert(); }
 function orbitalFrame() {
-  // Columns: X = prograde, Y = radial-up (orthogonalised), Z = normal
-  const p = new THREE.Vector3(ship.vx, ship.vy, ship.vz).normalize();
-  const r = new THREE.Vector3(ship.x, ship.y, ship.z).normalize();
+  // Columns: X = prograde, Y = radial-up (orthogonalised), Z = normal; relative to the primary body
+  const b = primary();
+  const p = new THREE.Vector3(ship.vx - b.v[0], ship.vy - b.v[1], ship.vz - b.v[2]).normalize();
+  const r = new THREE.Vector3(ship.x - b.c[0], ship.y - b.c[1], ship.z - b.c[2]).normalize();
   const Z = new THREE.Vector3().crossVectors(p, r).normalize();
   const Y = new THREE.Vector3().crossVectors(Z, p).normalize();
   return new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(p, Y, Z));
@@ -2090,6 +2346,8 @@ function drawTactical(g, W, H, idx) {
   y += 10;
   for (const l of tgtLines) line(l);
   y += 10;
+  // Mission: how far away a sensor can see the ship right now, and whether the defences are alerted
+  if (mission && !mission.ended) txt(g, 14, 440, `SIG ${fmtDist(detectionRange())} · ${mission.alert ? 'DETECTED' : 'UNDETECTED'}`, mission.alert ? RED : PH, '20px monospace');
   // Threat summary: closing torpedoes, time to impact of the nearest, PDC state, hull
   line(threats ? `THREAT ${threats} TORP` : 'THREAT NONE', threats ? RED : DIM);
   line(tti !== null ? `TTI ${tti.toFixed(1)}s ${fmtDist(tRng)}` : 'TTI --', tti !== null && tti < 20 ? RED : PH);
@@ -2100,10 +2358,10 @@ function drawTactical(g, W, H, idx) {
 }
 
 function drawOrbit(g, W, H, idx) {
-  mfdHeader(g, W, 'ORBIT', idx);
-  const o = orbitInfo();
+  const o = orbitInfo(), BR = o.body.R;
+  mfdHeader(g, W, `ORBIT · ${o.body.name}`, idx);
   const cx = 170, cy = 256, R = 150;
-  const alt = o.rm - R_E;
+  const alt = o.rm - BR;
   if (o.e < 1) {
     const eh = o.ev.clone().normalize();
     const hh = o.h.clone().normalize();
@@ -2118,10 +2376,10 @@ function drawOrbit(g, W, H, idx) {
       i ? g.lineTo(X, Y) : g.moveTo(X, Y);
     }
     g.stroke();
-    g.fillStyle = AMB; g.beginPath(); g.arc(cx, cy, Math.max(3, R_E*k), 0, Math.PI*2); g.fill();
+    g.fillStyle = AMB; g.beginPath(); g.arc(cx, cy, Math.max(3, BR*k), 0, Math.PI*2); g.fill();
     const sX = o.r.dot(eh), sY = o.r.dot(qh);
     g.fillStyle = PH; g.beginPath(); g.arc(cx + sX*k, cy - sY*k, 5, 0, Math.PI*2); g.fill();
-    txt(g, cx, cy+R-6, 'EARTH', AMB, '20px monospace', 'center');
+    txt(g, cx, cy+R-6, o.body.name, AMB, '20px monospace', 'center');
   } else {
     txt(g, cx, cy, 'OPEN ORBIT · ESCAPE', RED, '22px monospace', 'center');
   }
@@ -2130,8 +2388,8 @@ function drawOrbit(g, W, H, idx) {
   line(`ALT ${(alt/1e3).toFixed(1)} km`);
   if (o.e < 1) {
     const rp = o.a*(1 - o.e), ra = o.a*(1 + o.e);
-    line(`PE ${((rp-R_E)/1e3).toFixed(1)} km`);
-    line(`AP ${((ra-R_E)/1e3).toFixed(1)} km`);
+    line(`PE ${((rp-BR)/1e3).toFixed(1)} km`, rp < BR ? RED : PH);   // red: the orbit hits the surface
+    line(`AP ${((ra-BR)/1e3).toFixed(1)} km`);
     line(`PERIOD ${(o.period/60).toFixed(1)} min`);
   } else {
     line('PE/AP  --', RED);
@@ -2140,7 +2398,8 @@ function drawOrbit(g, W, H, idx) {
   line(`SPD ${(o.v.length()/1e3).toFixed(3)} km/s`);
   y += 10;
   const mp = moonPos(simT);
-  line(`MOON ${(Math.hypot(mp[0]-ship.x, mp[1]-ship.y, mp[2]-ship.z)/1e3/1e3).toFixed(0)} k km`);
+  if (o.body.name === 'MOON') line(`EXIT SOI ${((MOON_SOI - moonDist(ship))/1e3).toFixed(0)} km`);
+  else line(`MOON ${(Math.hypot(mp[0]-ship.x, mp[1]-ship.y, mp[2]-ship.z)/1e3/1e3).toFixed(0)} k km`);
   line(`T+ ${fmtTime(simT)}`);
   line(`WARP x${WARPS[warpIdx]}`);
 }
@@ -2228,21 +2487,24 @@ function mapProj(x, y, z, k, cx, cy) {
   const sy = Y*se + z*ce, d = z*se - Y*ce;          // d > 0: toward the viewer
   return { X: cx + X*k, Y: cy - sy*k, sx: X, sy, d };
 }
-const earthHides = q => q.sx*q.sx + q.sy*q.sy < R_E*R_E && q.d < 0;
-// Closed orbit through a state (Keplerian, Earth only), as points; null if open
+// The orbital view centres on the primary body (Earth, or the Moon inside its sphere of influence)
+let mapBody = { name: 'EARTH', R: R_E, GM: GM_E, c: [0, 0, 0], v: [0, 0, 0] };
+const earthHides = q => q.sx*q.sx + q.sy*q.sy < mapBody.R*mapBody.R && q.d < 0;   // hidden behind the body
+// Closed orbit through a state around the map body (Keplerian), as absolute points; null if open
 function orbitPath(o, n = 120) {
-  const r = new THREE.Vector3(o.x, o.y, o.z), v = new THREE.Vector3(o.vx, o.vy, o.vz);
+  const B = mapBody, GMb = B.GM;
+  const r = new THREE.Vector3(o.x - B.c[0], o.y - B.c[1], o.z - B.c[2]), v = new THREE.Vector3(o.vx - B.v[0], o.vy - B.v[1], o.vz - B.v[2]);
   const hv = new THREE.Vector3().crossVectors(r, v), hm = hv.length();
-  const ev = new THREE.Vector3().crossVectors(v, hv).multiplyScalar(1/GM_E).sub(r.clone().normalize());
+  const ev = new THREE.Vector3().crossVectors(v, hv).multiplyScalar(1/GMb).sub(r.clone().normalize());
   const e = ev.length();
   if (e >= 0.99 || hm === 0) return null;
-  const pl = hm*hm/GM_E;
+  const pl = hm*hm/GMb;
   const P = e > 1e-6 ? ev.clone().divideScalar(e) : r.clone().normalize();
   const Q = new THREE.Vector3().crossVectors(hv.clone().divideScalar(hm), P);
   const pts = [];
   for (let i = 0; i <= n; i++) {
     const nu = i/n*2*Math.PI, rr = pl/(1 + e*Math.cos(nu));
-    pts.push([rr*Math.cos(nu)*P.x + rr*Math.sin(nu)*Q.x, rr*Math.cos(nu)*P.y + rr*Math.sin(nu)*Q.y, rr*Math.cos(nu)*P.z + rr*Math.sin(nu)*Q.z]);
+    pts.push([B.c[0] + rr*Math.cos(nu)*P.x + rr*Math.sin(nu)*Q.x, B.c[1] + rr*Math.cos(nu)*P.y + rr*Math.sin(nu)*Q.y, B.c[2] + rr*Math.cos(nu)*P.z + rr*Math.sin(nu)*Q.z]);
   }
   return pts;
 }
@@ -2263,7 +2525,9 @@ function mapMarker(g, x, y, t, stale, sel) {
   return col;
 }
 function drawMap(g, W, H, idx) {
-  const ext = MAP_ZOOM[mapView][mapZoom[mapView]];
+  mapBody = primary();
+  // Orbital zoom levels scale with the body's size, so the Moon fills the view like Earth does
+  const ext = MAP_ZOOM[mapView][mapZoom[mapView]]*(mapView === 'ORBIT' ? mapBody.R/R_E : 1);
   mfdHeader(g, W, `MAP ${mapView === 'ORBIT' ? 'ORBITAL' : 'LOCAL'} ±${fmtDist(ext)}`, idx);
   txt(g, W - 120, 30, dlUp ? `DL UP ${dlRelay.length}` : 'DL LOST', dlUp ? PH : RED, 'bold 26px monospace', 'right');
   const cx = W/2, cy = 246, k = 190/ext;
@@ -2274,27 +2538,29 @@ function drawMap(g, W, H, idx) {
   const label = (s2, x, y, col) => txt(g, x + 9, y - 7, s2, col, '18px monospace');
 
   if (mapView === 'ORBIT') {
-    const P = (x, y, z) => mapProj(x, y, z, k, cx, cy);
-    // Earth: dark disc, outline, latitude and meridian lines on the facing side (meridians turn with Earth)
-    g.fillStyle = '#03170b'; g.beginPath(); g.arc(cx, cy, R_E*k, 0, Math.PI*2); g.fill();
+    const B = mapBody, BR = B.R;
+    const P = (x, y, z) => mapProj(x - B.c[0], y - B.c[1], z - B.c[2], k, cx, cy);   // absolute positions
+    const Prel = (x, y, z) => mapProj(x, y, z, k, cx, cy);                           // relative to the body
+    // Body: dark disc, outline, latitude and meridian lines on the facing side (Earth's meridians turn with it)
+    g.fillStyle = '#03170b'; g.beginPath(); g.arc(cx, cy, BR*k, 0, Math.PI*2); g.fill();
     g.strokeStyle = PH; g.lineWidth = 1.5; g.stroke();
     g.strokeStyle = 'rgba(125,255,154,0.35)'; g.lineWidth = 1;
-    const rot = 7.2921e-5*simT;
+    const rot = B.name === 'EARTH' ? 7.2921e-5*simT : 0;
     const ring = f => {
       let prev = null;
       for (let i = 0; i <= 72; i++) {
-        const q = P(...f(i/72*2*Math.PI));
+        const q = Prel(...f(i/72*2*Math.PI));
         if (prev && q.d >= 0 && prev.d >= 0) { g.beginPath(); g.moveTo(prev.X, prev.Y); g.lineTo(q.X, q.Y); g.stroke(); }
         prev = q;
       }
     };
     for (const lat of [-60, -30, 0, 30, 60]) {
-      const la = lat*Math.PI/180, rc = R_E*Math.cos(la), zc = R_E*Math.sin(la);
+      const la = lat*Math.PI/180, rc = BR*Math.cos(la), zc = BR*Math.sin(la);
       ring(a => [rc*Math.cos(a), rc*Math.sin(a), zc]);
     }
     for (let m2 = 0; m2 < 12; m2++) {
       const lo = m2*Math.PI/6 + rot;
-      ring(a => [R_E*Math.cos(a)*Math.cos(lo), R_E*Math.cos(a)*Math.sin(lo), R_E*Math.sin(a)]);
+      ring(a => [BR*Math.cos(a)*Math.cos(lo), BR*Math.cos(a)*Math.sin(lo), BR*Math.sin(a)]);
     }
     // Orbits: own (bright), tracks (by side), satellites (faint). Segments behind Earth are skipped.
     const drawOrbit2 = (o, col, w, dash) => {
@@ -2337,11 +2603,13 @@ function drawMap(g, W, H, idx) {
     g.beginPath(); g.arc(qs.X, qs.Y, 5, 0, Math.PI*2); g.fill();
     g.beginPath(); g.moveTo(qs.X - 11, qs.Y); g.lineTo(qs.X + 11, qs.Y); g.moveTo(qs.X, qs.Y - 11); g.lineTo(qs.X, qs.Y + 11); g.stroke();
     txt(g, qs.X + 9, qs.Y + 20, 'OWN', PH, 'bold 17px monospace');
-    // Moon: direction marker at the edge (or the Moon itself at the widest zoom)
-    const mp = moonPos(simT), qm = P(mp[0], mp[1], mp[2]);
+    // The other body (Moon seen from Earth, or Earth from the Moon): drawn when in view, else a marker at the edge
+    const op = B.name === 'EARTH' ? moonPos(simT) : [0, 0, 0], oR = B.name === 'EARTH' ? R_MOON : R_E;
+    const qm = P(op[0], op[1], op[2]), oName = B.name === 'EARTH' ? 'MOON' : 'EARTH';
     const mx = qm.X - cx, my = qm.Y - cy, ml = Math.hypot(mx, my);
-    if (ml < 185 && ml > 0) { g.strokeStyle = AMB; g.beginPath(); g.arc(qm.X, qm.Y, Math.max(3, 1.737e6*k), 0, Math.PI*2); g.stroke(); txt(g, qm.X + 8, qm.Y, 'MOON', AMB, '16px monospace'); }
-    else if (ml > 0) txt(g, cx + mx/ml*300, cy + my/ml*170, 'MOON ›', AMB, '16px monospace', 'center');
+    if (ml < 185 && ml > 0) { g.strokeStyle = AMB; g.beginPath(); g.arc(qm.X, qm.Y, Math.max(3, oR*k), 0, Math.PI*2); g.stroke(); txt(g, qm.X + 8, qm.Y, oName, AMB, '16px monospace'); }
+    else if (ml > 0) txt(g, cx + mx/ml*300, cy + my/ml*170, `${oName} ›`, AMB, '16px monospace', 'center');
+    txt(g, 14, 432, B.name === 'MOON' ? `MOON-CENTRED · SOI EXIT ${((MOON_SOI - moonDist(ship))/1e3).toFixed(0)} km` : '', AMB, '17px monospace');
   } else {
     // Local frame at the ship: x along-track, y orbit normal, z radial up
     const Rh = new THREE.Vector3(ship.x, ship.y, ship.z).normalize();
@@ -2446,8 +2714,14 @@ function drawPropulsion(g, W, H, idx) {
 function drawComms(g, W, H, idx) {
   mfdHeader(g, W, 'COMMS', idx);
   const mp = moonPos(simT);
-  txt(g, 30, 74, `EARTH LINK ${(Math.hypot(ship.x,ship.y,ship.z)/C*1000).toFixed(2)} ms   MOON LINK ${(Math.hypot(mp[0]-ship.x,mp[1]-ship.y,mp[2]-ship.z)/C).toFixed(2)} s`, PH, '22px monospace');
-  txt(g, 30, 100, `QUEUED GROUND MESSAGES ${pending.length}`, DIM, '22px monospace');
+  if (mission && !mission.ended) {
+    txt(g, 30, 74, `${MISSIONS[mission.id].name}  SCORE ${missionScore()}  T+ ${fmtTime(simT - mission.t0)}`, AMB, '22px monospace');
+    txt(g, 30, 100, `${mission.stationDown ? 'DEPOT DESTROYED · LEAVE THE LUNAR SPHERE' : 'OBJECTIVE · DESTROY THE DEPOT'}  ·  ${mission.alert ? 'DETECTED' : 'UNDETECTED'}`,
+      mission.alert ? RED : PH, '22px monospace');
+  } else {
+    txt(g, 30, 74, `EARTH LINK ${(Math.hypot(ship.x,ship.y,ship.z)/C*1000).toFixed(2)} ms   MOON LINK ${(Math.hypot(mp[0]-ship.x,mp[1]-ship.y,mp[2]-ship.z)/C).toFixed(2)} s`, PH, '22px monospace');
+    txt(g, 30, 100, `QUEUED GROUND MESSAGES ${pending.length}`, DIM, '22px monospace');
+  }
   txt(g, 30, 126, `KEYPAD ${keyBuf}_`, AMB, '24px monospace');
   let y = 140;
   for (const m of msgs.slice(-12)) {
@@ -3203,6 +3477,17 @@ const sfx = {
   decoy() { if (actx) for (let i = 0; i < 4; i++) thump(hullBus, 95, 0.09, 0.45, i*0.07); },
   rcsPuff() { if (actx) burst(intBus, 'bandpass', 1500, 1.2, 0.06, 0.03); },
   click() { if (actx) burst(intBus, 'bandpass', 2800, 2, 0.02, 0.35); },
+  // Detection alarm: a two-tone klaxon, four cycles
+  klaxon() {
+    if (!actx) return;
+    const t = actx.currentTime;
+    for (let i = 0; i < 8; i++) {
+      const o = actx.createOscillator(); o.type = 'square'; o.frequency.value = i % 2 ? 480 : 640;
+      const g = actx.createGain(), t0 = t + i*0.28;
+      g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(0.05, t0 + 0.02); g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.26);
+      o.connect(g).connect(intBus); o.start(t0); o.stop(t0 + 0.28);
+    }
+  },
   chime() {
     if (!actx) return;
     const t = actx.currentTime;
@@ -3451,7 +3736,7 @@ window.addEventListener('keydown', e => {
     assignBinding(rebinding, e.code); return;
   }
   if (e.code === 'Escape') { if (!e.repeat) setMenu(!menuOpen); e.preventDefault(); return; }
-  if (!started || menuOpen || hangarOpen) return;
+  if (!started || menuOpen || hangarOpen || uiOverlay) return;
   if (PREVENT.has(e.code)) e.preventDefault();
   if (e.repeat || held.has(e.code)) return;
   held.add(e.code);
@@ -3462,7 +3747,7 @@ window.addEventListener('keyup', e => held.delete(e.code));
 window.addEventListener('pointerdown', e => {
   const code = 'Mouse' + e.button;
   if (rebinding) { e.preventDefault(); assignBinding(rebinding, code); return; }
-  if (hangarOpen) return;
+  if (hangarOpen || uiOverlay) return;
   if (!started || menuOpen) return;
   if (e.target !== canvas) return;
   // Panel buttons take the click; anything else is a weapon trigger
@@ -3480,14 +3765,71 @@ window.addEventListener('contextmenu', e => e.preventDefault());
 document.getElementById('death').addEventListener('click', e => {
   if (!e.currentTarget.classList.contains('show')) return;
   e.currentTarget.style.display = 'none'; e.currentTarget.classList.remove('show');
-  openHangar();
+  if (mission && mission.ended) openDebrief(); else openHangar();
 });
 
 startEl.addEventListener('click', () => {
   initAudio();
   startEl.style.display = 'none';
+  openMissions();
+});
+
+/* ================= MISSION SELECT AND DEBRIEF SCREENS ================= */
+let uiOverlay = false;
+const missionsEl = document.getElementById('missions'), debriefEl = document.getElementById('debrief');
+let missionSel = 'm1';
+const SANDBOX_INFO = { name: 'SANDBOX', title: 'LOW EARTH ORBIT PRACTICE',
+  brief: ['Free flight in a 400 km Earth orbit with practice targets, a hostile frigate firing torpedo salvos,',
+    'and distant tracks reachable by datalink. No score.'] };
+function openMissions() {
+  uiOverlay = true; missionsEl.style.display = 'flex'; debriefEl.style.display = 'none';
+  if (actx && actx.state === 'running') actx.suspend();
+  renderMissions();
+}
+function renderMissions() {
+  const scores = loadScores(), list = document.getElementById('missionList');
+  list.innerHTML = '';
+  const items = [...Object.values(MISSIONS).map(M => ({ id: M.id, ...M })), { id: 'sandbox', ...SANDBOX_INFO }];
+  for (const it of items) {
+    const best = scores[it.id] && scores[it.id].best;
+    const c = document.createElement('div');
+    c.className = 'card' + (missionSel === it.id ? ' sel' : '');
+    c.innerHTML = `<div class="t">${it.name}</div><div class="s">${it.title}${it.id === 'sandbox' ? '' : best ? ` · BEST ${best.rank} · ${best.score}` : ' · NOT FLOWN'}</div>`;
+    c.addEventListener('click', () => { missionSel = it.id; sfx.click(); renderMissions(); });
+    list.appendChild(c);
+  }
+  const sel = items.find(i => i.id === missionSel);
+  const best = scores[sel.id] && scores[sel.id].best;
+  document.getElementById('missionDetail').innerHTML = `<p style="letter-spacing:.2em;color:#d9e4cc">${sel.name} · ${sel.title}</p>` +
+    sel.brief.map(l => `<p>${l}</p>`).join('') +
+    (sel.id !== 'sandbox' ? `<p style="opacity:.7;margin-top:12px">SCORE: +5000 depot, +1500 per corvette, +25 per torpedo destroyed, −450 per hull hit,
+      −150 per system lost, −2000 per neutral destroyed. On success: time, propellant, ammunition and stealth bonuses.
+      Ranks F− to A by score; S for a perfect run (undetected, undamaged, no neutral hit).${best ? `<br>BEST: ${best.rank} · ${best.score}` : ''}</p>` : '');
+}
+document.getElementById('missionGo').addEventListener('click', () => {
+  scenario = missionSel; missionsEl.style.display = 'none'; uiOverlay = false;
+  if (scenario === 'sandbox') mission = null;
   openHangar();
 });
+function openDebrief() {
+  uiOverlay = true; debriefEl.style.display = 'flex';
+  if (actx && actx.state === 'running') actx.suspend();
+  const M = MISSIONS[mission.id], all = loadScores()[mission.id] || { runs: [] };
+  const resultText = { SUCCESS: 'MISSION COMPLETE', KIA: 'SHIP LOST', ABANDONED: 'OBJECTIVE NOT DESTROYED' }[mission.result];
+  document.getElementById('debriefSub').textContent = `${M.name} · ${M.title} · T+ ${fmtTime(mission.T)}`;
+  const rk = document.getElementById('debriefRank');
+  rk.textContent = mission.rank; rk.className = 'rank' + (mission.rank === 'S' ? ' s' : mission.rank.startsWith('F') ? ' f' : '');
+  document.getElementById('debriefRes').textContent = `${resultText}${mission.cause ? ' · ' + mission.cause : ''}`;
+  const best = all.best;
+  document.getElementById('debriefBest').textContent = best ? (best === all.runs[0] || (all.runs[0] && all.runs[0].newBest) ? 'NEW BEST' : `BEST ${best.rank} · ${best.score}`) : '';
+  const rows = Object.entries(mission.events).sort((a, b) => b[1] - a[1]);
+  document.getElementById('debriefTable').innerHTML = rows.map(([k, v]) => `<tr><td>${k}</td><td class="n" style="color:${v < 0 ? '#e07060' : '#9fe0a8'}">${v > 0 ? '+' : ''}${v}</td></tr>`).join('') +
+    `<tr><td><b>TOTAL</b></td><td class="n"><b>${mission.score}</b></td></tr>`;
+  document.getElementById('debriefRuns').innerHTML = all.runs.slice(0, 6).map(r =>
+    `<tr><td>${r.date.slice(0, 16).replace('T', ' ')}</td><td>${r.result}</td><td class="n">${r.score}</td><td class="n">${r.rank}</td></tr>`).join('');
+}
+document.getElementById('debriefRetry').addEventListener('click', () => { debriefEl.style.display = 'none'; uiOverlay = false; openHangar(); });
+document.getElementById('debriefMissions').addEventListener('click', () => { debriefEl.style.display = 'none'; openMissions(); });
 
 /* ================= HANGAR: 3D loadout editor ================= */
 // The hull loads the first time the hangar opens (models/ beside index.html); module files load when a module
@@ -3656,7 +3998,9 @@ function launch() {
   hangarOpen = false;
   hangarEl.style.display = 'none';
   restartAfterDeath();                               // fresh ship and scenario with this loadout
-  if (!started) { started = true; log('ORBIT NOMINAL · LEO 400 KM · PROGRADE'); log('GROUND LINK ESTABLISHED'); }
+  if (!started) started = true;
+  if (scenario === 'sandbox') { mission = null; log('ORBIT NOMINAL · LEO 400 KM · PROGRADE'); log('GROUND LINK ESTABLISHED'); }
+  else startMission();
   const fit = Object.keys(HARDPOINTS).filter(modAt).map(slotLabel);
   log(`LOADOUT · ${fit.length ? fit.join(' · ') : 'BARE HULL'}`);
 }
@@ -3733,7 +4077,7 @@ function frame(now) {
   const dt = Math.min((now - lastFrame)/1000, 0.1);
   lastFrame = now;
   if (hangarOpen) { renderHangar(dt); return; }
-  if (started && !paused && !menuOpen && !dead) step(dt);
+  if (started && !paused && !menuOpen && !dead && !uiOverlay && !(mission && mission.ended)) step(dt);
   animateCockpit(dt);
   uiAcc += dt;
   if (uiAcc > 0.066) { uiAcc = 0; updateDisplays(); }
