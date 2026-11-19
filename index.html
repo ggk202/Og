@@ -1201,7 +1201,7 @@ function drawShip(g, W, H, idx) {
   if (podsOn) {
     const f = clamp(podProp/SHIP.podProp0, 0, 1);
     for (const s of [-1, 1]) {
-      const pu0 = s > 0 ? 36 : -68, pw = 32, pl = 80, pv0 = -64;
+      const pu0 = s > 0 ? 36 : -72, pw = 36, pl = 70, pv0 = 136;
       g.beginPath();
       if (g.roundRect) g.roundRect(pu0, pv0, pw, pl, pw/2); else g.rect(pu0, pv0, pw, pl);
       g.fillStyle = 'rgba(125,255,154,0.08)'; g.fill();
