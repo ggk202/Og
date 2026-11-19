@@ -77,6 +77,20 @@ const PDC_MOUNTS = [
   { name: 'PDC TOP', sys: 'pdcTop', pos: [0, 1.2, 0.5], dir: [0, 1, 0], cd: 0 },
   { name: 'PDC BOT', sys: 'pdcBot', pos: [0, -1.2, 0.5], dir: [0, -1, 0], cd: 0 },
 ];
+// Magazine and barrel heat, per mount. A mount fires about 4 rounds/s (once per 0.25 s physics step), so
+// continuous fire overheats it in about 17 s ((4*0.025 - 0.04) per s); it locks out until the heat falls to
+// PDC_HEAT_RESUME, about 16 s later. 2000 rounds is about 8 minutes of fire.
+const PDC_ROUNDS = 2000, PDC_LOW_ROUNDS = 200, PDC_HEAT_ROUND = 0.025, PDC_COOL = 0.04, PDC_HEAT_RESUME = 0.35;
+function resetPdcMounts() { for (const m of PDC_MOUNTS) Object.assign(m, { cd: 0, rounds: PDC_ROUNDS, heat: 0, hot: false }); }
+resetPdcMounts();
+// Short status for displays: OFF (destroyed), HOT (overheated), EMPTY, or the normal state
+function pdcStatus(m) {
+  if (damage[m.sys] <= 0) return 'OFFLINE';
+  if (m.rounds <= 0) return 'EMPTY';
+  if (m.hot) return 'OVERHEAT';
+  if (masterMode === 'OFF') return 'SAFE';
+  return m.cd > 0 ? 'FIRING' : 'READY';
+}
 const PDC_RANGE = 5000, PDC_V = 1500, PDC_RATE = 8, PDC_ENERGY = 2e4, PDC_SPREAD = 0.0002, PDC_ARC = 100 * Math.PI/180;   // each mount reaches 10 deg past its horizon, so the two overlap around the hull
 // Hostile torpedoes: accelerate toward the ship for TORP_BURN seconds, then coast
 const TORP_ACCEL = 40, TORP_BURN = 30, TORP_KILL_R = 1.5, TORP_HULL_R = 20, HOSTILE_SALVO_T = 15;
@@ -158,8 +172,10 @@ function shipDestroyed(cause) {
   deathTimer = setTimeout(() => el.classList.add('show'), DEATH_MSG_DELAY*1000);
 }
 function restartAfterDeath() {
-  resetShip(); resetDamage();
-  torpedoes = []; tracers = []; projectiles = []; flashes = [];
+  // The whole scenario restarts: the ship returns to its starting orbit position, so the targets and the
+  // frigate must too, or they are left hundreds of km away (resetTargets also clears torpedoes and flashes)
+  resetShip(); resetDamage(); resetPdcMounts(); resetTargets();
+  projectiles = [];
   battery = POWER.battCap; hullT = THERM.tStart; railCD = 0; warpIdx = 0;
   leadHold = false; leadPrev = null; hullHits = 0;
   for (const t of targets) if (t.hostile) t.fireT = 10;
@@ -706,7 +722,10 @@ function physicsStep(h) {
   }
   for (const m of PDC_MOUNTS) {
     m.cd = Math.max(0, m.cd - h);
-    if (m.cd > 0 || masterMode === 'OFF' || battery < PDC_ENERGY || damage[m.sys] <= 0) continue;
+    // Barrel cooling, every step; an overheated mount comes back once it has cooled to PDC_HEAT_RESUME
+    m.heat = Math.max(0, m.heat - PDC_COOL*h);
+    if (m.hot && m.heat <= PDC_HEAT_RESUME) { m.hot = false; log(`${m.name} COOLED · READY`); }
+    if (m.cd > 0 || masterMode === 'OFF' || battery < PDC_ENERGY || damage[m.sys] <= 0 || m.hot || m.rounds <= 0) continue;
     const nW = new THREE.Vector3(...m.dir).applyQuaternion(shipQ);
     const mP = new THREE.Vector3(...m.pos).applyQuaternion(shipQ).add(new THREE.Vector3(ship.x, ship.y, ship.z));
     // Nearest torpedo inside range and the mount's arc
@@ -731,6 +750,11 @@ function physicsStep(h) {
       vx: ship.vx+aim.x*PDC_V, vy: ship.vy+aim.y*PDC_V, vz: ship.vz+aim.z*PDC_V, age: 0, dead: false });
     m.cd = 1/PDC_RATE; battery -= PDC_ENERGY;
     m.aimW = aim.clone(); m.lastFire = simT;        // for the turret drawing on the ship view
+    m.rounds--;
+    if (m.rounds === PDC_LOW_ROUNDS) log(`${m.name} AMMO LOW · ${PDC_LOW_ROUNDS} RDS`);
+    if (m.rounds === 0) log(`${m.name} AMMO EXPENDED`);
+    m.heat += PDC_HEAT_ROUND;
+    if (m.heat >= 1) { m.heat = 1; m.hot = true; log(`${m.name} OVERHEAT · CEASE FIRE`); }
     sfx.pdcRound(); pdcLastFire = simT;
   }
 
@@ -1561,8 +1585,9 @@ function drawTactical(g, W, H, idx) {
   // Threat summary: closing torpedoes, time to impact of the nearest, PDC state, hull
   line(threats ? `THREAT ${threats} TORP` : 'THREAT NONE', threats ? RED : DIM);
   line(tti !== null ? `TTI ${tti.toFixed(1)}s ${fmtDist(tRng)}` : 'TTI --', tti !== null && tti < 20 ? RED : PH);
-  const pdcS = m => damage[m.sys] <= 0 ? 'OFF' : masterMode === 'OFF' ? 'SAFE' : m.cd > 0 ? 'FIRE' : 'RDY';
-  line(`PDC T ${pdcS(PDC_MOUNTS[0])} B ${pdcS(PDC_MOUNTS[1])}`, PDC_MOUNTS.some(m => damage[m.sys] <= 0) ? AMB : PH);
+  const pdcS = m => ({ OFFLINE: 'OFF', EMPTY: 'EMP', OVERHEAT: 'HOT', SAFE: 'SAFE', FIRING: 'FIRE', READY: 'RDY' })[pdcStatus(m)];
+  line(`PDC T ${pdcS(PDC_MOUNTS[0])} B ${pdcS(PDC_MOUNTS[1])}`,
+    PDC_MOUNTS.some(m => ['OFFLINE', 'EMPTY', 'OVERHEAT'].includes(pdcStatus(m))) ? AMB : PH);
   line(`HULL ${(hullInt*100).toFixed(0)}%`, hullInt <= 0.25 ? RED : hullInt < 1 ? AMB : PH);
 }
 
@@ -1638,8 +1663,9 @@ function drawWeapons(g, W, H, idx) {
   else line(`LASER ${laserArmed ? (guardOpen ? 'ARMED' : 'ARMED (GUARD)') : 'SAFE'}${laserFiring ? ' FIRING' : ''}${dmgTag('laser')}`, laserArmed ? RED : PH);
   line(`IN FLIGHT ${projectiles.length}`);
   for (const m of PDC_MOUNTS) {
-    if (damage[m.sys] <= 0) { line(`${m.name}  OFFLINE`, RED); continue; }
-    line(`${m.name}  ${masterMode === 'OFF' ? 'SAFE' : m.cd > 0 ? 'FIRING' : 'READY'}${dmgTag(m.sys)}`, masterMode === 'OFF' ? PH : AMB);
+    const st = pdcStatus(m);
+    const col = st === 'OFFLINE' || st === 'EMPTY' || st === 'OVERHEAT' ? RED : st === 'SAFE' ? PH : AMB;
+    line(`${m.name} ${st.padEnd(8)} ${String(m.rounds).padStart(4)} RDS  HEAT ${String(Math.round(m.heat*100)).padStart(3)}%${dmgTag(m.sys)}`, col);
   }
   line(`HULL ${(hullInt*100).toFixed(0)}%  HITS ${hullHits}`, hullInt < 1 ? RED : PH);
   y += 12;
@@ -1933,9 +1959,16 @@ function drawShip(g, W, H, idx) {
 
   g.restore();
   // PDC labels beside their coverage fans (screen coordinates)
-  const pdcLab = (m, y) => txt(g, sx(5), y, damage[m.sys] <= 0 ? `${m.name} OFF` : m.name,
-    damage[m.sys] <= 0 ? RED : damage[m.sys] < 1 ? AMB : PH, '18px monospace', 'center');
-  pdcLab(PDC_MOUNTS[0], cy - HW - 66);
+  // Label: name and rounds left, or the fault; a heat bar under it fills toward overheat
+  const pdcLab = (m, y) => {
+    const st = pdcStatus(m), bad = st === 'OFFLINE' || st === 'EMPTY' || st === 'OVERHEAT';
+    const text = st === 'OFFLINE' ? `${m.name} OFF` : st === 'EMPTY' ? `${m.name} EMPTY` : st === 'OVERHEAT' ? `${m.name} HOT` : `${m.name} ${m.rounds}`;
+    txt(g, sx(5), y, text, bad ? RED : damage[m.sys] < 1 || m.rounds <= PDC_LOW_ROUNDS ? AMB : PH, '18px monospace', 'center');
+    const bx = sx(5) - 45, by = y + 5;
+    g.strokeStyle = DIM; g.lineWidth = 1; g.strokeRect(bx, by, 90, 6);
+    g.fillStyle = m.hot ? RED : m.heat > 0.7 ? AMB : PH; g.fillRect(bx + 1, by + 1, 88*m.heat, 4);
+  };
+  pdcLab(PDC_MOUNTS[0], cy - HW - 74);
   pdcLab(PDC_MOUNTS[1], cy + HW + 82);
 
   /* ---------- callouts, in screen coordinates ---------- */
