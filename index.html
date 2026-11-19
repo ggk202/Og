@@ -132,6 +132,7 @@ let curTarget = 0, rangeIdx = 1, tickAcc = 0;
 let targets = [];
 let projectiles = [];
 let flashes = [];   // hit and kill flashes in world space, aged in physics time: {x,y,z,age,dur,peak,kind}
+let scopeShakeAz = 0, scopeShakeEl = 0;   // mild telescope shake during an explosion (rad), added to the gimbal view only
 const msgs = [];
 let pending = [];
 const telem = { loadE: 0, qin: 0, qout: 0 };
@@ -476,7 +477,7 @@ function physicsStep(h) {
     if (!t.gone && t.integrity <= 0) {
       t.gone = true; groundMsg(`${t.name} CONFIRMED DESTROYED`);
       // Reactor explosion: a bright, longer flash at the ship's last position
-      flashes.push({ x: t.x, y: t.y, z: t.z, age: 0, dur: 1.6, peak: 1.0, kind: 'kill' });
+      flashes.push({ x: t.x, y: t.y, z: t.z, age: 0, dur: 4.0, peak: 1.0, kind: 'kill' });
     }
   }
   targets = targets.filter(t => !t.gone);
@@ -1452,7 +1453,7 @@ const SCOPE_FOV = 4 * Math.PI/180;
 const SCOPE_AZ_MAX = 60 * Math.PI/180, SCOPE_EL_MAX = 45 * Math.PI/180, SCOPE_SLEW = 25 * Math.PI/180;
 // Scope view rotation: the gimbal turns the boresight, so the view is taken in the gimbal's frame
 function scopeGimbalQ() {
-  return new THREE.Quaternion().setFromEuler(new THREE.Euler(scopeEl, -scopeAz, 0, 'YXZ'));
+  return new THREE.Quaternion().setFromEuler(new THREE.Euler(scopeEl + scopeShakeEl, -(scopeAz + scopeShakeAz), 0, 'YXZ'));
 }
 function scopeViewQ() {
   return scopeGimbalQ().invert().multiply(toBodyQ());
@@ -1713,16 +1714,26 @@ function animateCockpit(dt) {
   }
   // Telescope gimbal: slews toward the locked target at a limited rate, and stows to the nose when unlocked
   {
+    // An explosion in progress takes priority, so the scope stays on it after its target is removed
+    // (curTarget then points at a different target); otherwise the locked target
     const tg = targets[curTarget];
+    const kill = flashes.filter(f => f.kind === 'kill').pop();
+    const aimAt = kill || (tg && !tg.gone ? tg : null);
     let azT = 0, elT = 0;
-    if (tg && !tg.gone) {
-      const vb = new THREE.Vector3(tg.x-ship.x, tg.y-ship.y, tg.z-ship.z).applyQuaternion(toBodyQ());
+    if (aimAt) {
+      const vb = new THREE.Vector3(aimAt.x-ship.x, aimAt.y-ship.y, aimAt.z-ship.z).applyQuaternion(toBodyQ());
       azT = Math.atan2(vb.x, -vb.z); elT = Math.atan2(vb.y, -vb.z);
     }
     azT = clamp(azT, -SCOPE_AZ_MAX, SCOPE_AZ_MAX); elT = clamp(elT, -SCOPE_EL_MAX, SCOPE_EL_MAX);
     const rate = SCOPE_SLEW*sdt;
     scopeAz += clamp(azT - scopeAz, -rate, rate);
     scopeEl += clamp(elT - scopeEl, -rate, rate);
+    // Mild shake while an explosion is in view, fading with the blast
+    if (kill && aimAt === kill) {
+      const amp = 0.004 * (1 - kill.age/kill.dur);
+      scopeShakeAz = (Math.random()*2 - 1) * amp;
+      scopeShakeEl = (Math.random()*2 - 1) * amp;
+    } else { scopeShakeAz = 0; scopeShakeEl = 0; }
   }
   const k = 1 - Math.exp(-dt*18);
   const state = { rad: radDeployed, stab: rcsStab, arm: laserArmed, master: true, ...auxOn };
