@@ -64,7 +64,7 @@ const PHYS_DT = 0.25;
 const WARPS = [1, 10, 100, 1000];
 const RANGES = [2000, 10000, 50000, 250000, 1000000];
 const PREVENT = new Set(['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','PageUp','PageDown','Period','Comma']);
-const MFD_PAGES = ['TACTICAL', 'ORBIT', 'POWER / THERMAL', 'WEAPONS', 'PROPULSION', 'COMMS', 'SHIP'];
+const MFD_PAGES = ['TACTICAL', 'ORBIT', 'POWER / THERMAL', 'WEAPONS', 'PROPULSION', 'COMMS', 'SHIP', 'SCOPE'];
 const MFD_W = 0.6, MFD_H = 0.367, MFD_TEX_W = 768, MFD_TEX_H = 470;
 const PH = '#7dff9a', AMB = '#ffb020', RED = '#ff5040', DIM = 'rgba(125,255,154,0.35)';
 
@@ -94,6 +94,7 @@ const ACTIONS = [
   { id:'guardMaster', label:'Master arm cover (toggle)', def:'KeyK', edge:true },
   { id:'masterArm',  label:'Master arm (cycle OFF/ON/TNG)', def:'KeyH', edge:true },
   { id:'jettison',   label:'Jettison fuel pods',       def:'KeyJ', edge:true },
+  { id:'toggleIR',   label:'Scope IR toggle',          def:'KeyV', edge:true },
   { id:'warpUp',     label:'Time warp up',             def:'Period', edge:true },
   { id:'warpDown',   label:'Time warp down',           def:'Comma', edge:true },
   { id:'pause',      label:'Pause',                    def:'KeyP', edge:true },
@@ -121,6 +122,7 @@ let battery = POWER.battCap, hullT = THERM.tStart;
 let radDeployed = true, rcsStab = true, laserArmed = false, guardOpen = false, brownout = false;
 let lampTestT = 0;   // seconds of lamp test remaining
 let keyBuf = '';     // keypad entry buffer, shown on the COMMS page
+let irOn = false;    // scope thermal (IR) mode
 let simT = 0, warpIdx = 0, paused = false, menuOpen = false, started = false;
 let railCD = 0, railReq = false, thrustFrac = 0, rcsActive = false, laserFiring = false;
 let curTarget = 0, rangeIdx = 1, tickAcc = 0;
@@ -843,8 +845,9 @@ for (const s of switchDefs) {
   }
 }
 
-// Utility buttons beside the placard: lamp test, MFD page reset, and fuel pod jettison
+// Utility buttons beside the placard: lamp test, MFD page reset, fuel pod jettison, scope IR toggle
 makeButton(0.34, -0.43, 'JETT', () => jettisonPods());
+makeButton(0.42, -0.43, 'IR', () => onAction('toggleIR'));
 makeButton(-0.26, -0.43, 'TEST', () => { lampTestT = 3; sfx.click(); });
 makeButton(0.26, -0.43, 'RESET', () => {
   mfds.forEach((m, i) => { m.page = mfdDefs[i].page; m.on = true; drawMFD(m); });
@@ -1303,6 +1306,83 @@ function drawShip(g, W, H, idx) {
   callArrow(sx(HE+9) + 40, 428, sx(HE+9), 280);
 }
 
+// Combat telescope: a 4-degree field centred on the ship's forward axis. Stars, the Moon and targets are
+// projected through the ship's attitude. IR mode shows targets as white-hot blobs and hides the stars.
+const SCOPE_FOV = 4 * Math.PI/180;
+const STAR_DIRS = Array.from({ length: 260 }, () => ({
+  v: new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize(),
+  b: 0.3 + Math.random()*0.7,
+}));
+// Relative heat of each target for the IR view (0..1)
+function irLevel(t) {
+  const n = t.name;
+  return n.includes('TUG') ? 0.85 : n.includes('DERELICT') ? 0.35 : n.includes('DEBRIS') ? 0.2 : 0.4;
+}
+function drawScope(g, W, H, idx) {
+  mfdHeader(g, W, `SCOPE  ${irOn ? 'IR' : 'VIS'}  FOV 4 DEG`, idx);
+  const cx = W/2, cy = H/2 + 12, R = 170;
+  const bq = toBodyQ();
+  const proj = v => {
+    if (v.z >= 0) return null;                       // behind the scope (forward is -Z)
+    const az = Math.atan2(v.x, -v.z), el = Math.atan2(v.y, -v.z);
+    if (Math.hypot(az, el) > SCOPE_FOV) return null;
+    return { x: cx + az/SCOPE_FOV*R, y: cy - el/SCOPE_FOV*R };
+  };
+  const blob = (v, radius, dist, heat) => {
+    const p = proj(v); if (!p) return;
+    const sr = Math.max(3, (radius/dist)/SCOPE_FOV*R);
+    if (irOn) {
+      const gr = g.createRadialGradient(p.x, p.y, 0, p.x, p.y, sr*2.2);
+      gr.addColorStop(0, `rgba(255,255,255,${0.4 + heat*0.6})`);
+      gr.addColorStop(0.5, `rgba(255,190,120,${heat*0.5})`);
+      gr.addColorStop(1, 'rgba(0,0,0,0)');
+      g.fillStyle = gr; g.beginPath(); g.arc(p.x, p.y, sr*2.2, 0, Math.PI*2); g.fill();
+    } else {
+      g.fillStyle = '#9aa6b0'; g.beginPath(); g.arc(p.x, p.y, sr, 0, Math.PI*2); g.fill();
+    }
+  };
+  g.save();
+  g.beginPath(); g.arc(cx, cy, R, 0, Math.PI*2); g.clip();
+  g.fillStyle = irOn ? '#030303' : '#02070d'; g.fillRect(0, 0, W, H);
+  if (!irOn) for (const s of STAR_DIRS) {
+    const p = proj(s.v.clone().applyQuaternion(bq));
+    if (p) { g.fillStyle = `rgba(220,235,255,${s.b})`; g.fillRect(p.x, p.y, 1.5, 1.5); }
+  }
+  const mp = moonPos(simT);
+  const vM = new THREE.Vector3(mp[0]-ship.x, mp[1]-ship.y, mp[2]-ship.z);
+  blob(vM.clone().applyQuaternion(bq), 1.737e6, vM.length(), 0.2);
+  for (const t of targets) {
+    if (t.gone) continue;
+    const vt = new THREE.Vector3(t.x-ship.x, t.y-ship.y, t.z-ship.z);
+    blob(vt.clone().applyQuaternion(bq), t.radius, vt.length(), irLevel(t));
+  }
+  // Reticle
+  g.strokeStyle = irOn ? 'rgba(255,255,255,0.5)' : PH; g.lineWidth = 1.5;
+  g.beginPath();
+  g.moveTo(cx - R, cy); g.lineTo(cx - 10, cy); g.moveTo(cx + 10, cy); g.lineTo(cx + R, cy);
+  g.moveTo(cx, cy - R); g.lineTo(cx, cy - 10); g.moveTo(cx, cy + 10); g.lineTo(cx, cy + R);
+  g.stroke();
+  g.restore();
+  // Lock brackets on the current target
+  const tgt = targets[curTarget];
+  let lockText = 'NO LOCK';
+  if (tgt && !tgt.gone) {
+    const vt = new THREE.Vector3(tgt.x-ship.x, tgt.y-ship.y, tgt.z-ship.z);
+    lockText = `LOCK ${tgt.name}  ${fmtDist(vt.length())}`;
+    const p = proj(vt.clone().applyQuaternion(bq));
+    if (p) {
+      const b = 18;
+      g.strokeStyle = irOn ? '#ffd27a' : AMB; g.lineWidth = 2.5;
+      g.beginPath();
+      for (const sx of [-1, 1]) for (const sy of [-1, 1]) {
+        g.moveTo(p.x + sx*b, p.y + sy*(b - 8)); g.lineTo(p.x + sx*b, p.y + sy*b); g.lineTo(p.x + sx*(b - 8), p.y + sy*b);
+      }
+      g.stroke();
+    }
+  }
+  g.strokeStyle = PH; g.lineWidth = 3; g.beginPath(); g.arc(cx, cy, R, 0, Math.PI*2); g.stroke();
+  txt(g, cx, 452, lockText, PH, '24px monospace', 'center');
+}
 function drawMFD(m) {
   const g = m.T.g, W = MFD_TEX_W, H = MFD_TEX_H;
   if (!m.on) {
@@ -1317,6 +1397,7 @@ function drawMFD(m) {
       case 'PROPULSION': drawPropulsion(g, W, H, m.i); break;
       case 'COMMS': drawComms(g, W, H, m.i); break;
       case 'SHIP': drawShip(g, W, H, m.i); break;
+      case 'SCOPE': drawScope(g, W, H, m.i); break;
     }
   }
   // CRT glass: edge vignette and a soft diagonal reflection
@@ -1614,6 +1695,7 @@ function onAction(id) {
       else log('MASTER ARM COVER CLOSED');
       break;
     case 'jettison': jettisonPods(); break;
+    case 'toggleIR': irOn = !irOn; sfx.click(); mfds.forEach(m => drawMFD(m)); break;
     case 'warpUp': warpIdx = Math.min(warpIdx+1, WARPS.length-1); break;
     case 'warpDown': warpIdx = Math.max(warpIdx-1, 0); break;
     case 'pause': paused = !paused; break;
