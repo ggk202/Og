@@ -60,6 +60,16 @@ const WEAPON = { railMass: 5, railV: 1000, railCooldown: 3, railEnergy: 2.5e6, r
 // Laser gimbal: a small independent mount slaved to the locked target, so the laser can fire while the nose
 // and railgun are aimed elsewhere. It is limited to a few degrees either side of the nose.
 const LASER_GIMBAL_MAX = 2 * Math.PI/180, LASER_SLEW = 30 * Math.PI/180;
+// Point-defence cannons: two mounts on opposite hull faces, across from each other. Both faces are parallel to
+// the radiators (their normal is body Y). Each fires tracers at the nearest torpedo inside its arc.
+const PDC_MOUNTS = [
+  { name: 'PDC TOP', pos: [0, 1.2, 0.5], dir: [0, 1, 0], cd: 0 },
+  { name: 'PDC BOT', pos: [0, -1.2, 0.5], dir: [0, -1, 0], cd: 0 },
+];
+const PDC_RANGE = 5000, PDC_V = 1500, PDC_RATE = 8, PDC_ENERGY = 2e4, PDC_SPREAD = 0.0002, PDC_ARC = 80 * Math.PI/180;
+// Hostile torpedoes: accelerate toward the ship for TORP_BURN seconds, then coast
+const TORP_ACCEL = 40, TORP_BURN = 30, TORP_KILL_R = 1.5, TORP_HULL_R = 20, HOSTILE_SALVO_T = 15;
+let torpedoes = [], tracers = [], hullHits = 0;
 const POWER = { reactor: 200e3, reactorWaste: 200e3, avionics: 40e3, battCap: 5e6 };
 const THERM = { capacity: 2e5, radArea: 600, radStowedArea: 40, eps: 0.9, sigma: 5.670374e-8,
   tSpace: 3, tMax: 400, tWarn: 380, tStart: 297 };
@@ -155,9 +165,11 @@ function resetTargets() {
     mkTarget('DEBRIS 9F-22',    LEO_R,        -0.0008, 0.8, 15),   // ~5 km behind
     mkTarget('TUG MERIDIAN',    LEO_R + 6000, 0.0045,  5,   120),  // ~27 km ahead
     mkTarget('FRAGMENT C-3',    LEO_R,        0.0003,  0.5, 8),    // ~2 km ahead
+    { ...mkTarget('HOSTILE FRIGATE', LEO_R + 4000, 0.0025, 6, 300), hostile: true, fireT: 5 },   // fires torpedoes
   ];
   curTarget = 0;
   flashes = [];
+  torpedoes = []; tracers = []; hullHits = 0;
 }
 resetTargets();
 
@@ -432,6 +444,48 @@ function physicsStep(h) {
     else if (railCD > 0) log(`RAIL CYCLING ${railCD.toFixed(1)} s`);
     else log('RAIL CAPACITOR LOW');
   }
+
+  /* --- point defence and hostile torpedo launches: from the start-of-step state, like the railgun --- */
+  for (const t of targets) {
+    if (!t.hostile || t.gone) continue;
+    t.fireT -= h;
+    if (t.fireT > 0) continue;
+    t.fireT = HOSTILE_SALVO_T;
+    for (let k = 0; k < 4; k++) {
+      const dir = new THREE.Vector3(ship.x-t.x, ship.y-t.y, ship.z-t.z).normalize()
+        .add(new THREE.Vector3(Math.random()-0.5, Math.random()-0.5, Math.random()-0.5).multiplyScalar(0.3)).normalize();
+      torpedoes.push({ x: t.x+dir.x*5, y: t.y+dir.y*5, z: t.z+dir.z*5,
+        vx: t.vx+dir.x*200, vy: t.vy+dir.y*200, vz: t.vz+dir.z*200, age: 0, burn: TORP_BURN, dead: false });
+    }
+    log('HOSTILE LAUNCH  4 TORPEDOES');
+  }
+  for (const m of PDC_MOUNTS) {
+    m.cd = Math.max(0, m.cd - h);
+    if (m.cd > 0 || masterMode === 'OFF' || battery < PDC_ENERGY) continue;
+    const nW = new THREE.Vector3(...m.dir).applyQuaternion(shipQ);
+    const mP = new THREE.Vector3(...m.pos).applyQuaternion(shipQ).add(new THREE.Vector3(ship.x, ship.y, ship.z));
+    // Nearest torpedo inside range and the mount's arc
+    let best = null, bestR = Infinity;
+    for (const tp of torpedoes) {
+      if (tp.dead) continue;
+      const rel = new THREE.Vector3(tp.x-mP.x, tp.y-mP.y, tp.z-mP.z);
+      const r = rel.length();
+      if (r > PDC_RANGE || r >= bestR) continue;
+      if (rel.dot(nW) < r*Math.cos(PDC_ARC)) continue;
+      best = tp; bestR = r;
+    }
+    if (!best) continue;
+    const rel = new THREE.Vector3(best.x-mP.x, best.y-mP.y, best.z-mP.z);
+    const relV = new THREE.Vector3(best.vx-ship.vx, best.vy-ship.vy, best.vz-ship.vz);
+    const tt = leadTime(rel, relV, PDC_V);
+    if (tt === null) continue;
+    const aim = rel.addScaledVector(relV, tt).normalize()
+      .add(new THREE.Vector3(Math.random()-0.5, Math.random()-0.5, Math.random()-0.5).multiplyScalar(PDC_SPREAD)).normalize();
+    tracers.push({ x: mP.x+aim.x*2, y: mP.y+aim.y*2, z: mP.z+aim.z*2,
+      vx: ship.vx+aim.x*PDC_V, vy: ship.vy+aim.y*PDC_V, vz: ship.vz+aim.z*PDC_V, age: 0, dead: false });
+    m.cd = 1/PDC_RATE; battery -= PDC_ENERGY;
+  }
+
   const mass = shipMass();
   const fw = new THREE.Vector3(F[0], F[1], F[2]).applyQuaternion(shipQ);
   rk4(ship, h, fw.x/mass, fw.y/mass, fw.z/mass);
@@ -439,6 +493,16 @@ function physicsStep(h) {
   /* --- other bodies and projectiles (gravity only) --- */
   for (const t of targets) { t.px = t.x; t.py = t.y; t.pz = t.z; rk4(t, h, 0, 0, 0); }
   for (const p of projectiles) { p.px = p.x; p.py = p.y; p.pz = p.z; rk4(p, h, 0, 0, 0); p.age += h; }
+  for (const tp of torpedoes) {
+    tp.px = tp.x; tp.py = tp.y; tp.pz = tp.z;
+    let ax = 0, ay = 0, az = 0;
+    if (tp.age < tp.burn) {                          // powered: accelerate toward the ship
+      const dx = ship.x-tp.x, dy = ship.y-tp.y, dz = ship.z-tp.z, d = Math.hypot(dx, dy, dz);
+      ax = TORP_ACCEL*dx/d; ay = TORP_ACCEL*dy/d; az = TORP_ACCEL*dz/d;
+    }
+    rk4(tp, h, ax, ay, az); tp.age += h;
+  }
+  for (const tr of tracers) { tr.px = tr.x; tr.py = tr.y; tr.pz = tr.z; rk4(tr, h, 0, 0, 0); tr.age += h; }
 
   /* --- projectile hits (swept test over the step) --- */
   for (const p of projectiles) {
@@ -482,6 +546,32 @@ function physicsStep(h) {
     }
     if (best && masterMode === 'ON') best.integrity -= WEAPON.laserDmgRate*h;
   }
+
+  /* --- point-defence hits on torpedoes (in TNG the tracers pass through: practice, no kill) --- */
+  for (const tr of tracers) {
+    if (tr.dead) continue;
+    for (const tp of torpedoes) {
+      if (tp.dead) continue;
+      if (segDist(tr, tp) < TORP_KILL_R) {
+        tr.dead = true;
+        if (masterMode === 'ON') tp.dead = true;
+        flashes.push({ x: tp.x, y: tp.y, z: tp.z, age: 0, dur: 0.4, peak: 0.6, kind: 'hit' });
+        log(masterMode === 'ON' ? 'PDC KILL  TORPEDO' : 'PDC PRACTICE HIT');
+        break;
+      }
+    }
+  }
+  /* --- torpedo impacts on the hull --- */
+  for (const tp of torpedoes) {
+    if (tp.dead) continue;
+    if (Math.hypot(tp.x-ship.x, tp.y-ship.y, tp.z-ship.z) < TORP_HULL_R) {
+      tp.dead = true; hullHits++;
+      flashes.push({ x: tp.x, y: tp.y, z: tp.z, age: 0, dur: 0.6, peak: 0.8, kind: 'hit' });
+      log(`TORPEDO HIT  HULL ${hullHits}`); sfx.hullThump();
+    }
+  }
+  torpedoes = torpedoes.filter(tp => !tp.dead && tp.age < 90);
+  tracers = tracers.filter(tr => !tr.dead && tr.age < 4);
 
   /* --- kills --- */
   for (const t of targets) {
@@ -1231,6 +1321,8 @@ function drawWeapons(g, W, H, idx) {
   line(`RAIL  ${railCD > 0 ? 'CYCLING ' + railCD.toFixed(1) + ' s' : 'READY'}`, railCD > 0 ? AMB : PH);
   line(`LASER ${laserArmed ? (guardOpen ? 'ARMED' : 'ARMED (GUARD)') : 'SAFE'}${laserFiring ? ' FIRING' : ''}`, laserArmed ? RED : PH);
   line(`IN FLIGHT ${projectiles.length}`);
+  for (const m of PDC_MOUNTS) line(`${m.name}  ${masterMode === 'OFF' ? 'SAFE' : m.cd > 0 ? 'FIRING' : 'READY'}`, masterMode === 'OFF' ? PH : AMB);
+  line(`HULL HITS ${hullHits}`, hullHits ? RED : PH);
   y += 12;
   txt(g, 30, y, 'TARGETS', DIM, '21px monospace'); y += 26;
   targets.forEach((t, i) => {
@@ -1481,8 +1573,7 @@ const STAR_DIRS = Array.from({ length: 260 }, () => ({
 // Relative heat of each target for the IR view (0..1)
 // Earliest time t > 0 at which a railgun shot from the ship, at WEAPON.railV, meets a target at rel + relV*t.
 // Both vectors are relative to the ship. Returns null when there is no intercept.
-function leadTime(rel, relV) {
-  const V = WEAPON.railV;
+function leadTime(rel, relV, V = WEAPON.railV) {
   const A = relV.dot(relV) - V*V, Bq = 2*rel.dot(relV), Cq = rel.dot(rel);
   if (Math.abs(A) > 1e-9) {
     const disc = Bq*Bq - 4*A*Cq;
@@ -1548,6 +1639,15 @@ function drawScope(g, W, H, idx) {
     const vt = new THREE.Vector3(t.x-ship.x, t.y-ship.y, t.z-ship.z);
     blob(vt.clone().applyQuaternion(bq), t.radius, vt.length(), irLevel(t));
   }
+  // Point-defence tracers and hostile torpedoes: a streak from the last position to the current one
+  const drawTrail = (o, col, w, dotR) => {
+    const p1 = proj(new THREE.Vector3(o.x-ship.x, o.y-ship.y, o.z-ship.z).applyQuaternion(bq));
+    const p0 = proj(new THREE.Vector3(o.px-ship.x, o.py-ship.y, o.pz-ship.z).applyQuaternion(bq));
+    if (p0 && p1) { g.strokeStyle = col; g.lineWidth = w; g.beginPath(); g.moveTo(p0.x, p0.y); g.lineTo(p1.x, p1.y); g.stroke(); }
+    if (dotR && p1) { g.fillStyle = col; g.beginPath(); g.arc(p1.x, p1.y, dotR, 0, Math.PI*2); g.fill(); }
+  };
+  for (const tr of tracers) drawTrail(tr, irOn ? '#ffffff' : '#ffd060', 2, 0);
+  for (const tp of torpedoes) drawTrail(tp, irOn ? '#ffffff' : '#ff8a4a', 2, 3);
   // Hit and kill flashes: a fast rise, then decay. Drawn additively so they read as bright light.
   g.globalCompositeOperation = 'lighter';
   for (const f of flashes) {
