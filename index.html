@@ -324,6 +324,13 @@ const PDC_RANGE = 5000, PDC_V = 1500, PDC_RATE = 8, PDC_ENERGY = 2e4, PDC_SPREAD
 // Hostile torpedoes: accelerate toward the ship for TORP_BURN seconds, then coast
 const TORP_ACCEL = 40, TORP_BURN = 30, TORP_KILL_R = 1.5, TORP_HULL_R = 20, HOSTILE_SALVO_T = 15;
 let torpedoes = [], tracers = [], hullHits = 0;
+let eTracers = [];                                   // enemy point-defence rounds (they hunt player ordnance)
+// Enemy ships: thrust (m/s^2) and delta-v budget for manoeuvring; point defence against player ordnance
+const AI_DEF = { acc: 4, dv: 1500 };
+// range, muzzle speed, rounds/s per mount, per-round scatter, fire-control tracking error (one per step, shared
+// by that step's rounds), time to acquire a new track, minimum range (the turret cannot slew fast enough inside
+// it), chance that a round striking a weapon kills it
+const EPD = { range: 3000, v: 1500, rate: 6, spread: 0.001, bias: 0.008, acquire: 1.0, minR: 300, pKill: 0.6 };
 let pdcActive = false, pdcSlewRate = 0, pdcLastFire = -1e9;   // sound state set by the physics step
 let torpWarn = false;                 // a torpedo is inbound within TORP_WARN_R
 let torpMute = false;                 // mute button: silences the warning tone (the lamp still blinks)
@@ -548,7 +555,7 @@ const PHYS_DT = 0.25;
 const WARPS = [1, 10, 100, 1000];
 const RANGES = [2000, 10000, 50000, 250000, 1000000];
 const PREVENT = new Set(['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','PageUp','PageDown','Period','Comma']);
-const MFD_PAGES = ['TACTICAL', 'ORBIT', 'POWER / THERMAL', 'WEAPONS', 'PROPULSION', 'COMMS', 'SHIP', 'SCOPE', 'DAMAGE'];
+const MFD_PAGES = ['TACTICAL', 'ORBIT', 'POWER / THERMAL', 'WEAPONS', 'PROPULSION', 'COMMS', 'SHIP', 'SCOPE', 'DAMAGE', 'CONTROLS'];
 const MFD_W = 0.6, MFD_H = 0.367, MFD_TEX_W = 768, MFD_TEX_H = 470;
 const PH = '#7dff9a', AMB = '#ffb020', RED = '#ff5040', DIM = 'rgba(125,255,154,0.35)';
 
@@ -571,6 +578,16 @@ const ACTIONS = [
   { id:'leadHold',   label:'Lead hold: point nose at lead (toggle)', def:'KeyL', edge:true },
   { id:'fireRail',   label:'Fire spinal weapon (railgun / torpedo)', def:'Mouse0', edge:true },
   { id:'fireMissile',label:'Fire VLS missile',         def:'KeyF', edge:true },
+  { id:'planNode',   label:'Planner: set/clear node',  def:'Digit0', edge:true },
+  { id:'planRetro',  label:'Planner: retrograde -',    def:'Digit1', edge:true },
+  { id:'planPro',    label:'Planner: prograde +',      def:'Digit2', edge:true },
+  { id:'planRadIn',  label:'Planner: radial in',       def:'Digit3', edge:true },
+  { id:'planRadOut', label:'Planner: radial out',      def:'Digit4', edge:true },
+  { id:'planAnti',   label:'Planner: anti-normal',     def:'Digit5', edge:true },
+  { id:'planNrm',    label:'Planner: normal',          def:'Digit6', edge:true },
+  { id:'planEarlier',label:'Planner: node earlier',    def:'Digit7', edge:true },
+  { id:'planLater',  label:'Planner: node later',      def:'Digit8', edge:true },
+  { id:'planStep',   label:'Planner: step size',       def:'Digit9', edge:true },
   { id:'fireLaser',  label:'Fire laser (hold)',        def:'Mouse2' },
   { id:'guardLaser', label:'Laser arm guard (toggle)', def:'KeyG', edge:true },
   { id:'armLaser',   label:'Laser arm switch (toggle)',def:'KeyB', edge:true },
@@ -660,9 +677,109 @@ function orbitStateInc(r, phase, inc = 0) {
   const s = orbitState(r, phase), c = Math.cos(inc), n = Math.sin(inc);
   return { x: s.x, y: s.y*c, z: s.y*n, vx: s.vx, vy: s.vy*c, vz: s.vy*n };
 }
+/* ---------- Enemy ship AI: manoeuvre on a delta-v budget ----------
+   Priority: dodge inbound player ordnance (thrust across its line of sight), retreat when badly damaged, otherwise
+   keep the range: close in to weapons range, open out when the player gets too near. Every burn shows up as a
+   large signature (targetSig). Returns the thrust acceleration in world axes, or null when coasting. */
+function enemyAI(t, h) {
+  t.burning = false;
+  const ai = t.ai, was = t.aiState; t.aiState = null;
+  if (!ai || t.gone || ai.dv <= 0 || !t.hostile) return null;
+  if (t.needsAlert && !(mission && mission.alert)) return null;
+  const rel = new THREE.Vector3(ship.x-t.x, ship.y-t.y, ship.z-t.z), r = rel.length();
+  const relV = new THREE.Vector3(ship.vx-t.vx, ship.vy-t.vy, ship.vz-t.vz);
+  let dir = null, why = null;
+  // 1. Evade the nearest closing player weapon aimed at this ship
+  let thr = null, thrR = 25e3;
+  for (const o of ordnance) {
+    if (o.dead || o.target !== t) continue;
+    const ro = new THREE.Vector3(o.x-t.x, o.y-t.y, o.z-t.z), d = ro.length();
+    const vo = new THREE.Vector3(o.vx-t.vx, o.vy-t.vy, o.vz-t.vz);
+    const vc = -ro.dot(vo)/d;                         // closing speed; react inside 15 s to impact
+    if (d < thrR && vc > 0 && d/vc < 15) { thr = { o, ro, vo }; thrR = d; }
+  }
+  if (thr) {
+    const o = thr.o, u = thr.ro.clone().normalize();
+    if (!o.evade) {                                   // pick a side once per weapon, across the line of sight
+      const any = Math.abs(u.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0);
+      const e1 = new THREE.Vector3().crossVectors(u, any).normalize(), e2 = new THREE.Vector3().crossVectors(u, e1), th = Math.random()*2*Math.PI;
+      o.evade = e1.multiplyScalar(Math.cos(th)).addScaledVector(e2, Math.sin(th));
+      if (isLocal(t)) log(`${t.name} EVADING`);
+    }
+    dir = o.evade.clone().addScaledVector(u, -o.evade.dot(u)).normalize(); why = 'EVADE';
+  } else if (t.integrity < 0.35*t.maxInt) {
+    // 2. Retreat: open the range at full thrust
+    const opening = rel.dot(relV)/r;                 // the ship's speed away from us
+    if (opening < 300) { dir = rel.clone().normalize().negate(); why = 'RETREAT'; }   // then coast away
+    if (!t.retreating) { t.retreating = true; if (isLocal(t)) log(`${t.name} DISENGAGING`); }
+  } else {
+    // 3. Range keeping: wanted closing speed from the range band, steer the relative velocity onto it
+    const u = rel.clone().normalize(), want = t.fireRange ? 0.8*t.fireRange : 40e3;
+    const vc = r > want ? Math.min(250, (r - want)/60) : r < 8e3 ? -60 : 0;
+    const err = u.clone().multiplyScalar(vc).sub(relV.clone().negate());   // wanted minus actual (own velocity rel. to ship)
+    const e = err.length();                          // hysteresis: start at 20 m/s off, trim down to 3 m/s
+    if (e > 20 || (was === 'MANEUVER' && e > 3)) { dir = err.normalize(); why = 'MANEUVER'; }
+  }
+  if (!dir) return null;
+  t.burning = true; t.aiState = why;
+  ai.dv = Math.max(0, ai.dv - ai.acc*h);
+  t.thrA = [dir.x*ai.acc, dir.y*ai.acc, dir.z*ai.acc];
+  return t.thrA;
+}
+// Enemy point defence: each armed ship fires at the nearest player missile, torpedo or interceptor inside range,
+// leading it like the player's guns but with a wider scatter. Rail slugs are too fast to engage.
+function enemyPD(h) {
+  for (const t of targets) {
+    if (!t.pd || t.gone || !t.hostile) continue;
+    const t0 = t.s0 || t;                            // start-of-step state: the ordnance has not moved yet this step
+    const shots = Math.max(1, Math.round(h*EPD.rate*t.pd));   // rounds this step
+    let best = null, bestR = EPD.range;
+    for (const o of ordnance) {
+      if (o.dead) continue;
+      const r = Math.hypot(o.x-t0.x, o.y-t0.y, o.z-t0.z);
+      if (r < bestR && r > EPD.minR) { best = o; bestR = r; }
+    }
+    if (!best) { t.pdTrack = null; continue; }
+    if (t.pdTrack !== best) { t.pdTrack = best; t.pdTrackT = simT; }   // a new track must be acquired first
+    if (simT - t.pdTrackT < EPD.acquire) continue;
+    const rel = new THREE.Vector3(best.x-t0.x, best.y-t0.y, best.z-t0.z);
+    const relV = new THREE.Vector3(best.vx-t0.vx, best.vy-t0.vy, best.vz-t0.vz);
+    let tt = leadTime(rel, relV, EPD.v);
+    if (tt === null) continue;
+    // Fire control also allows for the weapon's current thrust (it is seen accelerating): refine the lead twice
+    const ac = best.burn > 0 && best.cmd ? new THREE.Vector3(...best.cmd) : new THREE.Vector3();
+    let aimP = rel.clone();
+    for (let it = 0; it < 3; it++) {
+      aimP = rel.clone().addScaledVector(relV, tt).addScaledVector(ac, 0.5*tt*tt);
+      tt = aimP.length()/EPD.v;
+    }
+    const aim0 = aimP.normalize().add(new THREE.Vector3(Math.random()-0.5, Math.random()-0.5, Math.random()-0.5)
+      .multiplyScalar(2*EPD.bias)).normalize();        // fire-control error, shared by this step's rounds
+    for (let k = 0; k < shots; k++) {
+      const aim = aim0.clone().add(new THREE.Vector3(Math.random()-0.5, Math.random()-0.5, Math.random()-0.5)
+        .multiplyScalar(EPD.spread)).normalize();
+      const r0 = (t.radius || 5) + 2;
+      eTracers.push({ x: t0.x+aim.x*r0, y: t0.y+aim.y*r0, z: t0.z+aim.z*r0,
+        vx: t0.vx+aim.x*EPD.v, vy: t0.vy+aim.y*EPD.v, vz: t0.vz+aim.z*EPD.v, age: 0, dead: false, owner: t });
+    }
+    t.lastPdT = simT;
+  }
+}
+
 // side: HOSTILE / NEUTRAL / UNKNOWN (display only). `hostile: true` additionally means it fires torpedoes.
-function mkTarget(name, r, phase, radius, integrity, side = 'UNKNOWN', inc = 0) {
-  return { name, radius, integrity, maxInt: integrity, gone: false, side, ...orbitStateInc(r, phase, inc) };
+// sig: base signature (radiated heat; 1 = cold), see targetSig
+function mkTarget(name, r, phase, radius, integrity, side = 'UNKNOWN', inc = 0, sig = undefined) {
+  return { name, radius, integrity, maxInt: integrity, gone: false, side, sig: sig ?? defaultSig(radius, side), ...orbitStateInc(r, phase, inc) };
+}
+// Default base signature: dead hulks are nearly cold; working ships radiate with their size
+function defaultSig(radius, side) { return side === 'UNKNOWN' ? 1 + 0.3*radius : 4 + 4*radius; }
+// Current signature of a target: base, plus engine burns (AI), launches and point-defence fire in the last seconds
+function targetSig(t) {
+  let sg = t.sig ?? defaultSig(t.radius, t.side);
+  if (t.burning) sg += 400;
+  if (simT - (t.lastLaunchT ?? -1e9) < 5) sg += 150;
+  if (simT - (t.lastPdT ?? -1e9) < 2) sg += 40;
+  return sg;
 }
 
 /* ---------- Sensor coverage, datalink and track numbers ----------
@@ -686,7 +803,19 @@ function resetSats() {
   dlQueue = []; dlClock = 0; dlWasUp = null;
 }
 const rangeTo = o => Math.hypot(o.x-ship.x, o.y-ship.y, o.z-ship.z);
-const isLocal = t => !!t && !t.gone && rangeTo(t) <= sensorRange();
+// Own-sensor contact: passively when the target's signature is strong enough for its range (the same rule the
+// enemy uses: 12 km * sqrt(signature)), or actively with the bow radar out to its range. Earth or the Moon in the
+// way blocks both.
+const radarOn = () => roleDamage('radar') > 0;
+const passiveRange = t => DET_BASE*Math.sqrt(targetSig(t));
+function contactKind(t) {
+  if (!t || t.gone) return null;
+  const r = rangeTo(t);
+  if (r > Math.max(passiveRange(t), radarOn() ? sensorRange() : 0)) return null;
+  if (!losClear(ship, t) || !losClearMoon(ship, t)) return null;
+  return radarOn() && r <= sensorRange() ? 'RADAR' : 'PASSIVE';
+}
+const isLocal = t => !!contactKind(t);
 // Line of sight between two points: the segment must clear Earth by LOS_MARGIN (atmosphere)
 function losClear(a, b) {
   const dx = b.x-a.x, dy = b.y-a.y, dz = b.z-a.z, dd = dx*dx + dy*dy + dz*dz;
@@ -697,13 +826,13 @@ function losClear(a, b) {
 function tgtKnown(t) { if (!t || t.gone) return null; return isLocal(t) ? t : (t.track || null); }
 // Fire control and the laser need own-sensor quality data
 const tgtLocal = t => isLocal(t) ? t : null;
-const trackAge = t => t && t.track ? simT - t.track.tRep : Infinity;
+const trackAge = t => t && t.track ? Math.max(0, simT - t.track.tRep) : Infinity;   // intel tracks are stamped at the step's end
 function datalinkStep(h) {
   // Called after the targets have advanced this step, so their states are at time T = simT + h
   const T = simT + h;
   for (const sat of sats) rk4(sat, h, 0, 0, 0);
   for (const t of targets) if (t.track) { rk4(t.track, h, 0, 0, 0); if (t.track.intel) t.track.tRep = T; }   // tracks coast on gravity to T
-  dlRelay = sats.filter(sat => losClear(sat, ship));
+  dlRelay = sats.filter(sat => losClear(sat, ship) && losClearMoon(sat, ship));   // satellites crosslink among themselves
   dlUp = dlRelay.length > 0;
   if (dlWasUp !== null && dlUp !== dlWasUp) log(dlUp ? `DATALINK UP · RELAY ${dlRelay[0].name}` : 'DATALINK LOST · NO RELAY IN VIEW');
   dlWasUp = dlUp;
@@ -714,7 +843,7 @@ function datalinkStep(h) {
       const relayD = Math.min(...dlRelay.map(rangeTo));
       for (const t of targets) {
         if (t.gone) continue;
-        const obs = sats.find(sat => losClear(sat, t) && Math.hypot(sat.x-t.x, sat.y-t.y, sat.z-t.z) < DL_SAT_RANGE);
+        const obs = sats.find(sat => losClear(sat, t) && losClearMoon(sat, t) && Math.hypot(sat.x-t.x, sat.y-t.y, sat.z-t.z) < DL_SAT_RANGE);
         if (!obs) continue;
         const light = (Math.hypot(obs.x-t.x, obs.y-t.y, obs.z-t.z) + relayD)/C;
         dlQueue.push({ t, at: T + DL_LATENCY + light, tm: T, sat: obs.name,
@@ -748,7 +877,7 @@ function cycleTarget() {
     const i = (curTarget + k) % n;
     if (isLocal(targets[i])) { curTarget = i; return; }
   }
-  log(`NO TARGETS WITHIN ${(sensorRange()/1e3).toFixed(0)} KM · ENTER TRACK NUMBER`);
+  log('NO SENSOR CONTACTS · ENTER A TRACK NUMBER');
 }
 // Keypad: a four-digit number selects that track (any range); other entries are transmitted as before
 function selectTrack(num) {
@@ -769,7 +898,7 @@ function resetTargets() {
     mkTarget('DEBRIS 9F-22',    LEO_R,        -0.0008, 0.8, 15),   // ~5 km behind
     mkTarget('TUG MERIDIAN',    LEO_R + 6000, 0.0045,  5,   120),  // ~27 km ahead
     mkTarget('FRAGMENT C-3',    LEO_R,        0.0003,  0.5, 8),    // ~2 km ahead
-    { ...mkTarget('HOSTILE FRIGATE', LEO_R + 4000, 0.0025, 6, 300, 'HOSTILE'), hostile: true, fireT: 5 },   // fires torpedoes
+    { ...mkTarget('HOSTILE FRIGATE', LEO_R + 4000, 0.0025, 6, 300, 'HOSTILE'), hostile: true, fireT: 5, ai: { ...AI_DEF }, pd: 2 },   // fires torpedoes
     // Distant tracks, beyond own-sensor range: known only through the datalink
     mkTarget('CORVETTE VASK',      LEO_R + 50e3,  0.06,  5, 200, 'HOSTILE'),            // ~450 km ahead
     mkTarget('GUNSHIP ORDA',       LEO_R + 120e3, -0.12, 6, 250, 'HOSTILE', 0.05),      // ~850 km behind
@@ -784,7 +913,7 @@ function resetTargets() {
   for (const t of targets) if (t.intel) t.track = Object.assign(Object.create(t), { x: t.x, y: t.y, z: t.z, vx: t.vx, vy: t.vy, vz: t.vz }, { tRep: simT, sat: 'INTEL', intel: true });
   if (missionPlan) curTarget = Math.max(0, targets.findIndex(t => t.objective));
   flashes = [];
-  torpedoes = []; tracers = []; hullHits = 0;
+  torpedoes = []; tracers = []; eTracers = []; hullHits = 0;
 }
 resetTargets();
 
@@ -805,7 +934,7 @@ function integrateTo(s0, t0, t1, hMax = 2) {
   return s;
 }
 const mkTargetAt = (name, st, radius, integrity, side, extra = {}) =>
-  ({ name, radius, integrity, maxInt: integrity, gone: false, side, ...st, ...extra });
+  ({ name, radius, integrity, maxInt: integrity, gone: false, side, sig: defaultSig(radius, side), ...st, ...extra });
 // Mission 1: arrive at the Moon, destroy the helium-3 depot in low lunar orbit, leave the Moon's sphere.
 // The ship starts ARRIVE s before closest approach (PERI_ALT above the surface, arriving at VINF), on a path
 // found by integrating that closest-approach state backwards. The depot is ST_LEAD ahead of the closest-
@@ -830,12 +959,12 @@ function planMission1(t0) {
     ship: start, q, arrive: tA,
     targets: () => [
       mkTargetAt('HE-3 DEPOT KORVA', onOrbit(M1.ST_ALT, M1.ST_LEAD), 25, 600, 'HOSTILE',
-        { ...def, objective: true, intel: true, score: 5000, sensor: 1.0, salvo: 2, salvoT: 25, fireRange: 80e3, fireT: 4 }),
-      mkTargetAt('ORE HAULER MAREK', onOrbit(M1.ST_ALT, M1.ST_LEAD - 6e3), 10, 80, 'NEUTRAL', { score: -2000 }),
+        { ...def, objective: true, intel: true, score: 5000, sensor: 1.0, salvo: 2, salvoT: 25, fireRange: 80e3, fireT: 4, sig: 150, pd: 3 }),
+      mkTargetAt('ORE HAULER MAREK', onOrbit(M1.ST_ALT, M1.ST_LEAD - 6e3), 10, 80, 'NEUTRAL', { score: -2000, sig: 15 }),
       mkTargetAt('PATROL CORVETTE IRIS', onOrbit(M1.ST_ALT, M1.ST_LEAD + 60e3), 6, 200, 'HOSTILE',
-        { ...def, score: 1500, sensor: 1.5, salvo: 3, salvoT: 20, fireRange: 80e3, fireT: 6 }),
+        { ...def, score: 1500, sensor: 1.5, salvo: 3, salvoT: 20, fireRange: 80e3, fireT: 6, sig: 20, ai: { ...AI_DEF }, pd: 2 }),
       mkTargetAt('PATROL CORVETTE VEX', onOrbit(130e3, M1.ST_LEAD - 300e3), 6, 200, 'HOSTILE',   // 150 km behind the arrival point
-        { ...def, score: 1500, sensor: 1.5, salvo: 3, salvoT: 20, fireRange: 80e3, fireT: 8 }),
+        { ...def, score: 1500, sensor: 1.5, salvo: 3, salvoT: 20, fireRange: 80e3, fireT: 8, sig: 20, ai: { ...AI_DEF }, pd: 2 }),
     ],
   };
 }
@@ -873,6 +1002,117 @@ const MISSIONS = {
     ] },
 };
 
+/* ================= MANEUVER PLANNER =================
+   One node: a time ahead and a delta-v in the orbital frame at that time (prograde, radial out, normal) of the
+   body the ship will be orbiting there. The prediction integrates the ship to the node with full gravity, applies
+   the burn, and samples the path after it; it reports the resulting periapsis/apoapsis, closest approach to the
+   selected target, and leaving the Moon's sphere or hitting a surface. During the burn window the world-frame
+   delta-v is frozen and the engine's actual impulse counts it down; the node completes when it is used up. */
+const PLAN_STEPS = [{ dv: 1, dt: 10 }, { dv: 10, dt: 60 }, { dv: 100, dt: 600 }];
+let plan = null, planStep = 1, planPred = null, shipPredCache = null;
+function primaryAtState(s0, t) {
+  const m = moonPos(t);
+  return Math.hypot(s0.x-m[0], s0.y-m[1], s0.z-m[2]) < MOON_SOI
+    ? { name: 'MOON', R: R_MOON, GM: GM_M, c: m, v: moonVel(t) } : { name: 'EARTH', R: R_E, GM: GM_E, c: [0, 0, 0], v: [0, 0, 0] };
+}
+function orbitFrameAt(s0, b) {
+  const r = new THREE.Vector3(s0.x - b.c[0], s0.y - b.c[1], s0.z - b.c[2]), v = new THREE.Vector3(s0.vx - b.v[0], s0.vy - b.v[1], s0.vz - b.v[2]);
+  const pro = v.clone().normalize(), nrm = new THREE.Vector3().crossVectors(r, v).normalize();
+  return { pro, nrm, rad: new THREE.Vector3().crossVectors(pro, nrm) };   // rad: in the orbit plane, away from the body
+}
+// Periapsis/apoapsis altitude, eccentricity and period around a body
+function elementsAt(s0, b) {
+  const r = new THREE.Vector3(s0.x - b.c[0], s0.y - b.c[1], s0.z - b.c[2]), v = new THREE.Vector3(s0.vx - b.v[0], s0.vy - b.v[1], s0.vz - b.v[2]);
+  const rm = r.length(), en = v.lengthSq()/2 - b.GM/rm, hv = new THREE.Vector3().crossVectors(r, v);
+  const e = new THREE.Vector3().crossVectors(v, hv).multiplyScalar(1/b.GM).sub(r.clone().divideScalar(rm)).length();
+  const a = en < 0 ? -b.GM/(2*en) : Infinity;
+  const rp = hv.lengthSq()/b.GM/(1 + e);
+  return { pe: rp - b.R, ap: en < 0 ? a*(1 + e) - b.R : Infinity, e, period: en < 0 ? 2*Math.PI*Math.sqrt(a*a*a/b.GM) : Infinity };
+}
+// Sampled path from a state: absolute positions every `step` s for up to `horizon` s, stopping at an impact
+function samplePath(s0, t0, horizon, step, tgt) {
+  const pts = []; let s1 = { ...s0 }, t = t0, ts = tgt ? { ...tgt } : null, ca = { d: Infinity, t: 0 }, impact = null, soiExit = null;
+  const wasInMoon = primaryAtState(s1, t).name === 'MOON';
+  while (t < t0 + horizon) {
+    pts.push({ t, x: s1.x, y: s1.y, z: s1.z });
+    if (ts) { const d = Math.hypot(s1.x - ts.x, s1.y - ts.y, s1.z - ts.z); if (d < ca.d) ca = { d, t }; }
+    const m = moonPos(t), dm = Math.hypot(s1.x - m[0], s1.y - m[1], s1.z - m[2]);
+    if (dm < R_MOON) { impact = { body: 'MOON', t }; break; }
+    if (Math.hypot(s1.x, s1.y, s1.z) < R_E) { impact = { body: 'EARTH', t }; break; }
+    if (wasInMoon && !soiExit && dm > MOON_SOI) soiExit = t;
+    s1 = integrateTo(s1, t, t + step, 10); if (ts) ts = integrateTo(ts, t, t + step, 10); t += step;
+  }
+  return { pts, ca, impact, soiExit };
+}
+function computePlan() {
+  const tn = Math.max(plan.t, simT);
+  const sN = integrateTo(ship, simT, tn, 10), b = primaryAtState(sN, tn), F = orbitFrameAt(sN, b);
+  const dW = plan.frozen ? plan.dW.clone() :
+    F.pro.clone().multiplyScalar(plan.dv[0]).addScaledVector(F.rad, plan.dv[1]).addScaledVector(F.nrm, plan.dv[2]);
+  const s1 = { ...sN, vx: sN.vx + dW.x, vy: sN.vy + dW.y, vz: sN.vz + dW.z };
+  const el = elementsAt(s1, b);
+  const horizon = Math.min(12*3600, isFinite(el.period) ? 1.2*el.period : 6*3600);
+  const t = targets[curTarget], k = tgtKnown(t);
+  const tgtAtNode = k ? integrateTo(k, simT, tn, 10) : null;
+  const path = samplePath(s1, tn, horizon, isFinite(el.period) ? Math.max(20, el.period/240) : 60, tgtAtNode);
+  return { at: simT, tn, b, dW, dv: dW.length(), el, path, burn: dW.length()/(SHIP.mainThrust/shipMass()), tgtName: k ? t.name : null };
+}
+function getPlan() {
+  if (!plan) return null;
+  if (!planPred || simT - planPred.at > 5 || planPred.dirty) planPred = computePlan();
+  return planPred;
+}
+// The ship's own predicted path without a node (for open trajectories the Kepler orbit isn't drawn), every 10 s
+function getShipPred() {
+  if (!shipPredCache || simT - shipPredCache.at > 10) {
+    const b = primaryAtState(ship, simT), el = elementsAt(ship, b);
+    const horizon = Math.min(6*3600, isFinite(el.period) ? el.period : 6*3600);
+    shipPredCache = { at: simT, ...samplePath(ship, simT, horizon, isFinite(el.period) ? Math.max(20, el.period/200) : 60, null) };
+  }
+  return shipPredCache;
+}
+function planAction(id) {
+  const st = PLAN_STEPS[planStep];
+  if (id === 'planNode') {
+    if (plan) { plan = null; log('MANEUVER NODE CLEARED'); }
+    else { plan = { t: simT + 600, dv: [0, 0, 0] }; log('MANEUVER NODE SET · T+10:00'); }
+  } else if (id === 'planStep') {
+    planStep = (planStep + 1) % PLAN_STEPS.length; log(`PLANNER STEP ${PLAN_STEPS[planStep].dv} M/S · ${PLAN_STEPS[planStep].dt} S`);
+  } else {
+    if (!plan) plan = { t: simT + 600, dv: [0, 0, 0] };
+    if (plan.frozen) { log('BURN IN PROGRESS · NODE LOCKED'); return; }
+    const d = { planPro: [0, 1], planRetro: [0, -1], planRadOut: [1, 1], planRadIn: [1, -1], planNrm: [2, 1], planAnti: [2, -1] }[id];
+    if (d) plan.dv[d[0]] += d[1]*st.dv;
+    if (id === 'planLater') plan.t += st.dt;
+    if (id === 'planEarlier') plan.t = Math.max(simT + 5, plan.t - st.dt);
+  }
+  planPred = null; sfx.click();
+}
+// Burn execution: the burn window opens half the burn time before the node; from then on the world-frame delta-v
+// is frozen and each step's engine impulse counts it down
+function planBurnStep(h, accW) {
+  if (!plan) return;
+  const P = getPlan(); if (!P) return;
+  if (!plan.frozen && simT >= plan.t - P.burn/2) { plan.frozen = true; plan.dW = P.dW.clone(); plan.left = plan.dW.clone(); log(`BURN WINDOW · ${plan.dW.length().toFixed(0)} M/S`); }
+  if (plan.frozen && accW) {
+    plan.left.addScaledVector(accW, -h);
+    const along = plan.left.dot(plan.dW.clone().normalize());
+    if (along < 0.5) { log(`BURN COMPLETE · RESIDUAL ${plan.left.length().toFixed(1)} M/S`); plan = null; planPred = null; sfx.chime(); }
+    else planPred.dirty = true;
+  }
+}
+// The direction to burn along: the remaining delta-v during the burn, else the planned one (null without a node)
+function planBurnDir() {
+  if (!plan) return null;
+  if (plan.frozen) return plan.left.clone().normalize();
+  const P = getPlan(); return P && P.dv > 0.05 ? P.dW.clone().normalize() : null;
+}
+const PLAN_HELP = () => {
+  const K = (...ids) => ids.map(id => codeName(bindings[id]) || '--').join(' / ');
+  return [['NODE SET/CLEAR', K('planNode')], ['PROGRADE -/+', K('planRetro', 'planPro')], ['RADIAL IN/OUT', K('planRadIn', 'planRadOut')],
+    ['NORMAL -/+', K('planAnti', 'planNrm')], ['NODE EARLIER/LATER', K('planEarlier', 'planLater')], ['STEP SIZE', K('planStep')]];
+};
+
 /* ---------- Mission run: detection, score, end, saved results ----------
    Detection: the ship's signature is 1 when cold and coasting, plus its radiated heat (relative to a cold hull
    with stowed radiators), engine burns, RCS, lasers, and short spikes after railgun shots, launches and PDC
@@ -893,6 +1133,7 @@ function signature() {
   if (simT - lastRailShotT < 5) sg += 150;
   if (simT - lastLaunchT < 5) sg += 80;
   if (simT - pdcLastFire < 2) sg += 40;
+  if (radarOn()) sg += 200;                            // an active radar is seen from far away
   return sg;
 }
 const detectionRange = () => DET_BASE*Math.sqrt(signature());
@@ -1216,8 +1457,9 @@ let leadAxisPrev = new THREE.Vector3(0, 1, 0);
 // target) + proportional correction of the angle error. There is no deadband: a deadband switches the RCS
 // on and off at its edge, which is itself a source of sway.
 function leadHoldCmd(h) {
-  const L = leadVector();
-  const tgt = targets[curTarget];
+  const bd = plan && (plan.frozen || plan.t - simT < 900) ? planBurnDir() : null;   // near a node: hold the burn direction
+  const L = bd ? bd.multiplyScalar(1e6) : leadVector();
+  const tgt = bd ? true : targets[curTarget];
   if (!L || !tgt) { leadPrev = null; return null; }
   const Lb = L.clone().applyQuaternion(toBodyQ()).normalize();
   const fwd = new THREE.Vector3(0, 0, -1);
@@ -1319,11 +1561,14 @@ function physicsStep(h) {
   if (rcsProp <= 0) { F[0] = F[1] = F[2] = 0; fr = 0; }
   rcsProp = Math.max(0, rcsProp - fr/(SHIP.rcsIsp*G0)*h);
   thrustFrac = 0;
+  let engineAccW = null;
   if (c.main && mainProp + podProp > 0 && damage.main > 0) {
     F[2] -= SHIP.mainThrust*damage.main; thrustFrac = damage.main;
+    engineAccW = new THREE.Vector3(0, 0, -SHIP.mainThrust*damage.main/shipMass()).applyQuaternion(shipQ);
     const dm = SHIP.mainThrust*damage.main/(SHIP.mainIsp*G0)*h;
     if (podProp > 0) podProp = Math.max(0, podProp - dm); else mainProp = Math.max(0, mainProp - dm);
   }
+  planBurnStep(h, engineAccW);                       // opens the burn window on time; counts the engine's impulse down
   /* --- railgun: fires from the state at the start of this step, the same time the target and projectile
      integrate from, so the fire-control solution and the flight agree --- */
   railCD = Math.max(0, railCD - h);
@@ -1354,7 +1599,7 @@ function physicsStep(h) {
       torpedoes.push({ x: t.x+dir.x*5, y: t.y+dir.y*5, z: t.z+dir.z*5,
         vx: t.vx+dir.x*200, vy: t.vy+dir.y*200, vz: t.vz+dir.z*200, age: 0, burn: TORP_BURN, dead: false });
     }
-    log(`HOSTILE LAUNCH  ${nT} TORPEDOES · ${t.name}`);
+    log(`HOSTILE LAUNCH  ${nT} TORPEDOES · ${t.name}`); t.lastLaunchT = simT;
   }
   // Engagement state for the sound: the nearest torpedo in range spins the motors up, and its line-of-sight
   // rate drives the slew whine
@@ -1445,7 +1690,12 @@ function physicsStep(h) {
   rk4(ship, h, fw.x/mass, fw.y/mass, fw.z/mass);
 
   /* --- other bodies and projectiles (gravity only) --- */
-  for (const t of targets) { t.px = t.x; t.py = t.y; t.pz = t.z; t.s0 = { x: t.x, y: t.y, z: t.z, vx: t.vx, vy: t.vy, vz: t.vz }; rk4(t, h, 0, 0, 0); }
+  for (const t of targets) {
+    t.px = t.x; t.py = t.y; t.pz = t.z; t.s0 = { x: t.x, y: t.y, z: t.z, vx: t.vx, vy: t.vy, vz: t.vz };
+    const a = enemyAI(t, h) || [0, 0, 0];
+    rk4(t, h, a[0], a[1], a[2]);
+  }
+  enemyPD(h);
   datalinkStep(h);
   // Interceptors launch automatically at closing torpedoes in range (not in TNG: they are expendable)
   for (const m of INT_MOUNTS) {
@@ -1488,6 +1738,7 @@ function physicsStep(h) {
     if (missCheck(tp, tp.seduced || ship, h)) { tp.dead = true; tp.missed = true; log(`HOSTILE TORPEDO MISSED · SELF-DESTRUCT · CLOSEST ${fmtDist(tp.minD)}`); }
   }
   for (const tr of tracers) { tr.px = tr.x; tr.py = tr.y; tr.pz = tr.z; rk4(tr, h, 0, 0, 0); tr.age += h; }
+  for (const tr of eTracers) { tr.px = tr.x; tr.py = tr.y; tr.pz = tr.z; rk4(tr, h, 0, 0, 0); tr.age += h; }
   for (const dc of decoys) { rk4(dc, h, 0, 0, 0); dc.age += h; }
   decoys = decoys.filter(dc => { if (dc.age < DECOY_LIFE) return true; dc.gone = true; return false; });   // a gone decoy releases its torpedo
 
@@ -1576,6 +1827,22 @@ function physicsStep(h) {
       }
     }
   }
+  /* --- enemy point defence against player ordnance --- */
+  for (const tr of eTracers) {
+    if (tr.dead) continue;
+    for (const o of ordnance) {
+      if (o.dead) continue;
+      if (segDist(tr, o) < TORP_KILL_R) {
+        tr.dead = true;
+        if (Math.random() > EPD.pKill) continue;      // struck, but the weapon flies on
+        o.dead = true;
+        flashes.push({ x: o.x, y: o.y, z: o.z, age: 0, dur: 0.4, peak: 0.6, kind: 'hit' });
+        log(`${ORD[o.kind].name} DESTROYED BY POINT DEFENCE · ${tr.owner.name}`);
+        break;
+      }
+    }
+  }
+  eTracers = eTracers.filter(tr => !tr.dead && tr.age < 4);
   /* --- player ordnance: proximity fuse against its own target (swept over the step), lifetime --- */
   for (const o of ordnance) {
     if (o.dead) continue;
@@ -1997,7 +2264,8 @@ function mfdSoftkey(m, k) {
   switch (k) {
     case 0: m.page = (m.page + 1) % MFD_PAGES.length; break;
     case 1: m.page = (m.page + MFD_PAGES.length - 1) % MFD_PAGES.length; break;
-    case 2: rangeIdx = (rangeIdx + 1) % RANGES.length; break;
+    case 2: if (MFD_PAGES[m.page] === 'SCOPE') scopeZoom = (scopeZoom + 1) % SCOPE_ZOOMS.length;
+            else rangeIdx = (rangeIdx + 1) % RANGES.length; break;
     case 3: cycleTarget(); break;
     case 4: m.on = !m.on; break;
   }
@@ -2058,7 +2326,9 @@ const markerRetro = new THREE.Group();
 placeOnBall(markerRetro, new THREE.Vector3(-1, 0, 0));
 const markerTgt = new THREE.Mesh(new THREE.SphereGeometry(0.005, 10, 8),
   new THREE.MeshBasicMaterial({ color: 0xff3fd0, toneMapped: false }));
-ball.add(markerPro, markerRetro, markerTgt);
+// Planned burn direction (cyan ring)
+const markerBurn = ringMarker(0x3fe0ff, 0.008, 0.012);
+ball.add(markerPro, markerRetro, markerTgt, markerBurn);
 // Fixed nose reticle on the ball's front: marks where the ship's nose points
 const noseRet = ringMarker(0xffffff, 0.009, 0.0115);
 noseRet.position.set(0, BALL_Y, BALL_Z + BALL_R*1.01);
@@ -2297,6 +2567,11 @@ function drawTactical(g, W, H, idx) {
     const b = toB(tr.x-ship.x, tr.y-ship.y, tr.z-ship.z);
     g.fillRect(sx(b) - 1.5, sy(b) - 1.5, 3, 3);
   }
+  g.fillStyle = RED;                                 // enemy point-defence fire
+  for (const tr of eTracers) {
+    const b = toB(tr.x-ship.x, tr.y-ship.y, tr.z-ship.z);
+    g.fillRect(sx(b) - 1, sy(b) - 1, 2, 2);
+  }
   for (const o of ordnance) {
     const b = toB(o.x-ship.x, o.y-ship.y, o.z-ship.z);
     g.fillStyle = ORD[o.kind].color; g.beginPath();
@@ -2333,7 +2608,9 @@ function drawTactical(g, W, H, idx) {
     if (b.z >= 0) return;
     const isCur = i === curTarget;
     if (isCur) cur = { t, b, r: [t.x-ship.x, t.y-ship.y, t.z-ship.z] };
-    const px = sx(b), py = sy(b);
+    let px = sx(b), py = sy(b);
+    const off = Math.hypot(px - cx, py - cy);
+    if (off > R) { px = cx + (px - cx)*R/off; py = cy + (py - cy)*R/off; }   // beyond the range scale: pinned to the rim
     if (t.side === 'HOSTILE') {                       // hostile: red diamond
       g.strokeStyle = RED; g.lineWidth = isCur ? 3 : 2;
       g.beginPath(); g.moveTo(px, py-10); g.lineTo(px+10, py); g.lineTo(px, py+10); g.lineTo(px-10, py); g.closePath(); g.stroke();
@@ -2349,7 +2626,7 @@ function drawTactical(g, W, H, idx) {
   if (!cur && selT && !selT.gone && !isLocal(selT)) {   // far target: datalink track
     const k = tgtKnown(selT), age = trackAge(selT);
     tgtLines = [`TGT ${selT.name}`, `TRK ${selT.trk} ${age > DL_STALE ? 'STALE' : 'DL'} ${age.toFixed(0)}s`,
-      `RNG ${k ? fmtDist(rangeTo(k)) : '--'}`, `FCS NO SOL >${(sensorRange()/1e3).toFixed(0)}KM`];
+      `RNG ${k ? fmtDist(rangeTo(k)) : '--'}`, 'FCS NO SOL · NO CONTACT'];
   }
   if (cur) {
     const { t, b, r } = cur;
@@ -2388,7 +2665,16 @@ function drawTactical(g, W, H, idx) {
   for (const l of tgtLines) line(l);
   y += 10;
   // Mission: how far away a sensor can see the ship right now, and whether the defences are alerted
-  if (mission && !mission.ended) txt(g, 14, 440, `SIG ${fmtDist(detectionRange())} · ${mission.alert ? 'DETECTED' : 'UNDETECTED'}`, mission.alert ? RED : PH, '20px monospace');
+  // Own signature: how far away an enemy sensor can see the ship, on a log scale from 10 km to 1000 km
+  {
+    const dr = detectionRange(), f = clamp(Math.log10(dr/1e4)/2, 0, 1), col = f < 0.35 ? PH : f < 0.65 ? AMB : RED;
+    txt(g, 14, 447, 'SIG', PH, 'bold 18px monospace');
+    g.strokeStyle = DIM; g.lineWidth = 1.5; g.strokeRect(56, 433, 200, 16);
+    for (const tk of [0.25, 0.5, 0.75]) { g.beginPath(); g.moveTo(56 + 200*tk, 433); g.lineTo(56 + 200*tk, 449); g.stroke(); }
+    g.fillStyle = col; g.fillRect(58, 435, 196*f, 12);
+    const extra = [radarOn() ? 'RADAR ON' : '', mission && !mission.ended ? (mission.alert ? 'DETECTED' : 'UNSEEN') : ''].filter(Boolean).join(' ');
+    txt(g, 264, 447, `${fmtDist(dr)}${extra ? ' ' + extra : ''}`, mission && mission.alert ? RED : col, '17px monospace');
+  }
   // Threat summary: closing torpedoes, time to impact of the nearest, PDC state, hull
   line(threats ? `THREAT ${threats} TORP` : 'THREAT NONE', threats ? RED : DIM);
   line(tti !== null ? `TTI ${tti.toFixed(1)}s ${fmtDist(tRng)}` : 'TTI --', tti !== null && tti < 20 ? RED : PH);
@@ -2502,7 +2788,7 @@ function drawWeapons(g, W, H, idx) {
   }
   line(`HULL ${(hullInt*100).toFixed(0)}%  HITS ${hullHits}`, hullInt < 1 ? RED : PH);
   y += 12;
-  txt(g, 30, y, `TARGETS WITHIN ${(sensorRange()/1e3).toFixed(0)} KM`, DIM, '21px monospace'); y += 26;
+  txt(g, 30, y, `CONTACTS · ${radarOn() ? 'RADAR ' + (sensorRange()/1e3).toFixed(0) + ' KM + PASSIVE' : 'PASSIVE'}`, DIM, '21px monospace'); y += 26;
   targets.forEach((t, i) => {
     if (!isLocal(t) || y > H - 40) return;            // as many as fit
     const b = toBodyQ();
@@ -2618,6 +2904,33 @@ function drawMap(g, W, H, idx) {
     for (const sat of sats) drawOrbit2(sat, 'rgba(125,255,154,0.18)', 1, [3, 5]);
     for (const { t, o } of known) if (o && !isLocal(t)) drawOrbit2(o, t.side === 'HOSTILE' ? 'rgba(255,80,64,0.45)' : 'rgba(125,255,154,0.35)', 1.2, []);
     drawOrbit2(ship, PH, 2, []);
+    // Predicted paths (numerical, with both bodies): the ship's own (so open trajectories show too), and after
+    // the planned burn. Points are taken relative to the body at their own time, so a Moon-centred view stays put.
+    const drawPred = (pts, col, w, dash) => {
+      g.strokeStyle = col; g.lineWidth = w; g.setLineDash(dash);
+      let prev = null;
+      for (const pt of pts) {
+        const c0 = B.name === 'MOON' ? moonPos(pt.t) : [0, 0, 0];
+        const q = Prel(pt.x - c0[0], pt.y - c0[1], pt.z - c0[2]), vis = !earthHides(q);
+        if (prev && vis && prev.vis) { g.beginPath(); g.moveTo(prev.X, prev.Y); g.lineTo(q.X, q.Y); g.stroke(); }
+        prev = { ...q, vis };
+      }
+      g.setLineDash([]);
+    };
+    drawPred(getShipPred().pts, 'rgba(125,255,154,0.7)', 1.5, [2, 3]);
+    const PP = getPlan();
+    if (PP) {
+      drawPred(PP.path.pts, '#3fe0ff', 2, [7, 4]);
+      const n0 = PP.path.pts[0], c0 = B.name === 'MOON' ? moonPos(n0.t) : [0, 0, 0], qn = Prel(n0.x - c0[0], n0.y - c0[1], n0.z - c0[2]);
+      g.fillStyle = '#3fe0ff'; g.beginPath(); g.moveTo(qn.X, qn.Y - 7); g.lineTo(qn.X + 7, qn.Y); g.lineTo(qn.X, qn.Y + 7); g.lineTo(qn.X - 7, qn.Y); g.closePath(); g.fill();
+      txt(g, qn.X + 10, qn.Y + 5, 'NODE', '#3fe0ff', 'bold 16px monospace');
+      if (PP.path.ca.d < Infinity && PP.tgtName) {           // closest approach to the target on the new path
+        const ci = PP.path.pts.reduce((b2, q2) => Math.abs(q2.t - PP.path.ca.t) < Math.abs(b2.t - PP.path.ca.t) ? q2 : b2);
+        const cc = B.name === 'MOON' ? moonPos(ci.t) : [0, 0, 0], qc = Prel(ci.x - cc[0], ci.y - cc[1], ci.z - cc[2]);
+        g.strokeStyle = '#ff3fd0'; g.lineWidth = 2; g.beginPath(); g.arc(qc.X, qc.Y, 6, 0, Math.PI*2); g.stroke();
+        txt(g, qc.X + 9, qc.Y - 6, `CA ${fmtDist(PP.path.ca.d)}`, '#ff3fd0', '15px monospace');
+      }
+    }
     // Laser relay links from the satellites in view of the ship
     const qs = P(ship.x, ship.y, ship.z);
     for (const sat of dlRelay) {
@@ -2705,6 +3018,21 @@ function drawMap(g, W, H, idx) {
     txt(g, q0.X + 9, q0.Y + 20, 'OWN', PH, 'bold 17px monospace');
     if (beyond) txt(g, W - 14, 432, `${beyond} BEYOND`, DIM, '17px monospace', 'right');
   }
+  // Maneuver planner readout
+  const PL = getPlan();
+  if (PL) {
+    const C = '#3fe0ff', el = PL.el, st = PLAN_STEPS[planStep];
+    const lines = plan.frozen
+      ? [`BURN · ${plan.left.dot(plan.dW.clone().normalize()).toFixed(1)} m/s LEFT`, `ALIGN NOSE ON NAVBALL RING · MAIN ENGINE`]
+      : [`NODE T-${fmtTime(Math.max(0, PL.tn - simT))}  ΔV ${PL.dv.toFixed(0)} m/s  BURN ${PL.burn.toFixed(0)} s`,
+         `P ${plan.dv[0]}  R ${plan.dv[1]}  N ${plan.dv[2]}  · STEP ${st.dv} m/s ${st.dt} s`];
+    lines.push(`→ ${PL.b.name}  PE ${(el.pe/1e3).toFixed(0)} km  ${isFinite(el.ap) ? 'AP ' + (el.ap/1e3).toFixed(0) + ' km' : 'ESCAPE'}`);
+    if (PL.path.impact) lines.push(`IMPACT ${PL.path.impact.body} AT T+${fmtTime(PL.path.impact.t - simT)}`);
+    else if (PL.path.soiExit) lines.push(`LEAVES LUNAR SPHERE AT T+${fmtTime(PL.path.soiExit - simT)}`);
+    if (PL.tgtName && PL.path.ca.d < Infinity) lines.push(`CA ${PL.tgtName} ${fmtDist(PL.path.ca.d)} T+${fmtTime(PL.path.ca.t - simT)}`);
+    g.fillStyle = 'rgba(2,10,5,0.75)'; g.fillRect(8, 48, 470, 6 + lines.length*20);
+    lines.forEach((l, i) => txt(g, 14, 66 + i*20, l, PL.path.impact && i === lines.length - (PL.tgtName ? 2 : 1) ? RED : C, '16px monospace'));
+  }
   g.restore();
   // Bottom line: selected target and the track number being typed
   g.strokeStyle = DIM; g.lineWidth = 2; g.beginPath(); g.moveTo(10, 442); g.lineTo(W - 10, 442); g.stroke();
@@ -2714,6 +3042,48 @@ function drawMap(g, W, H, idx) {
     txt(g, 14, 464, `TGT ${sel.trk} ${sel.name}  ${o ? fmtDist(rangeTo(o)) : '--'}  ${src}`, local ? PH : AMB, '20px monospace');
   } else txt(g, 14, 464, 'TGT --', DIM, '20px monospace');
   if (keyBuf) txt(g, W - 14, 464, `TRK ${keyBuf.padEnd(4, '_')}`, AMB, 'bold 20px monospace', 'right');
+}
+
+// Controls reference: every action with its current key (so rebinding shows here), paired actions on one line,
+// grouped; weapons that are not fitted are dimmed
+function drawControls(g, W, H, idx) {
+  mfdHeader(g, W, 'CONTROLS', idx);
+  const short = n => ({ ArrowUp: '↑', ArrowDown: '↓', ArrowLeft: '←', ArrowRight: '→', Period: '.', Comma: ',',
+    BracketLeft: '[', BracketRight: ']', 'Mouse Left': 'LMB', 'Mouse Right': 'RMB' })[n] || n;
+  const K = (...ids) => ids.map(id => short(codeName(bindings[id])) || '--').join(' / ');
+  const has = r => hasRole(r);
+  const groups = [
+    ['FLIGHT', [
+      ['PITCH UP/DN', K('pitchUp', 'pitchDown')], ['YAW L/R', K('yawLeft', 'yawRight')], ['ROLL L/R', K('rollLeft', 'rollRight')],
+      ['TRANS FWD/AFT', K('transFwd', 'transAft')], ['TRANS L/R', K('transLeft', 'transRight')], ['TRANS UP/DN', K('transUp', 'transDown')],
+      ['MAIN ENGINE', K('mainEngine')], ['RCS STAB', K('rcsStab')], ['LEAD HOLD / BURN', K('leadHold')],
+    ]],
+    ...(typeof PLAN_HELP !== 'undefined' ? [['MANEUVER PLANNER', PLAN_HELP()]] : []),
+    ['WEAPONS', [
+      [has('torpedo') ? 'FIRE TORPEDO' : 'FIRE RAILGUN', K('fireRail'), has('torpedo') || has('railgun')],
+      ['FIRE LASER (HOLD)', K('fireLaser'), has('laser')], ['LASER GUARD/ARM', K('guardLaser', 'armLaser'), has('laser')],
+      ['FIRE VLS MISSILE', K('fireMissile'), has('vls')], ['MASTER COVER/ARM', K('guardMaster', 'masterArm')],
+      ['CYCLE TARGET', K('cycleTarget')], ['TACTICAL RANGE', K('cycleRange')],
+    ]],
+    ['SYSTEMS', [
+      ['RADIATORS', K('toggleRad')], ['JETTISON TANKS', K('jettison'), has('tank')], ['SCOPE IR', K('toggleIR')], ['SCOPE ZOOM', 'RNG KEY'],
+      ['WARP +/-', K('warpUp', 'warpDown')], ['PAUSE', K('pause')], ['MENU / REBIND', 'ESC'],
+    ]],
+  ];
+  const colW = (W - 40)/2, lh = 21;
+  let col = 0, y = 70;
+  for (const [title, rows] of groups) {
+    if (y + lh*(rows.length + 1) > H - 34) { col++; y = 70; }
+    const x = 20 + col*colW;
+    txt(g, x, y, title, AMB, 'bold 18px monospace'); y += lh;
+    for (const [name, key, fitted = true] of rows) {
+      txt(g, x + 8, y, name, fitted ? PH : DIM, '17px monospace');
+      txt(g, x + colW - 16, y, fitted ? key : `${key}  (NOT FITTED)`, fitted ? PH : DIM, '17px monospace', 'right');
+      y += lh;
+    }
+    y += 6;
+  }
+  txt(g, W/2, H - 12, 'POINT DEFENCE IS AUTOMATIC · KEYPAD: 4-DIGIT TRACK + ENT', DIM, '16px monospace', 'center');
 }
 
 // Damage control: hull integrity, then every system with its state (OK / degraded % / OFFLINE)
@@ -2774,284 +3144,325 @@ function drawComms(g, W, H, idx) {
 // Top-down ship view. The ship is drawn with its nose to the left, so the hull runs horizontally.
 // Ship coordinates: u = lateral (screen up is +u), v = longitudinal (aft at screen right).
 // Mapping to screen: x = cx + v, y = cy - u.
+// Side-view silhouettes traced from the models (metres). hull/radiators: horizontal = body z (aft +), vertical =
+// body y. Modules: in their own file axes (horizontal = file z, forward +; vertical = file y), placed by hpToBody.
+const SHIP_SIL = {"hull":[[[12.5,0.86],[12.3,0.86],[11.98,0.58],[11.78,0.58],[11.62,1.42],[11.3,1.66],[11.1,1.58],[8.38,1.58],[8.34,1.66],[7.78,1.58],[7.74,1.7],[7.58,1.74],[7.58,1.9],[7.38,1.9],[7.34,1.7],[7.18,1.78],[7.06,1.7],[7.02,1.78],[6.9,1.7],[6.18,1.7],[6.14,1.9],[5.94,1.9],[5.94,1.74],[5.78,1.58],[5.26,1.58],[5.02,1.74],[4.62,1.74],[4.5,1.9],[4.18,1.98],[3.46,1.9],[3.38,1.74],[1.22,1.74],[1.18,1.58],[1.1,1.7],[0.58,1.7],[0.54,1.58],[0.3,1.7],[-0.82,1.66],[-0.98,1.78],[-1.42,1.78],[-1.54,1.58],[-1.78,1.78],[-2.22,1.78],[-2.34,1.58],[-2.58,1.78],[-3.02,1.78],[-3.14,1.66],[-3.54,1.78],[-3.94,1.78],[-4.02,1.7],[-4.14,1.78],[-4.54,1.78],[-4.62,1.7],[-4.74,1.78],[-5.14,1.78],[-5.22,1.7],[-5.34,1.78],[-5.74,1.78],[-5.82,1.7],[-5.94,1.78],[-6.34,1.78],[-6.42,1.7],[-6.54,1.78],[-6.94,1.78],[-7.46,1.58],[-7.54,1.78],[-7.82,1.74],[-8.06,1.94],[-8.34,1.74],[-8.82,1.74],[-9.06,1.94],[-9.34,1.74],[-9.5,1.74],[-9.58,1.58],[-9.98,1.66],[-10.22,1.5],[-10.3,1.3],[-10.3,0.66],[-10.38,0.58],[-11.22,0.54],[-11.26,-0.42],[-10.98,-0.54],[-10.38,-0.54],[-10.3,-0.66],[-10.26,-1.38],[-9.98,-1.62],[-7.38,-1.58],[-7.02,-1.78],[-3.5,-1.78],[-3.1,-1.58],[-0.94,-1.58],[-0.66,-1.66],[0.3,-1.66],[0.54,-1.58],[0.58,-1.66],[1.1,-1.66],[1.14,-1.58],[5.78,-1.58],[5.94,-1.86],[6.14,-1.86],[6.18,-1.7],[7.06,-1.7],[7.1,-1.78],[7.34,-1.7],[7.38,-1.86],[7.58,-1.86],[7.58,-1.74],[7.78,-1.58],[9.86,-1.58],[9.86,-1.74],[10.14,-1.58],[10.14,-1.74],[10.26,-1.74],[10.26,-1.58],[11.3,-1.62],[11.62,-1.42],[11.74,-0.58],[11.86,-0.46],[12.14,-0.74],[12.5,-0.82]]],"radiators":[[[8.43,-1.52],[8.39,-5.76],[11.11,-5.8],[11.11,-1.52]],[[8.39,5.8],[8.43,1.56],[11.11,1.56],[11.11,5.8]]],"att_spinal_railgun":[[[2.22,0.15],[-0.9,0.11],[-0.94,-0.05],[-0.66,-0.09],[-0.7,-0.37],[-2.66,-0.37],[-2.66,-0.69],[-0.62,-0.69],[-0.58,-0.45],[0.02,-0.45],[-0.06,-0.37],[-0.02,-0.13],[2.14,-0.13],[2.22,-0.09]]],"att_gimbal_laser":[[[0.68,0.15],[0.56,0.19],[0.44,0.35],[-0.0,0.27],[-0.0,-0.21],[0.48,-0.29],[0.52,-0.17],[0.68,-0.13]]],"att_pdc_turret":[[[0.61,1.43],[0.09,0.83],[0.01,0.87],[-0.15,0.71],[-0.23,0.71],[-0.35,0.47],[-0.31,0.43],[-0.47,0.27],[-0.51,0.03],[0.45,0.03],[0.37,0.35],[0.17,0.39],[0.13,0.47],[0.21,0.51],[0.17,0.75],[0.29,0.79],[0.29,0.87],[0.49,1.03],[0.49,1.11],[0.61,1.23],[0.69,1.23],[0.69,1.35]]],"att_drop_tank":[[[-1.43,0.71],[-1.43,0.47],[-1.15,0.15],[-0.83,0.03],[-0.51,0.07],[-0.43,-0.01],[-0.35,0.07],[0.77,0.03],[1.09,0.15],[1.37,0.51],[1.33,0.79],[1.01,1.11],[0.81,1.11],[0.77,1.19],[-0.79,1.19],[-0.87,1.11],[-1.03,1.11]]],"att_spinal_torpedo":[[[-2.63,-0.65],[-0.71,-0.65],[-0.67,-0.33],[-0.15,-0.33],[-0.15,-0.21],[-0.07,-0.13],[2.13,-0.17],[2.13,-0.05],[2.05,0.03],[2.13,0.19],[-0.43,0.19],[-0.47,0.11],[-0.71,0.11],[-0.75,-0.29],[-0.79,-0.09],[-2.39,-0.09],[-2.43,-0.25],[-2.63,-0.33]]],"att_bow_radar":[[[0.44,0.35],[-0.0,0.27],[-0.0,-0.21],[0.2,-0.25],[0.28,-0.41],[0.44,-0.37],[0.44,-0.21],[0.52,-0.17],[0.56,-0.01]]],"att_laser_pd":[[[0.13,0.96],[-0.11,0.88],[-0.27,0.68],[-0.23,0.56],[-0.43,0.48],[-0.43,0.16],[-0.51,0.08],[-0.47,0.0],[0.45,0.0],[0.41,0.24],[0.33,0.32],[0.13,0.36],[0.13,0.44],[0.33,0.6]]],"att_pdc_interceptor":[[[0.29,1.04],[0.21,1.08],[0.05,1.0],[-0.03,0.88],[-0.43,0.64],[-0.47,0.52],[-0.31,0.4],[-0.51,0.08],[-0.47,0.0],[0.45,0.0],[0.41,0.24],[0.33,0.32],[0.13,0.36],[0.13,0.44],[0.25,0.56],[0.33,0.56],[0.45,0.72]]],"att_vls_pod":[[[-1.36,0.83],[-1.36,0.19],[-0.88,0.15],[-0.84,0.03],[-0.64,0.03],[-0.6,0.15],[-0.44,0.03],[-0.36,0.07],[-0.36,0.15],[0.56,0.15],[0.6,0.03],[0.8,0.03],[0.84,0.15],[1.32,0.19],[1.32,0.83],[1.12,0.95],[0.72,0.95],[0.6,0.87],[0.52,0.95],[0.08,0.95],[-0.0,0.87],[-0.12,0.95],[-0.56,0.95],[-0.64,0.87],[-0.76,0.95],[-1.16,0.95]]],"att_capacitor_pod":[[[-1.4,0.7],[-1.32,0.58],[-1.4,0.42],[-1.32,0.3],[-1.32,0.14],[-0.88,0.18],[-0.84,0.02],[-0.64,0.02],[-0.6,0.18],[-0.44,0.02],[-0.36,0.06],[-0.44,0.14],[-0.4,0.18],[0.56,0.18],[0.6,0.02],[0.8,0.02],[0.84,0.18],[1.28,0.14],[1.28,0.3],[1.36,0.38],[1.28,0.5],[1.28,0.62],[1.36,0.7],[1.28,0.78],[1.24,0.98],[-1.24,0.98],[-1.32,0.94],[-1.32,0.78]]],"att_ecm_pod":[[[-1.42,0.76],[-1.42,0.44],[-1.02,0.16],[-0.9,0.16],[-0.86,0.04],[-0.66,0.04],[-0.66,0.12],[-0.54,0.16],[-0.42,-0.0],[-0.38,0.16],[0.58,0.16],[0.62,0.04],[0.82,0.04],[0.9,0.2],[1.14,0.24],[1.34,0.56],[1.3,0.76],[1.14,0.92],[0.86,1.0],[0.98,1.24],[0.74,1.36],[0.58,1.04],[0.5,1.04],[0.42,1.2],[0.22,1.16],[0.18,1.04],[-0.22,1.04],[-0.26,1.2],[-0.54,1.12],[-0.54,1.04],[-0.78,1.04],[-0.82,1.08],[-0.74,1.24],[-0.94,1.36],[-1.06,1.08],[-1.02,1.0],[-1.26,0.8]]]};
+const pointInPoly = (x, y, poly) => {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const [xi, yi] = poly[i], [xj, yj] = poly[j];
+    if ((yi > y) !== (yj > y) && x < (xj - xi)*(y - yi)/(yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+};
+/* Ship view: the hull and radiators as traced from the model, every fitted module on its hardpoint (coloured by
+   state), turret coverage, internal systems as boxes inside the hull, torpedo impacts on the outline.
+   Screen: nose left, aft right, top of the ship up. */
 function drawShip(g, W, H, idx) {
-  mfdHeader(g, W, `SHIP  HULL ${(hullInt*100).toFixed(0)}%  ${hullT.toFixed(0)} K${podsOn ? '  PODS ' + Math.round(podProp) + ' KG' : ''}`, idx);
-  if (hullInt < 1) {   // header tint: amber when damaged, red at 25% or below
-    g.fillStyle = hullInt <= 0.25 ? 'rgba(255,60,50,0.25)' : 'rgba(255,176,32,0.18)'; g.fillRect(0, 0, W, 40);
-  }
-  const cx = W/2, cy = 255;
-  const HW = 40, HS = -270, HE = 300, RL = 110;   // half-width, nose, aft, radiator length
-  const PV = 250;                                 // radiator centre along the hull (aft)
-  const now = performance.now()/1000;
-  const c = controlState();
-  const sx = v => cx + v;                         // ship v -> screen x
-
-  // state
-  const recentShot = railCD > WEAPON.railCooldown - 0.4;
-  const firing = laserFiring || recentShot;
-  const tgtNow = tgtLocal(targets[curTarget]);
-  const tracking = !!tgtNow && new THREE.Vector3(tgtNow.x-ship.x, tgtNow.y-ship.y, tgtNow.z-ship.z).applyQuaternion(toBodyQ()).z < 0;
-  const fcsState = firing ? 'FIRING' : tracking ? 'TRACKING' : 'STANDBY';
-  const fcsCol = firing ? RED : tracking ? AMB : PH;
-  const hot = hullT > THERM.tWarn;
-  const chg = battery / POWER.battCap;
-  const kWload = (telem.loadE/1e3).toFixed(0);
-  const callArrow = (x0, y0, x1, y1) => {
-    g.strokeStyle = DIM; g.lineWidth = 2;
-    g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1, y1); g.stroke();
-    const a = Math.atan2(y1 - y0, x1 - x0), hd = 9;
-    g.fillStyle = DIM; g.beginPath(); g.moveTo(x1, y1);
-    g.lineTo(x1 - hd*Math.cos(a - 0.45), y1 - hd*Math.sin(a - 0.45));
-    g.lineTo(x1 - hd*Math.cos(a + 0.45), y1 - hd*Math.sin(a + 0.45));
-    g.closePath(); g.fill();
-  };
-  const label = (text, x, y, col = PH) => txt(g, x, y, text, col, '20px monospace', 'center');
-
-  /* ---------- ship, drawn in ship coordinates (nose left) ---------- */
-  g.save();
-  g.translate(cx, cy);
-  g.rotate(-Math.PI/2);
-
-  const mod = (u, v, w, h, col = PH, fill = 'rgba(125,255,154,0.12)') => {
-    g.fillStyle = fill; g.fillRect(u, v, w, h);
-    g.strokeStyle = col; g.lineWidth = 2; g.strokeRect(u, v, w, h);
-  };
-
-  // main drive nozzle with gimbal, plume
-  g.strokeStyle = PH; g.lineWidth = 3;
-  g.beginPath(); g.moveTo(-14, HE); g.lineTo(14, HE); g.lineTo(22, HE+18); g.lineTo(-22, HE+18); g.closePath(); g.stroke();
-  g.lineWidth = 1.5; g.beginPath(); g.arc(0, HE+9, 6, 0, Math.PI*2); g.stroke();
-  g.fillStyle = (c.pitch || c.yaw) ? AMB : PH;
-  g.beginPath(); g.arc(c.pitch*5, HE + 9 + c.yaw*5, 2.5, 0, Math.PI*2); g.fill();
-  if (thrustFrac > 0) {
-    g.fillStyle = AMB; g.beginPath();
-    g.moveTo(-14, HE+18); g.lineTo(14, HE+18); g.lineTo(0, HE+18+30+Math.random()*12); g.closePath(); g.fill();
-  }
-
-  // hull
-  g.strokeStyle = PH; g.lineWidth = 3; g.fillStyle = 'rgba(125,255,154,0.08)';
-  g.beginPath();
-  if (g.roundRect) g.roundRect(-HW, HS, HW*2, HE-HS, 12); else g.rect(-HW, HS, HW*2, HE-HS);
-  g.fill(); g.stroke();
-
-  // corridor along the spine
-  g.strokeStyle = DIM; g.lineWidth = 1.5; g.setLineDash([6, 6]);
-  g.beginPath(); g.moveTo(0, HS+8); g.lineTo(0, HE-8); g.stroke(); g.setLineDash([]);
-
-  // RCS jets at the hull corners
-  if (rcsActive) {
-    g.fillStyle = AMB;
-    for (const s of [-1, 1]) for (const v of [HS+16, HE-16]) g.fillRect(s*(HW+2) - (s>0?0:6), v-3, 6, 6);
-  }
-
-  // sensor / antenna tower at the nose
-  g.strokeStyle = PH; g.lineWidth = 2.5;
-  g.strokeRect(-14, HS-24, 28, 24);
-  for (let v = HS-20; v < HS; v += 8) { g.beginPath(); g.moveTo(-10, v); g.lineTo(10, v); g.stroke(); }
-  g.beginPath(); g.moveTo(0, HS-24); g.lineTo(0, HS-60); g.stroke();
-
-  // radiators: sideways from the hull, centred at PV
-  for (const s of [-1, 1]) {
-    const u0 = s > 0 ? HW : -HW - RL;
-    if (radDeployed) {
-      const T = 70, v0 = PV - T/2;
-      g.strokeStyle = PH; g.lineWidth = 3; g.fillStyle = 'rgba(125,255,154,0.06)';
-      g.fillRect(u0, v0, RL, T); g.strokeRect(u0, v0, RL, T);
-      g.lineWidth = 1.5;
-      for (let u = u0 + 12; u < u0 + RL; u += 12) { g.beginPath(); g.moveTo(u, v0); g.lineTo(u, v0 + T); g.stroke(); }
-    } else {
-      const T = 8, v0 = PV - T/2;
-      g.save(); g.beginPath(); g.rect(u0, v0, RL, T); g.clip();
-      g.strokeStyle = '#ffffff'; g.lineWidth = 3;
-      for (let k = -T; k < RL + T; k += 8) { g.beginPath(); g.moveTo(u0 + k, v0); g.lineTo(u0 + k + T, v0 + T); g.stroke(); }
-      g.restore();
-      g.strokeStyle = '#ffffff'; g.lineWidth = 3; g.strokeRect(u0, v0, RL, T);
-    }
-  }
-
-  // upper modules (screen top band, u 4..38)
-  // point defence turret
-  mod(4, -262, 34, 62, PH);
-  g.strokeStyle = PH; g.lineWidth = 2;
-  g.beginPath(); g.arc(21, -231, 10, 0, Math.PI*2); g.stroke();
-  g.beginPath(); g.moveTo(21, -231); g.lineTo(37, -231); g.stroke();
-
-  // missile magazine: six cells
-  mod(4, -192, 34, 82, PH);
-  for (let k = 0; k < 6; k++) { g.strokeStyle = DIM; g.lineWidth = 1.5; g.strokeRect(10, -186 + k*13, 22, 9); }
-
-  // ECM: three emitter bars
-  mod(4, -100, 34, 60, PH);
-  for (let k = 0; k < 3; k++) { g.fillStyle = DIM; g.fillRect(12, -92 + k*16, 22, 9); }
-
-  // reactor: long glowing core
-  const rCol = hot ? 'rgba(255,80,64,0.5)' : laserFiring ? 'rgba(255,200,80,0.75)' : 'rgba(255,176,32,0.3)';
-  mod(4, -30, 34, 300, hot ? RED : AMB, rCol);
-  g.strokeStyle = hot ? RED : AMB; g.lineWidth = 2;
-  g.beginPath(); g.arc(21, 120, 16, 0, Math.PI*2); g.stroke();
-  g.beginPath(); g.arc(21, 120, 7, 0, Math.PI*2); g.stroke();
-
-  // lower modules (screen bottom band, u -38..-4)
-  // FCS with status light
-  mod(-38, -262, 34, 62, fcsCol);
-  g.fillStyle = fcsCol; g.beginPath();
-  g.arc(-21, -231, 4 + (firing ? 2*Math.abs(Math.sin(now*8)) : 0), 0, Math.PI*2); g.fill();
-
-  // capacitor bank: charge level, flashes on a shot
-  mod(-38, -192, 34, 152, PH);
-  g.fillStyle = PH; g.fillRect(-34, -186 + 144*(1-chg), 20, 144*chg);
-  if (recentShot) { g.fillStyle = 'rgba(255,255,255,0.7)'; g.fillRect(-38, -192, 34, 152); }
-
-  // coolant pumps: five along the hull
-  mod(-38, -30, 34, 300, hot ? AMB : PH);
-  const spin = hot ? 0 : now*6;
-  for (const v of [30, 90, 150, 210, 270]) {
-    g.strokeStyle = hot ? AMB : PH; g.lineWidth = 1.5;
-    g.beginPath(); g.arc(-21, v, 9, 0, Math.PI*2); g.stroke();
-    g.beginPath(); g.moveTo(-21 - 9*Math.cos(spin), v - 9*Math.sin(spin)); g.lineTo(-21 + 9*Math.cos(spin), v + 9*Math.sin(spin)); g.stroke();
-  }
-
-  // Telescope gimbal on the nose tower: the pointer shows the gimbal azimuth
-  g.strokeStyle = PH; g.lineWidth = 2;
-  g.beginPath(); g.arc(0, -282, 6, 0, Math.PI*2); g.stroke();
-  g.beginPath(); g.moveTo(0, -282); g.lineTo(18*Math.sin(scopeAz), -282 - 18*Math.cos(scopeAz)); g.stroke();
-  // Fuel pods: one pill on each side, attached to the hull edge and clear of the callout arrows.
-  // The fill shows the remaining propellant.
-  if (podsOn) {
-    const f = clamp(podProp/Math.max(1e-9, tankProp0Total()), 0, 1);
-    for (const s of [-1, 1]) {
-      // a pod on this side if a tank is fitted on a pylon of that side (u > 0 is body +Y, the top)
-      if (!slotsWithRole('tank').some(sl => (HARDPOINTS[sl].pos[1] > 0) === (s > 0))) continue;
-      const pu0 = s > 0 ? 36 : -72, pw = 36, pl = 70, pv0 = 136;
-      g.beginPath();
-      if (g.roundRect) g.roundRect(pu0, pv0, pw, pl, pw/2); else g.rect(pu0, pv0, pw, pl);
-      g.fillStyle = 'rgba(125,255,154,0.08)'; g.fill();
-      g.strokeStyle = PH; g.lineWidth = 2.5; g.stroke();
-      g.fillStyle = 'rgba(255,176,32,0.45)';
-      g.fillRect(pu0 + 6, pv0 + pl*(1 - f) + 4, pw - 12, Math.max(0, pl*f - 8));
-    }
-  }
-
-  // Damage on the modules that hold each system: amber tint when degraded, red hatching when offline
-  const dmgBox = (id, u, v, w, h) => {
-    const e = damage[id];
-    if (e >= 0.999) return;
-    if (e > 0) { g.fillStyle = 'rgba(255,176,32,0.35)'; g.fillRect(u, v, w, h); return; }
-    g.save(); g.beginPath(); g.rect(u, v, w, h); g.clip();
-    g.fillStyle = 'rgba(255,60,50,0.25)'; g.fillRect(u, v, w, h);
-    g.strokeStyle = RED; g.lineWidth = 2;
-    for (let k = -h; k < w + h; k += 10) { g.beginPath(); g.moveTo(u + k, v); g.lineTo(u + k + h, v + h); g.stroke(); }
+  mfdHeader(g, W, `SHIP  HULL ${(hullInt*100).toFixed(0)}%  ${hullT.toFixed(0)} K`, idx);   // tank levels are on the tanks
+  if (hullInt < 1) { g.fillStyle = hullInt <= 0.25 ? 'rgba(255,60,50,0.25)' : 'rgba(255,176,32,0.18)'; g.fillRect(0, 0, W, 40); }
+  const k = 26, ox = W/2 + 1.2*k, oy = 252;                // px per metre; screen position of the body origin
+  const X = v => ox + v*k, Y = u => oy - u*k;
+  const stCol = e => e === undefined ? PH : e <= 0 ? RED : e < 0.999 ? AMB : PH;
+  const stFill = e => e === undefined || e >= 0.999 ? 'rgba(125,255,154,0.13)' : e > 0 ? 'rgba(255,176,32,0.3)' : 'rgba(255,60,50,0.25)';
+  const path = pts => { g.beginPath(); pts.forEach(([v, u], i) => i ? g.lineTo(X(v), Y(u)) : g.moveTo(X(v), Y(u))); g.closePath(); };
+  const hatch = (pts, col) => {                            // red hatching inside a polygon (offline)
+    g.save(); path(pts); g.clip(); g.strokeStyle = col; g.lineWidth = 1.5;
+    for (let x = 0; x < W + H; x += 9) { g.beginPath(); g.moveTo(x, 44); g.lineTo(x - 400, 444); g.stroke(); }
     g.restore();
-    g.strokeStyle = RED; g.lineWidth = 2; g.strokeRect(u, v, w, h);
   };
-  dmgBox('reactor', 4, -30, 34, 300);
-  dmgBox('capacitors', -38, -192, 34, 152);
-  if (roleSlot('railgun')) dmgBox(roleSlot('railgun'), -38, -262, 34, 62);   // FCS module: the railgun's state
-  dmgBox('radiators', -38, -30, 34, 300);         // coolant loop
-  if (radDeployed) for (const s of [-1, 1]) dmgBox('radiators', s > 0 ? HW : -HW - RL, PV - 35, RL, 70);
-  dmgBox('main', -22, HE, 44, 18);
-  dmgBox('scope', -8, -290, 16, 16);
-
-  // RCS quads at the hull corners: shown permanently when damaged (amber degraded, red offline)
-  if (damage.rcs < 1) {
-    g.fillStyle = damage.rcs <= 0 ? RED : AMB;
-    for (const s of [-1, 1]) for (const v of [HS+16, HE-16]) g.fillRect(s*(HW+2) - (s>0?0:8), v-4, 8, 8);
+  // Radiators: solid when deployed, dashed when stowed; tinted by damage
+  for (const pts of SHIP_SIL.radiators) {
+    path(pts);
+    g.fillStyle = radDeployed ? stFill(damage.radiators) : 'rgba(125,255,154,0.04)'; g.fill();
+    g.strokeStyle = radDeployed ? stCol(damage.radiators) : DIM; g.lineWidth = 1.5; g.setLineDash(radDeployed ? [] : [5, 5]); g.stroke(); g.setLineDash([]);
+    if (radDeployed) { g.save(); path(pts); g.clip(); g.strokeStyle = 'rgba(125,255,154,0.18)'; g.lineWidth = 1;
+      for (let u = -6; u <= 6; u += 0.5) { g.beginPath(); g.moveTo(X(8), Y(u)); g.lineTo(X(12), Y(u)); g.stroke(); } g.restore(); }
+    if (damage.radiators <= 0) hatch(pts, RED);
   }
-  // Impact markers: where each torpedo struck the hull, from the direction it came in. New hits pulse for 3 s.
-  {
-    const vc = (HS + HE)/2, halfL = (HE - HS)/2;
-    hullImpacts.forEach((im, i) => {
-      let du = im.y, dv = im.z, L = Math.hypot(du, dv);
-      if (L < 0.05) { const a = i*2.4; du = Math.cos(a); dv = Math.sin(a)*0.3; L = Math.hypot(du, dv); }   // head-on: spread around
-      du /= L; dv /= L;
-      const t = Math.min(HW/Math.max(Math.abs(du), 1e-6), halfL/Math.max(Math.abs(dv), 1e-6));
-      const u = du*t, v = vc + dv*t;
-      const age = simT - im.t, fresh = age < 3;
-      const r = fresh ? 9 + 5*Math.abs(Math.sin(age*8)) : 8;
-      g.strokeStyle = RED; g.lineWidth = fresh ? 3 : 2;
-      g.beginPath();
-      for (let k = 0; k < 8; k++) {
-        const a = k*Math.PI/4, rr = k % 2 ? r*0.45 : r;
-        g.moveTo(u, v); g.lineTo(u + rr*Math.cos(a), v + rr*Math.sin(a));
+  // Hull
+  for (const pts of SHIP_SIL.hull) { path(pts); g.fillStyle = '#04200e'; g.fill(); g.strokeStyle = PH; g.lineWidth = 2; g.stroke(); }
+  // Internal systems: boxes along the centreline (body z ranges), coloured by damage
+  const box = (id, label, v0, v1, uh = 0.95) => {
+    const e = damage[id]; g.fillStyle = stFill(e); g.fillRect(X(v0), Y(uh), (v1 - v0)*k, 2*uh*k);
+    g.strokeStyle = stCol(e); g.lineWidth = 1.5; g.strokeRect(X(v0), Y(uh), (v1 - v0)*k, 2*uh*k);
+    if (e !== undefined && e <= 0) hatch([[v0, -uh], [v1, -uh], [v1, uh], [v0, uh]], RED);
+    txt(g, X((v0 + v1)/2), oy + 6, label, stCol(e), '15px monospace', 'center');
+  };
+  box('scope', 'SCOPE', -9.7, -7.7);                      // clear of the nose modules
+  box('capacitors', `CAP ${(battery/battCapEff()*100).toFixed(0)}%`, -7.3, -2.6);
+  box('reactor', `REACTOR ${(telem.loadE/1e3).toFixed(0)}kW`, 0.6, 5.8);
+  box('radiators', 'COOLANT', 6.2, 8.2, 0.7);
+  box('main', damage.main <= 0 ? 'DRIVE OFF' : thrustFrac > 0 ? 'BURN' : 'DRIVE', 9.0, 11.4, 0.8);
+  if (thrustFrac > 0) {                                    // exhaust plume while burning
+    g.fillStyle = `rgba(255,176,32,${0.35 + 0.25*Math.random()})`;
+    g.beginPath(); g.moveTo(X(12.1), Y(0.55)); g.lineTo(X(12.1 + 2.2 + Math.random()), Y(0)); g.lineTo(X(12.1), Y(-0.55)); g.closePath(); g.fill();
+  }
+  // RCS quads at the hull corners (shown when damaged)
+  if (damage.rcs < 1) { g.fillStyle = damage.rcs <= 0 ? RED : AMB; for (const v of [-9.4, 9.6]) for (const u of [1.75, -1.75]) g.fillRect(X(v) - 4, Y(u) - 4, 8, 8); }
+  // Modules on their hardpoints
+  const p0 = tankProp0Total();
+  for (const [slot, hp] of Object.entries(HARDPOINTS)) {
+    const m = modAt(slot);
+    if (!m) {                                              // empty hardpoint: a small ring
+      g.strokeStyle = DIM; g.lineWidth = 1.5; g.beginPath(); g.arc(X(hp.pos[2]), Y(hp.pos[1]), 5, 0, Math.PI*2); g.stroke(); continue;
+    }
+    if (m.role === 'tank' && !podsOn) continue;           // jettisoned
+    const key = m.file.replace('.glb', ''), polys = SHIP_SIL[key] || [];
+    const e = m.role === 'tank' ? undefined : damage[slot];
+    for (const poly of polys) {
+      const pts = poly.map(([zf, yf]) => { const b = hpToBody(slot, [0, yf, zf]); return [b[2], b[1]]; });
+      path(pts); g.fillStyle = stFill(e); g.fill();
+      if (m.role === 'tank' && p0 > 0) {                   // propellant level: fill from the hull side outward
+        const f = clamp(podProp/p0, 0, 1), us = pts.map(q => q[1]), u0 = hp.flip ? Math.max(...us) : Math.min(...us), u1 = hp.flip ? Math.min(...us) : Math.max(...us);
+        g.save(); path(pts); g.clip(); g.fillStyle = 'rgba(255,176,32,0.35)';
+        const ya = Y(u0), yb = Y(u0 + (u1 - u0)*f); g.fillRect(0, Math.min(ya, yb), W, Math.abs(yb - ya)); g.restore();
       }
-      g.stroke();
-      g.fillStyle = fresh ? '#ffffff' : RED; g.beginPath(); g.arc(u, v, 3, 0, Math.PI*2); g.fill();
-    });
+      path(pts); g.strokeStyle = m.role === 'tank' ? AMB : stCol(e); g.lineWidth = 1.5; g.stroke();
+      if (e !== undefined && e <= 0) hatch(pts, RED);
+    }
   }
-
-  // PDC mounts: one on each side of the hull, with their coverage (PDC_ARC either side of the outward axis).
-  // The barrel points along the last shot for 1.5 s, otherwise straight out.
-  // Body to drawing frame: u = body Y, v = body Z (aft positive); frame angle 0 is +u.
-  for (const m of PDC_MOUNTS) {
-    const s = m.pos[1] >= 0 ? 1 : -1;                // top or bottom of the hull
-    const u0 = s*(HW + 10), v0 = -10, e = damage[m.sys];
-    const firingNow = simT - (m.lastFire ?? -1e9) < 0.3;
-    const col = e <= 0 ? RED : masterMode === 'OFF' ? DIM : firingNow ? AMB : e < 1 ? AMB : PH;
-    const a0 = s > 0 ? 0 : Math.PI;
-    g.fillStyle = e <= 0 ? 'rgba(255,60,50,0.07)' : firingNow ? 'rgba(255,176,32,0.10)' : 'rgba(125,255,154,0.06)';
-    g.beginPath(); g.moveTo(u0, v0); g.arc(u0, v0, 46, a0 - PDC_ARC, a0 + PDC_ARC); g.closePath(); g.fill();
+  // Turret coverage: PDC_ARC either side of each turret's outward axis; PDC barrels follow the last shot
+  for (const m of [...PDC_MOUNTS, ...INT_MOUNTS, ...LPD_MOUNTS]) {
+    const s = m.dir[1] >= 0 ? 1 : -1, x0 = X(m.pos[2]), y0 = Y(m.pos[1]), e = damage[m.sys] ?? 1;
+    const live = m.lastFire !== undefined && simT - m.lastFire < 0.3 || !!m.target;
+    const a0 = s > 0 ? -Math.PI/2 : Math.PI/2;               // screen angle of the outward axis
+    g.fillStyle = e <= 0 ? 'rgba(255,60,50,0.07)' : live ? 'rgba(255,176,32,0.10)' : 'rgba(125,255,154,0.05)';
+    g.beginPath(); g.moveTo(x0, y0); g.arc(x0, y0, 52, a0 - PDC_ARC, a0 + PDC_ARC); g.closePath(); g.fill();
     g.strokeStyle = DIM; g.lineWidth = 1; g.setLineDash([4, 4]); g.stroke(); g.setLineDash([]);
-    let du = s, dv = 0;
     if (m.aimW && simT - m.lastFire < 1.5) {
       const b = m.aimW.clone().applyQuaternion(toBodyQ()), L = Math.hypot(b.y, b.z);
-      if (L > 1e-3) { du = b.y/L; dv = b.z/L; }
-    }
-    g.fillStyle = '#021208'; g.strokeStyle = col; g.lineWidth = 2.5;
-    g.beginPath(); g.arc(u0, v0, 10, 0, Math.PI*2); g.fill(); g.stroke();
-    g.lineWidth = 4; g.beginPath(); g.moveTo(u0 + du*6, v0 + dv*6); g.lineTo(u0 + du*22, v0 + dv*22); g.stroke();
-    if (e <= 0) {
-      g.lineWidth = 2.5; g.beginPath();
-      g.moveTo(u0 - 8, v0 - 8); g.lineTo(u0 + 8, v0 + 8); g.moveTo(u0 + 8, v0 - 8); g.lineTo(u0 - 8, v0 + 8); g.stroke();
+      if (L > 1e-3) { g.strokeStyle = AMB; g.lineWidth = 3; g.beginPath(); g.moveTo(x0, y0); g.lineTo(x0 + b.z/L*24, y0 - b.y/L*24); g.stroke(); }
     }
   }
-
-  g.restore();
-  // PDC labels beside their coverage fans (screen coordinates)
-  // Label: name and rounds left, or the fault; a heat bar under it fills toward overheat
-  const pdcLab = (m, y) => {
-    const st = pdcStatus(m), bad = st === 'OFFLINE' || st === 'EMPTY' || st === 'OVERHEAT';
-    const text = st === 'OFFLINE' ? `${m.name} OFF` : st === 'EMPTY' ? `${m.name} EMPTY` : st === 'OVERHEAT' ? `${m.name} HOT` : `${m.name} ${m.rounds}`;
-    txt(g, sx(5), y, text, bad ? RED : damage[m.sys] < 1 || m.rounds <= PDC_LOW_ROUNDS ? AMB : PH, '18px monospace', 'center');
-    const bx = sx(5) - 45, by = y + 5;
-    g.strokeStyle = DIM; g.lineWidth = 1; g.strokeRect(bx, by, 90, 6);
-    g.fillStyle = m.hot ? RED : m.heat > 0.7 ? AMB : PH; g.fillRect(bx + 1, by + 1, 88*m.heat, 4);
+  // Torpedo impacts: from the direction they came in, onto the hull outline (marched outward from the centre)
+  const hullPts = SHIP_SIL.hull[0];
+  hullImpacts.forEach((im, i) => {
+    let du = im.y, dv = im.z, L = Math.hypot(du, dv);
+    if (L < 0.05) { const a = i*2.4; du = Math.cos(a); dv = Math.sin(a)*0.3; L = Math.hypot(du, dv); }
+    du /= L; dv /= L;
+    let r = 0; while (r < 14 && pointInPoly(dv*r, du*r, hullPts)) r += 0.05;
+    const x = X(dv*r), y = Y(du*r), age = simT - im.t, fresh = age < 3, rr = fresh ? 9 + 5*Math.abs(Math.sin(age*8)) : 8;
+    g.strokeStyle = RED; g.lineWidth = fresh ? 3 : 2; g.beginPath();
+    for (let q = 0; q < 8; q++) { const a = q*Math.PI/4, l = q % 2 ? rr*0.45 : rr; g.moveTo(x, y); g.lineTo(x + l*Math.cos(a), y + l*Math.sin(a)); }
+    g.stroke(); g.fillStyle = fresh ? '#fff' : RED; g.beginPath(); g.arc(x, y, 3, 0, Math.PI*2); g.fill();
+  });
+  // Module labels on leader lines: top hardpoints on the top row, bottom ones (and the spinal mount) on the bottom row
+  const modState = slot => {
+    const m = modAt(slot); if (!m) return ['EMPTY', DIM];
+    const e = damage[slot], bad = e !== undefined && e <= 0;
+    let st = '';
+    if (m.role === 'tank') st = podsOn ? `${p0 > 0 ? Math.round(podProp/p0*100) : 0}%` : 'DROPPED';
+    else if (bad) st = 'OFF';
+    else if (m.role === 'pdc') { const pm = PDC_MOUNTS.find(q => q.sys === slot); st = pm ? (pm.hot ? 'HOT' : pm.rounds) : ''; }
+    else if (m.role === 'interceptor') { const im = INT_MOUNTS.find(q => q.sys === slot); st = im ? im.rounds : ''; }
+    else if (m.role === 'vls') st = vlsCells[slot] ?? '';
+    else if (m.role === 'torpedo') st = spinalAmmo;
+    else if (m.role === 'ecm') st = ecmDecoys;
+    else if (m.role === 'railgun') st = railCD > 0 ? 'CYC' : 'RDY';
+    else if (m.role === 'radar') st = `${(sensorRange()/1e3).toFixed(0)}KM`;
+    return [`${m.short} ${st}`.trim(), bad ? RED : e !== undefined && e < 0.999 ? AMB : PH];
   };
-  for (const m of PDC_MOUNTS) pdcLab(m, m.pos[1] >= 0 ? cy - HW - 74 : cy + HW + 82);
-
-  /* ---------- callouts, in screen coordinates ---------- */
-  // above the ship (module outer edge at screen y 217)
-  label('POINT DEF', sx(-231), 60);
-  callArrow(sx(-231), 66, sx(-231), 219);
-  label('MISSILE MAG', sx(-151), 92);
-  callArrow(sx(-151), 98, sx(-151), 219);
-  label('ECM', sx(-70), 60);
-  callArrow(sx(-70), 66, sx(-70), 219);
-  // Damaged systems replace the normal label text with their state: amber with % when degraded, red OFF
-  const dTxt = id => damage[id] <= 0 ? 'OFF' : `${(damage[id]*100).toFixed(0)}%`;
-  const dCol = (id, normal) => damage[id] <= 0 ? RED : damage[id] < 1 ? AMB : normal;
-  label(damage.reactor < 1 ? `REACTOR ${dTxt('reactor')}` : `REACTOR LOAD ${kWload}kW`, sx(90), 60, dCol('reactor', laserFiring ? AMB : PH));
-  callArrow(sx(90), 66, sx(90), 219);
-
-  // below the ship (module outer edge at screen y 293)
-  const rsl = roleSlot('railgun'), lsl = roleSlot('laser');
-  label(rsl && damage[rsl] < 1 ? `FCS ${dTxt(rsl)}` : 'FCS', sx(-231), 438, rsl ? dCol(rsl, fcsCol) : fcsCol);
-  callArrow(sx(-231), 428, sx(-231), 292);
-  label(damage.capacitors < 1 ? `CAPACITORS ${dTxt('capacitors')}` : `CAPACITORS ${(chg*100).toFixed(0)}%`, sx(-122), 462, dCol('capacitors', PH));
-  callArrow(sx(-122), 444, sx(-122), 292);
-  label(damage.radiators < 1 ? `COOLANT ${dTxt('radiators')}` : 'COOLANT', sx(120), 438, dCol('radiators', hot ? AMB : PH));
-  callArrow(sx(120), 428, sx(120), 292);
-  label(damage.main < 1 ? `DRIVE ${dTxt('main')}` : 'GIMBAL', sx(HE+9) + 40, 438, dCol('main', PH));
-  callArrow(sx(HE+9) + 40, 428, sx(HE+9), 280);
-  label(damage.scope < 1 ? `SCOPE ${dTxt('scope')}` : 'SCOPE', sx(-282), 438, dCol('scope', PH));
-  callArrow(sx(-282), 428, sx(-282), 262);
-  // Systems without a module drawn: shown only when damaged, on the bottom row
-  if (lsl && damage[lsl] < 1) txt(g, 14, 462, `LASER ${dTxt(lsl)}`, dCol(lsl, PH), '20px monospace', 'left');
-  if (damage.rcs < 1) txt(g, W - 14, 462, `RCS ${dTxt('rcs')}`, dCol('rcs', PH), '20px monospace', 'right');
+  const lbl = (slot, row) => {
+    const hp = HARDPOINTS[slot], [t, col] = modState(slot), x = X(hp.pos[2]) + (slot === 'nose' ? -10 : slot === 'spinal' ? -10 : 0);
+    const ty = row === 'top' ? 70 : 446, ay = row === 'top' ? 78 : 430;
+    g.strokeStyle = DIM; g.lineWidth = 1; g.beginPath(); g.moveTo(x, ay); g.lineTo(X(hp.pos[2]), Y(hp.pos[1])); g.stroke();
+    txt(g, x, ty, t, col, '18px monospace', 'center');
+  };
+  lbl('nose', 'top'); lbl('pdcTop', 'top'); lbl('tankTop', 'top');
+  lbl('spinal', 'bottom'); lbl('pdcBot', 'bottom'); lbl('tankBot', 'bottom');
+  // Laser, RCS and radiator states without a label of their own: a compact line when not nominal
+  const notes = [];
+  if (!radDeployed) notes.push('RAD STOWED');
+  if (damage.rcs < 1) notes.push(`RCS ${damage.rcs <= 0 ? 'OFF' : Math.round(damage.rcs*100) + '%'}`);
+  if (hullT > THERM.tWarn) notes.push('HOT');
+  if (notes.length) txt(g, W - 14, 100, notes.join(' · '), AMB, '16px monospace', 'right');
 }
 
 // Combat telescope: a 4-degree field centred on the ship's forward axis. Stars, the Moon and targets are
 // projected through the ship's attitude. IR mode shows targets as white-hot blobs and hides the stars.
-const SCOPE_FOV = 4 * Math.PI/180;
+const SCOPE_FOV0 = 4 * Math.PI/180;
+// Telescope magnification steps (RNG softkey on the SCOPE page): field of view = 4 deg / zoom
+const SCOPE_ZOOMS = [1, 4, 16, 64, 256];
+let scopeZoom = 0;
+// Sunlight comes from a fixed direction in the Earth-centred frame (the run is short next to a year)
+const SUN_DIR = new THREE.Vector3(0.83, 0.52, 0.2).normalize();
+
+/* ---------- Telescope bodies: the Moon (cratered, tidally locked) and Earth, lit from SUN_DIR ----------
+   The disc is shaded per pixel into a small offscreen canvas, which is redrawn only when the view or the light
+   has turned noticeably, then scaled onto the scope. */
+const MOON_TEX_W = 256, MOON_TEX_H = 128;
+const MOON_ALB = (() => {
+  let seed = 7; const rnd = () => (seed = (seed*16807) % 2147483647)/2147483647;
+  const A = new Float32Array(MOON_TEX_W*MOON_TEX_H).fill(0.78);
+  const cell = (i, j) => { const lon = (i + 0.5)/MOON_TEX_W*2*Math.PI - Math.PI, lat = Math.PI/2 - (j + 0.5)/MOON_TEX_H*Math.PI;
+    return [Math.cos(lat)*Math.cos(lon), Math.cos(lat)*Math.sin(lon), Math.sin(lat)]; };
+  const dirs = []; for (let j = 0; j < MOON_TEX_H; j++) for (let i = 0; i < MOON_TEX_W; i++) dirs.push(cell(i, j));
+  const ll = (lon, lat) => [Math.cos(lat)*Math.cos(lon), Math.cos(lat)*Math.sin(lon), Math.sin(lat)];
+  // Maria: broad dark plains, mostly on the near side (+x faces Earth)
+  const maria = [[0.3, 0.45, 0.32, 0.3], [0.55, 0.3, 0.22, 0.28], [-0.35, 0.2, 0.4, 0.3], [-0.1, -0.15, 0.3, 0.25],
+                 [0.7, -0.1, 0.18, 0.22], [-0.6, 0.55, 0.25, 0.2], [0.15, 0.1, 0.18, 0.2], [2.6, 0.4, 0.15, 0.15]];
+  for (const [lo, la, sz, dp] of maria) {
+    const c = ll(lo, la);
+    dirs.forEach((d, k) => { const ang = Math.acos(clamp(d[0]*c[0] + d[1]*c[1] + d[2]*c[2], -1, 1)); A[k] -= dp*Math.exp(-((ang/sz)**2)); });
+  }
+  // Craters: dark floor, bright raised rim; many small, few large
+  for (let n = 0; n < 260; n++) {
+    const r = 0.012 + 0.13*rnd()**3, c = ll(rnd()*2*Math.PI - Math.PI, Math.asin(2*rnd() - 1));
+    const cr = Math.cos(1.4*r);
+    dirs.forEach((d, k) => {
+      const dp = d[0]*c[0] + d[1]*c[1] + d[2]*c[2]; if (dp < cr) return;
+      const x = Math.acos(clamp(dp, -1, 1))/r;
+      A[k] += x < 0.85 ? -0.1 : x < 1.15 ? 0.14*(1 - Math.abs(x - 1)/0.15) : 0;
+    });
+  }
+  for (let k = 0; k < A.length; k++) A[k] = clamp(A[k], 0.2, 1);
+  return A;
+})();
+const bodyCache = { moon: { cv: null, key: null }, earth: { cv: null, key: null }, moonF: { cv: null, key: null, tf: 0 }, earthF: { cv: null, key: null, tf: 0 } };
+const hash3 = (i, j, k, s2) => {
+  let h = Math.imul(i, 374761393) ^ Math.imul(j, 668265263) ^ Math.imul(k, 1440662683) ^ Math.imul(s2, 1274126177);
+  h = Math.imul(h ^ (h >>> 13), 1274126177); h ^= h >>> 16; return (h >>> 0)/4294967296;
+};
+// Crater octaves to add for a given surface resolution (m per pixel): craters from ~2 px to ~150 px across
+function craterOctaves(mpp) {
+  const out = [];
+  for (let K = 8; K < 3e6 && out.length < 5; K *= 3) { const rpx = 0.2*R_MOON/K/mpp; if (rpx < 150 && rpx > 4) out.push(K); }
+  return out;
+}
+// Brightness (0..255) of the lunar surface at world unit normal n: albedo map plus crater relief, lit from SUN_DIR.
+// Each crater octave places at most one crater in each cell of a 3D grid over the unit sphere (scaled by K);
+// the crater tilts the surface normal (bowl toward its centre, rim outward) so its walls catch the light.
+const _ex = new THREE.Vector3(), _ey = new THREE.Vector3(), _ez = new THREE.Vector3(0, 0, 1);
+function moonFrameAxes() { const mp = moonPos(simT); _ex.set(-mp[0], -mp[1], -mp[2]).normalize(); _ey.crossVectors(_ez, _ex); }
+function moonShade(nx, ny, nz, octs, ir, mpp = 0) {
+  const lon = Math.atan2(nx*_ey.x + ny*_ey.y + nz*_ey.z, nx*_ex.x + ny*_ex.y + nz*_ex.z), lat = Math.asin(clamp(nz, -1, 1));
+  const ti = Math.min(MOON_TEX_W - 1, (lon + Math.PI)/(2*Math.PI)*MOON_TEX_W | 0), tj = Math.min(MOON_TEX_H - 1, (Math.PI/2 - lat)/Math.PI*MOON_TEX_H | 0);
+  let alb = MOON_ALB[tj*MOON_TEX_W + ti], gx = 0, gy = 0, gz = 0;
+  for (const K of octs) {
+    if (mpp && 0.2*R_MOON/K/mpp < 4) continue;      // too small to resolve here: it would only add speckle
+    const px = nx*K, py = ny*K, pz = nz*K, i = Math.floor(px), j = Math.floor(py), k = Math.floor(pz);
+    if (hash3(i, j, k, K) > 0.6) continue;
+    const cxp = i + 0.3 + 0.4*hash3(i, j, k, K + 1), cyp = j + 0.3 + 0.4*hash3(i, j, k, K + 2), czp = k + 0.3 + 0.4*hash3(i, j, k, K + 3);
+    const r = 0.1 + 0.14*hash3(i, j, k, K + 4);
+    let dx = px - cxp, dy = py - cyp, dz = pz - czp;
+    const dn = dx*nx + dy*ny + dz*nz; dx -= dn*nx; dy -= dn*ny; dz -= dn*nz;    // in the tangent plane
+    const dl = Math.hypot(dx, dy, dz), x = dl/r;
+    if (x >= 1.3 || dl < 1e-9) continue;
+    const sl = x < 1 ? 0.9*x : -0.9*(1.3 - x)/0.3;   // slope: bowl rising to the rim, then falling outside it
+    gx += sl*dx/dl; gy += sl*dy/dl; gz += sl*dz/dl;
+    alb += x < 0.6 ? -0.06 : x > 0.95 && x < 1.1 ? 0.06 : 0;
+  }
+  let mx = nx - gx, my = ny - gy, mz = nz - gz; const ml = Math.hypot(mx, my, mz); mx /= ml; my /= ml; mz /= ml;
+  const lam = Math.max(0, mx*SUN_DIR.x + my*SUN_DIR.y + mz*SUN_DIR.z);
+  if (ir) return 60 + 190*Math.pow(lam, 0.3);       // the night side is cold but still above the sky
+  return 255*Math.min(1, alb*lam*1.1 + 0.025*alb);
+}
+function earthShade(nx, ny, nz, z, ir) {           // returns [r, g, b]
+  const lam = Math.max(0, nx*SUN_DIR.x + ny*SUN_DIR.y + nz*SUN_DIR.z);
+  if (ir) { const v = 120 + 60*lam; return [v, v, v]; }
+  const lit = Math.min(1, lam*1.15 + 0.02), limb = Math.pow(1 - z, 3);
+  return [255*lit*(0.25 + 0.4*limb), 255*lit*(0.42 + 0.35*limb), 255*lit*(0.7 + 0.3*limb)];
+}
+/* Close up, a disc is much larger than the frame: cast a ray for each (half-resolution) pixel of the frame instead,
+   with crater detail chosen for the range. Redrawn at most ~8 times a second while the view moves. */
+function bodyFrame(kind, B, vq, fov, F, ir) {
+  const C = bodyCache[kind + 'F'], w = F.FW/2 | 0, hgt = F.FH/2 | 0;
+  const key = [vq.x, vq.y, vq.z, vq.w].map(v => v.toFixed(4)).join() + [B.v.x, B.v.y, B.v.z].map(v => (v/200).toFixed(0)).join() + fov + ir;
+  const now = performance.now();
+  const hard = `${fov}${ir}`;                         // a zoom or mode change redraws at once
+  if (C.cv && (C.key === key || (now - C.tf < 120 && C.hard === hard))) return C.cv;
+  if (!C.cv) { C.cv = document.createElement('canvas'); }
+  if (C.cv.width !== w) { C.cv.width = w; C.cv.height = hgt; }
+  C.key = key; C.tf = now; C.hard = hard;
+  const g = C.cv.getContext('2d'), img = g.createImageData(w, hgt), d = img.data;
+  const inv = vq.clone().invert(), ax = new THREE.Vector3(1, 0, 0).applyQuaternion(inv), ay = new THREE.Vector3(0, 1, 0).applyQuaternion(inv),
+        az = new THREE.Vector3(0, 0, -1).applyQuaternion(inv);
+  const c = B.v, cc = c.lengthSq() - B.r*B.r;
+  const dist = c.length() - B.r, mpp = Math.max(50, dist*fov/F.R*2);
+  const octs = kind === 'moon' ? [...new Set([...craterOctaves(mpp), ...craterOctaves(mpp*8), ...craterOctaves(mpp*64)])] : null;
+  if (kind === 'moon') moonFrameAxes();
+  for (let j = 0; j < hgt; j++) for (let i = 0; i < w; i++) {
+    const o = 4*(j*w + i);
+    const ta = Math.tan(((F.FX + 2*i + 1) - F.cx)/F.R*fov), te = Math.tan((F.cy - (F.FY + 2*j + 1))/F.R*fov);
+    let dx = ax.x*ta + ay.x*te + az.x, dy = ax.y*ta + ay.y*te + az.y, dz = ax.z*ta + ay.z*te + az.z;
+    const dl = Math.hypot(dx, dy, dz); dx /= dl; dy /= dl; dz /= dl;
+    const b = dx*c.x + dy*c.y + dz*c.z, disc = b*b - cc;
+    if (disc < 0 || b < 0) { d[o + 3] = 0; continue; }
+    const t = b - Math.sqrt(disc);
+    const nx = (dx*t - c.x)/B.r, ny = (dy*t - c.y)/B.r, nz = (dz*t - c.z)/B.r;
+    if (kind === 'moon') {
+      const mu = Math.max(0.12, -(nx*dx + ny*dy + nz*dz));   // grazing views stretch each pixel over more ground
+      const v = moonShade(nx, ny, nz, octs, ir, t*2*fov/F.R/mu); d[o] = v; d[o + 1] = v; d[o + 2] = v*1.02;
+    }
+    else { const mu = -(nx*dx + ny*dy + nz*dz), [r, gg, bb] = earthShade(nx, ny, nz, mu, ir); d[o] = r; d[o + 1] = gg; d[o + 2] = bb; }
+    d[o + 3] = 255;
+  }
+  g.putImageData(img, 0, 0);
+  return C.cv;
+}
+// kind 'moon' | 'earth'; vq: the scope's world-to-view rotation; ir: thermal view
+function bodyImage(kind, vq, ir) {
+  const C = bodyCache[kind], S = 200;
+  const key = [vq.x, vq.y, vq.z, vq.w].map(v => v.toFixed(3)).join() + (ir ? 'i' : 'v') + (kind === 'moon' ? Math.round(simT/60) : '');
+  if (C.cv && C.key === key) return C.cv;
+  if (!C.cv) { C.cv = document.createElement('canvas'); C.cv.width = C.cv.height = S; }
+  C.key = key;
+  const g = C.cv.getContext('2d'), img = g.createImageData(S, S), d = img.data;
+  const inv = vq.clone().invert();
+  // View-frame axes in world: e.g. the world direction of view +X
+  const ax = new THREE.Vector3(1, 0, 0).applyQuaternion(inv), ay = new THREE.Vector3(0, 1, 0).applyQuaternion(inv),
+        az = new THREE.Vector3(0, 0, 1).applyQuaternion(inv);
+  const n = new THREE.Vector3(), octs = craterOctaves(2*R_MOON/S);
+  if (kind === 'moon') moonFrameAxes();
+  for (let j = 0; j < S; j++) for (let i = 0; i < S; i++) {
+    const x = (i + 0.5)/S*2 - 1, y = 1 - (j + 0.5)/S*2, r2 = x*x + y*y, o = 4*(j*S + i);
+    if (r2 > 1) { d[o + 3] = 0; continue; }
+    const z = Math.sqrt(1 - r2);
+    n.set(0, 0, 0).addScaledVector(ax, x).addScaledVector(ay, y).addScaledVector(az, z);   // surface normal, world
+    let R, G, B;
+    if (kind === 'moon') { R = G = moonShade(n.x, n.y, n.z, octs, ir); B = R*1.02; }
+    else [R, G, B] = earthShade(n.x, n.y, n.z, z, ir);
+    d[o] = R; d[o + 1] = G; d[o + 2] = B; d[o + 3] = 255*clamp((1 - Math.sqrt(r2))*S/2, 0, 1);   // soft edge
+  }
+  g.putImageData(img, 0, 0);
+  return C.cv;
+}
+
+/* ---------- Telescope silhouettes ----------
+   Flat 2D outlines, no surface detail. u runs along the object's long axis (+u forward), w across it; both in units
+   of the object's length. Shapes: ['p', [[u, w], ...]] polygon, ['c', u, w, r] circle (spheres need no turning). */
+const SIL = {
+  warship: [['p', [[0.5, 0], [0.34, 0.07], [0.12, 0.08], [0.12, 0.24], [-0.06, 0.24], [-0.06, 0.08], [-0.34, 0.08], [-0.4, 0.12],
+                   [-0.5, 0.12], [-0.5, -0.12], [-0.4, -0.12], [-0.34, -0.08], [-0.06, -0.08], [-0.06, -0.24], [0.12, -0.24],
+                   [0.12, -0.08], [0.34, -0.07]]]],
+  station: [['p', [[0.5, 0.03], [-0.5, 0.03], [-0.5, -0.03], [0.5, -0.03]]], ['p', [[0.03, 0.5], [-0.03, 0.5], [-0.03, -0.5], [0.03, -0.5]]],
+            ['c', 0.3, 0, 0.11], ['c', -0.3, 0, 0.11], ['c', 0, 0.3, 0.11], ['c', 0, -0.3, 0.11], ['c', 0, 0, 0.09],
+            ['p', [[0.42, 0.05], [0.42, 0.32], [0.36, 0.32], [0.36, 0.05]]], ['p', [[-0.42, -0.05], [-0.42, -0.32], [-0.36, -0.32], [-0.36, -0.05]]]],
+  hauler:  [['p', [[0.5, 0.05], [0.42, 0.09], [0.42, 0.16], [-0.3, 0.16], [-0.3, 0.06], [-0.38, 0.06], [-0.44, 0.1], [-0.5, 0.1],
+                   [-0.5, -0.1], [-0.44, -0.1], [-0.38, -0.06], [-0.3, -0.06], [-0.3, -0.16], [0.42, -0.16], [0.42, -0.09], [0.5, -0.05]]]],
+  tanker:  [['p', [[0.5, 0.02], [0.4, 0.15], [-0.32, 0.15], [-0.32, -0.15], [0.4, -0.15], [0.5, -0.02]]],
+            ['p', [[-0.32, 0.05], [-0.42, 0.05], [-0.5, 0.11], [-0.5, -0.11], [-0.42, -0.05], [-0.32, -0.05]]]],
+  tug:     [['p', [[0.5, 0.18], [0.5, 0.26], [0.2, 0.26], [0.2, 0.2], [0.1, 0.2], [0.1, -0.2], [0.2, -0.2], [0.2, -0.26], [0.5, -0.26],
+                   [0.5, -0.18], [0.28, -0.18], [0.28, 0.18]]],
+            ['p', [[0.1, 0.16], [-0.25, 0.16], [-0.25, -0.16], [0.1, -0.16]]],
+            ['p', [[-0.25, 0.08], [-0.34, 0.08], [-0.5, 0.2], [-0.5, -0.2], [-0.34, -0.08], [-0.25, -0.08]]]],
+  satellite: [['p', [[0.1, 0.1], [-0.1, 0.1], [-0.1, -0.1], [0.1, -0.1]]],
+              ['p', [[0.06, 0.13], [0.06, 0.5], [-0.06, 0.5], [-0.06, 0.13]]], ['p', [[0.06, -0.13], [0.06, -0.5], [-0.06, -0.5], [-0.06, -0.13]]],
+              ['p', [[0.1, 0.01], [0.24, 0.01], [0.24, -0.01], [0.1, -0.01]]], ['c', 0.27, 0, 0.05]],
+  debris:  [['p', [[0.5, 0.05], [0.25, 0.3], [0.05, 0.22], [-0.15, 0.42], [-0.4, 0.18], [-0.5, -0.1], [-0.2, -0.32], [0.1, -0.2], [0.3, -0.38]]]],
+  ordnance: [['p', [[0.5, 0], [0.38, 0.06], [-0.36, 0.06], [-0.5, 0.16], [-0.5, -0.16], [-0.36, -0.06], [0.38, -0.06]]]],
+};
+function silClass(t) {
+  const n = t.name;
+  if (/DEPOT|STATION/.test(n)) return 'station';
+  if (/HAULER/.test(n)) return 'hauler';
+  if (/TANKER/.test(n)) return 'tanker';
+  if (/TUG/.test(n)) return 'tug';
+  if (/SAT|SURVEY/.test(n)) return 'satellite';
+  if (/DEBRIS|FRAGMENT/.test(n)) return 'debris';
+  return 'warship';
+}
 const SCOPE_AZ_MAX = 60 * Math.PI/180, SCOPE_EL_MAX = 45 * Math.PI/180, SCOPE_SLEW = 25 * Math.PI/180;
 // Scope view rotation: the gimbal turns the boresight, so the view is taken in the gimbal's frame
 function scopeGimbalQ() {
@@ -3089,7 +3500,8 @@ function irLevel(t) {
   return n.includes('TUG') ? 0.85 : n.includes('DERELICT') ? 0.35 : n.includes('DEBRIS') ? 0.2 : 0.4;
 }
 function drawScope(g, W, H, idx) {
-  mfdHeader(g, W, `SCOPE  ${irOn ? 'IR' : 'VIS'}`, idx);
+  const SCOPE_FOV = SCOPE_FOV0/SCOPE_ZOOMS[scopeZoom];
+  mfdHeader(g, W, `SCOPE  ${irOn ? 'IR' : 'VIS'}  x${SCOPE_ZOOMS[scopeZoom]}`, idx);
   // Frame and view area, following the reference layout: status text above, labels at the sides, softkeys below
   const FX = 60, FY = 108, FW = 640, FH = 292, cx = FX + FW/2, cy = FY + FH/2, R = 150;
   const bq = scopeViewQ();
@@ -3101,19 +3513,8 @@ function drawScope(g, W, H, idx) {
     if (Math.hypot(az, el) > SCOPE_FOV) return null;
     return { x: cx + az/SCOPE_FOV*R, y: cy - el/SCOPE_FOV*R };
   };
-  const blob = (v, radius, dist, heat) => {
-    const p = proj(v); if (!p) return;
-    const sr = Math.max(3, (radius/dist)/SCOPE_FOV*R);
-    if (irOn) {
-      const gr = g.createRadialGradient(p.x, p.y, 0, p.x, p.y, sr*2.2);
-      gr.addColorStop(0, `rgba(255,255,255,${0.5 + heat*0.5})`);
-      gr.addColorStop(0.5, `rgba(230,230,230,${heat*0.6})`);
-      gr.addColorStop(1, 'rgba(0,0,0,0)');
-      g.fillStyle = gr; g.beginPath(); g.arc(p.x, p.y, sr*2.2, 0, Math.PI*2); g.fill();
-    } else {
-      g.fillStyle = '#b8c4cc'; g.beginPath(); g.arc(p.x, p.y, sr, 0, Math.PI*2); g.fill();
-    }
-  };
+  // The same mapping without the field-of-view limit, for streaks whose ends lie outside the frame (it is clipped)
+  const projU = v => v.z >= 0 ? null : { x: cx + Math.atan2(v.x, -v.z)/SCOPE_FOV*R, y: cy - Math.atan2(v.y, -v.z)/SCOPE_FOV*R };
   // View area
   g.save();
   g.beginPath(); g.rect(FX, FY, FW, FH); g.clip();
@@ -3130,22 +3531,89 @@ function drawScope(g, W, H, idx) {
       if (p) { g.fillStyle = `rgba(220,235,255,${s.b})`; g.fillRect(p.x, p.y, 1.5, 1.5); }
     }
   }
+  // Earth and the Moon as shaded discs, the farther one first. The angle mapping is extended past the field of
+  // view so a disc whose centre is outside the frame still shows its limb.
   const mp = moonPos(simT);
-  const vM = new THREE.Vector3(mp[0]-ship.x, mp[1]-ship.y, mp[2]-ship.z);
-  blob(vM.clone().applyQuaternion(bq), 1.737e6, vM.length(), 0.2);
+  const bodies = [{ kind: 'moon', v: new THREE.Vector3(mp[0]-ship.x, mp[1]-ship.y, mp[2]-ship.z), r: R_MOON },
+                  { kind: 'earth', v: new THREE.Vector3(-ship.x, -ship.y, -ship.z), r: R_E }].sort((a, b) => b.v.length() - a.v.length());
+  for (const B of bodies) {
+    const d = B.v.length(), ar = Math.asin(Math.min(1, B.r/d)), vv = B.v.clone().applyQuaternion(bq).normalize();
+    const off = Math.acos(clamp(-vv.z, -1, 1));
+    if (off > ar + SCOPE_FOV*1.5) continue;          // nowhere near the frame
+    const az = Math.atan2(vv.x, -vv.z), el = Math.atan2(vv.y, -vv.z);   // the same mapping as proj()
+    const px = cx + az/SCOPE_FOV*R, py = cy - el/SCOPE_FOV*R, pr = ar/SCOPE_FOV*R;
+    if (pr < 1.5) { g.fillStyle = irOn ? '#ddd' : (B.kind === 'moon' ? '#c9c9c9' : '#7fa8e0'); g.fillRect(px - 1, py - 1, 2, 2); continue; }
+    if (pr > 140) g.drawImage(bodyFrame(B.kind, B, bq, SCOPE_FOV, { FX, FY, FW, FH, cx, cy, R }, irOn), FX, FY, FW, FH);
+    else g.drawImage(bodyImage(B.kind, bq, irOn), px - pr, py - pr, 2*pr, 2*pr);
+  }
+  // Ships and objects: flat silhouettes along their direction of travel (relative to the body they orbit),
+  // scaled to the range; a point of light when smaller than a few pixels. Hidden behind Earth or the Moon.
+  const pxPerM = d => (1/d)/SCOPE_FOV*R;
+  const silhouette = (rel, axisW, len, shapes, fill, heat) => {
+    const v = rel.clone().applyQuaternion(bq), p = proj(v); if (!p) return;
+    const d = rel.length(), k = pxPerM(d)*len;
+    if (k < 5) {                                     // unresolved: a dot (or a bloom in IR)
+      if (irOn) {
+        const sr = Math.max(2.5, k), gr = g.createRadialGradient(p.x, p.y, 0, p.x, p.y, sr*2.2);
+        gr.addColorStop(0, `rgba(255,255,255,${0.5 + heat*0.5})`); gr.addColorStop(1, 'rgba(0,0,0,0)');
+        g.fillStyle = gr; g.beginPath(); g.arc(p.x, p.y, sr*2.2, 0, Math.PI*2); g.fill();
+      } else { g.fillStyle = fill; g.beginPath(); g.arc(p.x, p.y, Math.max(1.5, k/2), 0, Math.PI*2); g.fill(); }
+      return;
+    }
+    // Long axis on the screen: foreshortened along u; w is drawn full width, at right angles to it
+    const a = axisW.clone().normalize().applyQuaternion(bq);
+    let ux = a.x, uy = -a.y; const ul = Math.hypot(ux, uy);
+    if (ul < 1e-3) { ux = 1; uy = 0; } else { ux /= ul; uy /= ul; }
+    const fu = Math.max(0.4, ul), wx = -uy, wy = ux;     // never fully end-on: the outline stays readable
+    const P = (u, w) => [p.x + (u*fu*ux + w*wx)*k, p.y + (u*fu*uy + w*wy)*k];
+    if (irOn) { g.shadowColor = `rgba(255,255,255,${0.4 + 0.6*heat})`; g.shadowBlur = 6 + 10*heat; }
+    g.fillStyle = irOn ? `rgb(${(150 + 105*heat)|0},${(150 + 105*heat)|0},${(150 + 105*heat)|0})` : fill;
+    for (const sh of shapes) {
+      g.beginPath();
+      if (sh[0] === 'p') { sh[1].forEach(([u, w], i) => { const [x, y] = P(u, w); i ? g.lineTo(x, y) : g.moveTo(x, y); }); g.closePath(); }
+      else { const [x, y] = P(sh[1], sh[2]); g.arc(x, y, sh[3]*k, 0, Math.PI*2); }
+      g.fill();
+    }
+    g.shadowBlur = 0;
+    return { p, k, ux, uy, fu };
+  };
+  const mv = moonVel(simT), mpp = moonPos(simT);
+  const relVel = o => {                              // velocity relative to the body it is orbiting
+    const inMoon = Math.hypot(o.x - mpp[0], o.y - mpp[1], o.z - mpp[2]) < MOON_SOI;
+    return new THREE.Vector3(o.vx - (inMoon ? mv[0] : 0), o.vy - (inMoon ? mv[1] : 0), o.vz - (inMoon ? mv[2] : 0));
+  };
   for (const t of targets) {
-    if (t.gone) continue;
-    const vt = new THREE.Vector3(t.x-ship.x, t.y-ship.y, t.z-ship.z);
-    blob(vt.clone().applyQuaternion(bq), t.radius, vt.length(), irLevel(t));
+    if (t.gone || !losClear(ship, t) || !losClearMoon(ship, t)) continue;
+    const rel = new THREE.Vector3(t.x-ship.x, t.y-ship.y, t.z-ship.z);
+    const r = silhouette(rel, relVel(t), 2*t.radius, SIL[silClass(t)], '#b8c4cc', Math.min(1, irLevel(t) + (t.burning ? 0.5 : 0)));
+    // A burning ship shows its drive flame, opposite the thrust
+    if (r && t.burning && t.thrA) {
+      const a = new THREE.Vector3(...t.thrA).normalize().applyQuaternion(bq);
+      const fx = -a.x, fy = a.y, fl = Math.hypot(fx, fy) || 1, L = Math.max(8, r.k*0.8)*(0.8 + 0.4*Math.random());
+      g.strokeStyle = irOn ? 'rgba(255,255,255,0.95)' : 'rgba(170,210,255,0.9)'; g.lineWidth = Math.max(1.5, r.k*0.06);
+      g.beginPath(); g.moveTo(r.p.x + fx/fl*r.k*0.5*Math.min(1, fl), r.p.y + fy/fl*r.k*0.5*Math.min(1, fl));
+      g.lineTo(r.p.x + fx/fl*(r.k*0.5*Math.min(1, fl) + L), r.p.y + fy/fl*(r.k*0.5*Math.min(1, fl) + L)); g.stroke();
+    }
+  }
+  // Ordnance and torpedoes: slender silhouettes along their thrust, or along their motion past the ship
+  const ordAxis = o => o.cmd && Math.hypot(...o.cmd) > 1 ? new THREE.Vector3(...o.cmd) : new THREE.Vector3(o.vx-ship.vx, o.vy-ship.vy, o.vz-ship.vz);
+  for (const o of ordnance) silhouette(new THREE.Vector3(o.x-ship.x, o.y-ship.y, o.z-ship.z), ordAxis(o), o.kind === 'torpedo' ? 5 : 3, SIL.ordnance, ORD[o.kind].color, 0.9);
+  for (const tp of torpedoes) if (!tp.dead) silhouette(new THREE.Vector3(tp.x-ship.x, tp.y-ship.y, tp.z-ship.z), ordAxis(tp), 4, SIL.ordnance, '#ff8a4a', 0.9);
+  for (const dc of decoys) {                         // decoy clouds: a scatter of sparks
+    const p = proj(new THREE.Vector3(dc.x-ship.x, dc.y-ship.y, dc.z-ship.z).applyQuaternion(bq)); if (!p) continue;
+    const sp = Math.max(2, pxPerM(Math.hypot(dc.x-ship.x, dc.y-ship.y, dc.z-ship.z))*30);
+    g.fillStyle = irOn ? '#fff' : '#ffe0a0';
+    for (let i = 0; i < 7; i++) g.fillRect(p.x + Math.sin(i*2.4 + dc.age)*sp, p.y + Math.cos(i*3.1 + dc.age*0.7)*sp, 1.5, 1.5);
   }
   // Point-defence tracers and hostile torpedoes: a streak from the last position to the current one
   const drawTrail = (o, col, w, dotR) => {
-    const p1 = proj(new THREE.Vector3(o.x-ship.x, o.y-ship.y, o.z-ship.z).applyQuaternion(bq));
-    const p0 = proj(new THREE.Vector3(o.px-ship.x, o.py-ship.y, o.pz-ship.z).applyQuaternion(bq));
+    const p1 = projU(new THREE.Vector3(o.x-ship.x, o.y-ship.y, o.z-ship.z).applyQuaternion(bq));
+    const p0 = projU(new THREE.Vector3(o.px-ship.x, o.py-ship.y, o.pz-ship.z).applyQuaternion(bq));
     if (p0 && p1) { g.strokeStyle = col; g.lineWidth = w; g.beginPath(); g.moveTo(p0.x, p0.y); g.lineTo(p1.x, p1.y); g.stroke(); }
     if (dotR && p1) { g.fillStyle = col; g.beginPath(); g.arc(p1.x, p1.y, dotR, 0, Math.PI*2); g.fill(); }
   };
   for (const tr of tracers) drawTrail(tr, irOn ? '#ffffff' : '#ffd060', 2, 0);
+  for (const tr of eTracers) drawTrail(tr, irOn ? '#ffffff' : '#ff5a3a', 1.5, 0);
   for (const o of ordnance) drawTrail(o, irOn ? '#ffffff' : ORD[o.kind].color, 2, 2.5);
   for (const tp of torpedoes) {
     drawTrail(tp, irOn ? '#ffffff' : '#ff8a4a', 2, 3);
@@ -3296,6 +3764,7 @@ function drawMFD(m) {
       case 'SHIP': drawShip(g, W, H, m.i); break;
       case 'SCOPE': drawScope(g, W, H, m.i); break;
       case 'DAMAGE': drawDamage(g, W, H, m.i); break;
+      case 'CONTROLS': drawControls(g, W, H, m.i); break;
     }
   }
   // CRT glass: edge vignette and a soft diagonal reflection
@@ -3344,6 +3813,9 @@ function updateNavball() {
   } else {
     markerTgt.visible = false;
   }
+  const bd = planBurnDir();
+  markerBurn.visible = !!bd;
+  if (bd) placeOnBall(markerBurn, bd.applyQuaternion(orbQ.clone().invert()));
 }
 
 function animateCockpit(dt) {
@@ -3730,6 +4202,8 @@ function onAction(id) {
   switch (id) {
     case 'fireRail': railReq = true; break;
     case 'fireMissile': missileReq = true; break;
+    case 'planNode': case 'planRetro': case 'planPro': case 'planRadIn': case 'planRadOut': case 'planAnti': case 'planNrm':
+    case 'planEarlier': case 'planLater': case 'planStep': planAction(id); break;
     case 'rcsStab': rcsStab = !rcsStab; sfx.click(); break;
     case 'leadHold': leadHold = !leadHold; leadPrev = null; sfx.click();
       log(leadHold ? 'LEAD HOLD ON' : 'LEAD HOLD OFF'); break;
