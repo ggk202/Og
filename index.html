@@ -277,14 +277,17 @@ function leadBodyDir() {
 // Fire-control hold: body-axis RCS commands (-1..1) that rotate the nose onto the lead point.
 // Uses the same torque path as manual control, so it spends RCS propellant and respects the torque limit.
 const LEAD_GAIN = 0.8, LEAD_MAX_RATE = 0.25, LEAD_TAU_TIME = 0.5;   // 1/s, rad/s, s
+// Turn axis from the last well-defined direction. When the lead point is nearly behind the nose, fwd x Lb
+// is almost zero and its sign flips with any sideways wobble, which made the nose spin back and forth.
+let leadAxisPrev = new THREE.Vector3(0, 1, 0);
 function leadHoldCmd() {
   const Lb = leadBodyDir();
   if (!Lb) return null;
   const fwd = new THREE.Vector3(0, 0, -1);
   const ang = Math.acos(clamp(fwd.dot(Lb), -1, 1));
   const axis = new THREE.Vector3().crossVectors(fwd, Lb);
-  if (axis.lengthSq() < 1e-12) axis.set(0, 1, 0);          // exactly behind: any axis turns it around
-  const wdes = axis.normalize().multiplyScalar(Math.min(LEAD_MAX_RATE, ang*LEAD_GAIN));
+  if (axis.length() > 0.02) leadAxisPrev.copy(axis).normalize();   // only update where the axis is well defined
+  const wdes = leadAxisPrev.clone().multiplyScalar(Math.min(LEAD_MAX_RATE, ang*LEAD_GAIN));
   const wm = [omega.x, omega.y, omega.z], wd = [wdes.x, wdes.y, wdes.z];
   return wd.map((v, i) => clamp(SHIP.I*(v - wm[i])/LEAD_TAU_TIME/SHIP.rcsTorque, -1, 1));
 }
@@ -1901,7 +1904,7 @@ startEl.addEventListener('click', () => {
 /* ================= MAIN LOOP ================= */
 function step(dt) {
   const c = controlState();
-  if (anyFlightInput(c)) warpIdx = 0;               // no time warp while flying
+  if (anyFlightInput(c) || leadHold) warpIdx = 0;   // no time warp while flying or holding a lead
   const simTime = dt * WARPS[warpIdx];
   const n = Math.max(1, Math.ceil(simTime / PHYS_DT));
   const h = simTime / n;
