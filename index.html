@@ -748,15 +748,25 @@ cockpit.add(noseRet);
 // Switches, guarded laser arm and guarded master arm
 // Master arm cover: black and yellow hazard stripes. Its lever knob is red.
 const stripeTex = canvasTex(128, 128, (g, w, h) => {
-  g.fillStyle = '#111'; g.fillRect(0, 0, w, h);
+  g.fillStyle = '#b3141c'; g.fillRect(0, 0, w, h);
   g.save(); g.translate(w/2, h/2); g.rotate(Math.PI/4);
   for (let x = -200, i = 0; x < 200; x += 32, i++) {
-    g.fillStyle = i % 2 ? '#111' : '#e8b400'; g.fillRect(x, -200, 16, 400);
+    g.fillStyle = i % 2 ? '#b3141c' : '#f2efe6'; g.fillRect(x, -200, 16, 400);
   }
   g.restore();
 });
 const masterStripeMat = new THREE.MeshStandardMaterial({ map: stripeTex.tex, roughness: 0.5, metalness: 0.2 });
-const masterRedMat = new THREE.MeshStandardMaterial({ color: 0xc81e1e, roughness: 0.3, metalness: 0.1 });
+const masterKnobMat = new THREE.MeshStandardMaterial({ color: 0xefe6c8, roughness: 0.35, metalness: 0.05 });
+// Legend plate beside the master arm: MASTER ARM, ON, OFF, TNG, with four screws
+const legendTex = canvasTex(256, 200, (g, w, h) => {
+  g.fillStyle = '#1a1c1e'; g.fillRect(0, 0, w, h);
+  g.fillStyle = '#e6dfc4'; g.font = 'bold 24px monospace'; g.textAlign = 'left'; g.textBaseline = 'middle';
+  [['MASTER', 22, 22], ['ARM', 22, 56], ['ON', 70, 110], ['OFF', 70, 146], ['TNG', 70, 182]]
+    .forEach(([s, x, y]) => g.fillText(s, x, y));
+});
+const legend = new THREE.Mesh(new THREE.PlaneGeometry(0.13, 0.1), new THREE.MeshStandardMaterial({ map: legendTex.tex, roughness: 0.6, metalness: 0.2 }));
+legend.position.set(-0.14, -0.52, PANEL_Z + 0.003); cockpit.add(legend);
+for (const dx of [-0.058, 0.058]) for (const dy of [-0.04, 0.04]) add(boltGeo, M.metal, -0.14 + dx, -0.52 + dy, PANEL_Z + 0.006);
 const switchDefs = [
   { id:'rad',    x:-0.85,   label:'RADIATORS' },
   { id:'stab',   x:-0.5667, label:'RCS STAB' },
@@ -775,7 +785,7 @@ for (const s of switchDefs) {
   add(box(0.05, 0.035, 0.02), M.dark, s.x, SW_Y, PANEL_Z + 0.005);
   const pivot = new THREE.Group(); pivot.position.set(s.x, SW_Y, PANEL_Z + 0.01);
   const lever = new THREE.Mesh(leverGeo, M.metal); pivot.add(lever);
-  const knob = new THREE.Mesh(new THREE.SphereGeometry(0.008, 12, 8), s.id === 'master' ? masterRedMat : M.metal); knob.position.set(0, 0, 0.05); pivot.add(knob);
+  const knob = new THREE.Mesh(new THREE.SphereGeometry(s.id === 'master' ? 0.011 : 0.008, 12, 8), s.id === 'master' ? masterKnobMat : M.metal); knob.position.set(0, 0, 0.05); pivot.add(knob);
   add(box(0.07, 0.05, 0.006), M.bezel, s.x, SW_Y, PANEL_Z + 0.003);   // switch housing plate
   cockpit.add(pivot); s.pivot = pivot;
   labelMesh(s.label, 0.16, 0.022, s.x, -0.64, PANEL_Z + 0.003, '#d9d2b8');
