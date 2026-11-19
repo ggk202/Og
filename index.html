@@ -57,6 +57,9 @@ const SHIP = { dry: 6000, mainProp0: 1000, podProp0: 800, rcsProp0: 180, I: 2.2e
   rcsTorque: 25000, rcsLever: 2, rcsThrust: 250, rcsIsp: 250, mainThrust: 20000, mainIsp: 3200 };
 const WEAPON = { railMass: 5, railV: 1000, railCooldown: 3, railEnergy: 2.5e6, railHeat: 1e6, railDmgDiv: 5e4,
   laserElec: 300e3, laserDmgRate: 10, laserRange: 5000, laserTol: 2 };
+// Laser gimbal: a small independent mount slaved to the locked target, so the laser can fire while the nose
+// and railgun are aimed elsewhere. It is limited to a few degrees either side of the nose.
+const LASER_GIMBAL_MAX = 2 * Math.PI/180, LASER_SLEW = 30 * Math.PI/180;
 const POWER = { reactor: 200e3, reactorWaste: 200e3, avionics: 40e3, battCap: 5e6 };
 const THERM = { capacity: 2e5, radArea: 600, radStowedArea: 40, eps: 0.9, sigma: 5.670374e-8,
   tSpace: 3, tMax: 400, tWarn: 380, tStart: 297 };
@@ -133,6 +136,12 @@ let targets = [];
 let projectiles = [];
 let flashes = [];   // hit and kill flashes in world space, aged in physics time: {x,y,z,age,dur,peak,kind}
 let scopeShakeAz = 0, scopeShakeEl = 0;   // mild telescope shake during an explosion (rad), added to the gimbal view only
+let laserAz = 0, laserEl = 0;             // laser gimbal angles relative to the nose (rad)
+// Unit beam direction of the laser in body axes (nose is -Z)
+function laserDirBody() {
+  const ca = Math.cos(laserEl);
+  return new THREE.Vector3(Math.sin(laserAz)*ca, Math.sin(laserEl), -Math.cos(laserAz)*ca);
+}
 const msgs = [];
 let pending = [];
 const telem = { loadE: 0, qin: 0, qout: 0 };
@@ -461,11 +470,13 @@ function physicsStep(h) {
   laserFiring = c.laser && laserArmed && masterMode !== 'OFF' && battery > 0 && hullT < THERM.tMax && !brownout;
   if (laserFiring) {
     const qi = shipQ.clone().invert();
+    const ld = laserDirBody();
     let best = null, bestD = Infinity;
     for (const t of targets) {
       const b = new THREE.Vector3(t.x-ship.x, t.y-ship.y, t.z-ship.z).applyQuaternion(qi);
-      const dist = -b.z;
-      if (dist > 0 && dist < WEAPON.laserRange && Math.hypot(b.x, b.y) < t.radius + WEAPON.laserTol && dist < bestD) {
+      const dist = b.dot(ld);                                   // distance along the beam
+      const off = b.clone().addScaledVector(ld, -dist).length();  // miss distance from the beam
+      if (dist > 0 && dist < WEAPON.laserRange && off < t.radius + WEAPON.laserTol && dist < bestD) {
         best = t; bestD = dist;
       }
     }
@@ -1734,6 +1745,19 @@ function animateCockpit(dt) {
       scopeShakeAz = (Math.random()*2 - 1) * amp;
       scopeShakeEl = (Math.random()*2 - 1) * amp;
     } else { scopeShakeAz = 0; scopeShakeEl = 0; }
+  }
+  // Laser gimbal: slaved to the locked target within a few degrees of the nose, stowed when unlocked
+  {
+    const tg = targets[curTarget];
+    let azT = 0, elT = 0;
+    if (tg && !tg.gone) {
+      const vb = new THREE.Vector3(tg.x-ship.x, tg.y-ship.y, tg.z-ship.z).applyQuaternion(toBodyQ());
+      azT = Math.atan2(vb.x, -vb.z); elT = Math.atan2(vb.y, -vb.z);
+    }
+    azT = clamp(azT, -LASER_GIMBAL_MAX, LASER_GIMBAL_MAX); elT = clamp(elT, -LASER_GIMBAL_MAX, LASER_GIMBAL_MAX);
+    const rate = LASER_SLEW*sdt;
+    laserAz += clamp(azT - laserAz, -rate, rate);
+    laserEl += clamp(elT - laserEl, -rate, rate);
   }
   const k = 1 - Math.exp(-dt*18);
   const state = { rad: radDeployed, stab: rcsStab, arm: laserArmed, master: true, ...auxOn };
