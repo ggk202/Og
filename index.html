@@ -193,10 +193,22 @@ const MODULE_CATALOG = {
 // Player ordnance. Each flies with the supplied computeTorpedoGuidance (unchanged): these values are only the
 // inputs it takes (thrust limit, burn seconds) plus launch speed, lifetime, proximity fuse and warhead.
 const ORD = {
-  torpedo:     { name: 'TORPEDO',     launchV: 30, maxAccel: 60,  burn: 60, life: 400, killR: 6, dmg: 400, color: '#ff7ad9' },
-  missile:     { name: 'MISSILE',     launchV: 20, maxAccel: 120, burn: 20, life: 400, killR: 4, dmg: 120, color: '#ffe36a' },
-  interceptor: { name: 'INTERCEPTOR', launchV: 40, maxAccel: 200, burn: 8,  life: 40,  killR: 3, dmg: 0,   color: '#7fd7ff' },
+  torpedo:     { name: 'TORPEDO',     launchV: 30, maxAccel: 60,  burn: 60, killR: 6, dmg: 400, color: '#ff7ad9' },
+  missile:     { name: 'MISSILE',     launchV: 20, maxAccel: 120, burn: 20, killR: 4, dmg: 120, color: '#ffe36a' },
+  interceptor: { name: 'INTERCEPTOR', launchV: 40, maxAccel: 200, burn: 8,  killR: 3, dmg: 0,   color: '#7fd7ff' },
 };
+// Self-destruct only on a confirmed miss: the weapon is moving away from its target with no burn left to turn
+// back, continuously for MISS_CONFIRM s; or its target no longer exists (destroyed, or a decoy cloud gone).
+// Returns the reason when confirmed, else null. Also records the closest approach (o.minD).
+const MISS_CONFIRM = 5;
+function missCheck(o, tg, h) {
+  if (!tg || tg.gone || tg.dead) return 'TARGET LOST';
+  const rx = tg.x - o.x, ry = tg.y - o.y, rz = tg.z - o.z;
+  o.minD = Math.min(o.minD ?? Infinity, Math.hypot(rx, ry, rz));
+  const opening = rx*(tg.vx - o.vx) + ry*(tg.vy - o.vy) + rz*(tg.vz - o.vz) > 0;
+  o.openT = opening && (o.burn ?? 0) <= 0 ? (o.openT || 0) + h : 0;
+  return o.openT >= MISS_CONFIRM ? 'MISS CONFIRMED' : null;
+}
 let ordnance = [];
 // ECM decoy clouds: released from the ship at DECOY_V in a random direction, coasting, lasting DECOY_LIFE s
 const DECOY_V = 40, DECOY_LIFE = 40;
@@ -310,7 +322,7 @@ function pdcStatus(m) {
 }
 const PDC_RANGE = 5000, PDC_V = 1500, PDC_RATE = 8, PDC_ENERGY = 2e4, PDC_SPREAD = 0.0002, PDC_ARC = 100 * Math.PI/180;   // each mount reaches 10 deg past its horizon, so the two overlap around the hull
 // Hostile torpedoes: accelerate toward the ship for TORP_BURN seconds, then coast
-const TORP_ACCEL = 40, TORP_BURN = 30, TORP_KILL_R = 1.5, TORP_HULL_R = 20, HOSTILE_SALVO_T = 15, TORP_LIFE = 150;
+const TORP_ACCEL = 40, TORP_BURN = 30, TORP_KILL_R = 1.5, TORP_HULL_R = 20, HOSTILE_SALVO_T = 15;
 let torpedoes = [], tracers = [], hullHits = 0;
 let pdcActive = false, pdcSlewRate = 0, pdcLastFire = -1e9;   // sound state set by the physics step
 let torpWarn = false;                 // a torpedo is inbound within TORP_WARN_R
@@ -1473,10 +1485,11 @@ function physicsStep(h) {
       computeTorpedoGuidance(tp, shipStart, h, { maxAccel: TORP_ACCEL, gravFn: gravAcc, t: simT, targetAccel: shipThrustA });
     tp.cmd = [ax, ay, az];                           // kept for the thruster plume on the telescope
     rk4(tp, h, ax, ay, az); tp.age += h;
+    if (missCheck(tp, tp.seduced || ship, h)) { tp.dead = true; tp.missed = true; log(`HOSTILE TORPEDO MISSED · SELF-DESTRUCT · CLOSEST ${fmtDist(tp.minD)}`); }
   }
   for (const tr of tracers) { tr.px = tr.x; tr.py = tr.y; tr.pz = tr.z; rk4(tr, h, 0, 0, 0); tr.age += h; }
   for (const dc of decoys) { rk4(dc, h, 0, 0, 0); dc.age += h; }
-  decoys = decoys.filter(dc => dc.age < DECOY_LIFE);
+  decoys = decoys.filter(dc => { if (dc.age < DECOY_LIFE) return true; dc.gone = true; return false; });   // a gone decoy releases its torpedo
 
   /* --- projectile hits (swept test over the step) --- */
   for (const p of projectiles) {
@@ -1580,8 +1593,12 @@ function physicsStep(h) {
       }
       continue;
     }
-    if (o.age > T.life) { o.dead = true; if (o.kind !== 'interceptor') log(`${T.name} LOST · SELF-DESTRUCT`); }
-    else if (tg && (tg.gone || tg.dead) && o.kind === 'interceptor') o.dead = true;   // its torpedo is gone
+    const why = missCheck(o, tg, h);
+    if (why) {
+      o.dead = true;
+      if (o.kind !== 'interceptor' || why === 'MISS CONFIRMED')
+        log(`${T.name} ${why} · SELF-DESTRUCT${why === 'MISS CONFIRMED' ? ' · CLOSEST ' + fmtDist(o.minD) : ''}`);
+    }
   }
   for (const tp of torpedoes) if (tp.intBy && tp.intBy.dead && !tp.dead) tp.intBy = null;   // free for another try
   ordnance = ordnance.filter(o => !o.dead);
@@ -1596,7 +1613,7 @@ function physicsStep(h) {
       if (applyTorpedoHit(tp)) break;               // ship lost: state was reset
     }
   }
-  torpedoes = torpedoes.filter(tp => !tp.dead && tp.age < TORP_LIFE);
+  torpedoes = torpedoes.filter(tp => !tp.dead);
   tracers = tracers.filter(tr => !tr.dead && tr.age < 4);
 
   /* --- kills --- */
