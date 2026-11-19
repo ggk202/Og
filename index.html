@@ -638,6 +638,9 @@ function physicsStep(h) {
 
   const mass = shipMass();
   const fw = new THREE.Vector3(F[0], F[1], F[2]).applyQuaternion(shipQ);
+  // Start-of-step ship state: torpedo guidance sees this, and the swept hull test uses px/py/pz
+  const shipStart = { x: ship.x, y: ship.y, z: ship.z, vx: ship.vx, vy: ship.vy, vz: ship.vz };
+  ship.px = ship.x; ship.py = ship.y; ship.pz = ship.z;
   rk4(ship, h, fw.x/mass, fw.y/mass, fw.z/mass);
 
   /* --- other bodies and projectiles (gravity only) --- */
@@ -647,7 +650,7 @@ function physicsStep(h) {
   const shipThrustA = [fw.x/mass, fw.y/mass, fw.z/mass];
   for (const tp of torpedoes) {
     tp.px = tp.x; tp.py = tp.y; tp.pz = tp.z;
-    const [ax, ay, az] = computeTorpedoGuidance(tp, ship, h,
+    const [ax, ay, az] = computeTorpedoGuidance(tp, shipStart, h,
       { maxAccel: TORP_ACCEL, gravFn: gravAcc, t: simT, targetAccel: shipThrustA });
     tp.cmd = [ax, ay, az];                           // kept for the thruster plume on the telescope
     rk4(tp, h, ax, ay, az); tp.age += h;
@@ -714,7 +717,7 @@ function physicsStep(h) {
   /* --- torpedo impacts on the hull --- */
   for (const tp of torpedoes) {
     if (tp.dead) continue;
-    if (Math.hypot(tp.x-ship.x, tp.y-ship.y, tp.z-ship.z) < TORP_HULL_R) {
+    if (segDist(tp, ship) < TORP_HULL_R) {          // swept over the step: torpedoes move up to ~250 m per step
       tp.dead = true; hullHits++;
       flashes.push({ x: tp.x, y: tp.y, z: tp.z, age: 0, dur: 0.6, peak: 0.8, kind: 'hit' });
       log(`TORPEDO HIT  HULL ${hullHits}`); sfx.torpHit();
