@@ -1386,7 +1386,7 @@ function animateCockpit(dt) {
 
 /* ================= AUDIO (interior sounds; hull-conducted via low-pass bus) ================= */
 let actx = null, noiseBuf = null, intBus, hullBus, hullLP;
-let engineG, engineLP, rcsG, laserG, alarmG;
+let engineG, engineLP, rcsG, laserG, pumpG, alarmG;
 const sfx = {
   railShot() {
     if (!actx) return;
@@ -1457,11 +1457,23 @@ function initAudio() {
   const rcsIntF = actx.createBiquadFilter(); rcsIntF.type = 'lowpass'; rcsIntF.frequency.value = 1200; rcsIntF.Q.value = 0.7;
   const rcsIntG = actx.createGain(); rcsIntG.gain.value = 0.25;
   rcs.connect(rcsF).connect(rcsG); rcsG.connect(hullBus); rcsG.connect(rcsIntF).connect(rcsIntG).connect(intBus); rcs.start();
-  const lo = actx.createOscillator(); lo.frequency.value = 1180;
-  const lfo = actx.createOscillator(); lfo.frequency.value = 7;
-  const lfoG = actx.createGain(); lfoG.gain.value = 25; lfo.connect(lfoG).connect(lo.frequency);
-  laserG = actx.createGain(); laserG.gain.value = 0; lo.connect(laserG).connect(intBus);
-  lo.start(); lfo.start();
+  // Laser: a gas pump chugging through the structure, plus a deep sawtooth hum. Both are muffled.
+  const pumpSrc = loopNoise();
+  const pumpBP = actx.createBiquadFilter(); pumpBP.type = 'bandpass'; pumpBP.frequency.value = 220; pumpBP.Q.value = 0.9;
+  const pumpLP = actx.createBiquadFilter(); pumpLP.type = 'lowpass'; pumpLP.frequency.value = 600;
+  const pumpChug = actx.createGain(); pumpChug.gain.value = 0.5;   // stroke rhythm, modulated by the LFO below
+  const chugLFO = actx.createOscillator(); chugLFO.frequency.value = 4.2;
+  const chugAmp = actx.createGain(); chugAmp.gain.value = 0.5;
+  chugLFO.connect(chugAmp).connect(pumpChug.gain);
+  pumpG = actx.createGain(); pumpG.gain.value = 0;
+  pumpSrc.connect(pumpBP).connect(pumpLP).connect(pumpChug).connect(pumpG).connect(intBus);
+  pumpSrc.start(); chugLFO.start();
+  const humO1 = actx.createOscillator(); humO1.type = 'sawtooth'; humO1.frequency.value = 52;
+  const humO2 = actx.createOscillator(); humO2.type = 'sawtooth'; humO2.frequency.value = 52.6;
+  const humLP = actx.createBiquadFilter(); humLP.type = 'lowpass'; humLP.frequency.value = 160; humLP.Q.value = 0.7;
+  laserG = actx.createGain(); laserG.gain.value = 0;
+  humO1.connect(humLP); humO2.connect(humLP); humLP.connect(laserG).connect(intBus);
+  humO1.start(); humO2.start();
   const al = actx.createOscillator(); al.type = 'square'; al.frequency.value = 880;
   alarmG = actx.createGain(); alarmG.gain.value = 0; al.connect(alarmG).connect(intBus); al.start();
 }
@@ -1476,7 +1488,8 @@ function audioFrame() {
   engineG.gain.setTargetAtTime(0.5*thrustFrac, t, 0.05);
   engineLP.frequency.setTargetAtTime(80 + 120*thrustFrac, t, 0.1);
   rcsG.gain.setTargetAtTime(rcsOn ? 0.1 : 0, t, rcsOn ? 0.02 : 0.06);   // slower fade-out
-  laserG.gain.setTargetAtTime(laserFiring ? 0.03 : 0, t, 0.02);
+  laserG.gain.setTargetAtTime(laserFiring ? 0.05 : 0, t, 0.05);
+  pumpG.gain.setTargetAtTime(laserFiring ? 0.1 : 0, t, 0.05);
   const warn = hullT > THERM.tWarn || battery < 0.15*POWER.battCap;
   alarmG.gain.setTargetAtTime(warn && (Math.floor(t*2) % 2 === 0) ? 0.02 : 0, t, 0.01);
 }
