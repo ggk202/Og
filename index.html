@@ -468,6 +468,25 @@ const boltGeo = new THREE.SphereGeometry(0.008, 8, 6);
 for (const x of [-1.15, 1.15]) {
   for (const y of [0.57, -0.67]) add(boltGeo, M.metal, x, y, PANEL_Z + 0.003);
 }
+// Rivet rows along the top and bottom edges of the panel
+for (let x = -1.0; x <= 1.0001; x += 0.1) {
+  add(boltGeo, M.metal, x, 0.595, PANEL_Z + 0.003);
+  add(boltGeo, M.metal, x, -0.695, PANEL_Z + 0.003);
+}
+// Stencilled placards on the side walls, between the ribs
+function placard(lines, x, y, z, ry) {
+  const T = canvasTex(256, 96, (g, w, h) => {
+    g.fillStyle = '#c9b98a'; g.fillRect(0, 0, w, h);
+    g.strokeStyle = '#5a4a20'; g.lineWidth = 4; g.strokeRect(6, 6, w - 12, h - 12);
+    g.fillStyle = '#2a2010'; g.font = 'bold 22px monospace'; g.textAlign = 'center'; g.textBaseline = 'middle';
+    lines.forEach((s, i) => g.fillText(s, w/2, h*(i + 1)/(lines.length + 1)));
+  });
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(0.2, 0.075),
+    new THREE.MeshStandardMaterial({ map: T.tex, roughness: 0.6, metalness: 0.1 }));
+  m.position.set(x, y, z); m.rotation.y = ry; cockpit.add(m);
+}
+placard(['MAX ACCEL', '9 G'], -1.415, -0.35, -0.575, Math.PI/2);
+placard(['DO NOT OPEN', 'IN FLIGHT'], 1.415, -0.35, -0.575, -Math.PI/2);
 
 // Canvas texture helper
 function canvasTex(w, h, draw) {
@@ -626,6 +645,10 @@ const ball = new THREE.Mesh(new THREE.SphereGeometry(BALL_R, 48, 32),
   new THREE.MeshStandardMaterial({ map: ballTex.tex, roughness: 0.3, metalness: 0 }));
 ball.position.set(0, BALL_Y, BALL_Z);
 cockpit.add(ball);
+// Glossy glass shell over the navball, so it catches cabin light
+const ballGlass = new THREE.Mesh(new THREE.SphereGeometry(BALL_R*1.02, 48, 32),
+  new THREE.MeshPhysicalMaterial({ color: 0xffffff, roughness: 0.04, metalness: 0, transparent: true, opacity: 0.14, envMapIntensity: 1.6, depthWrite: false }));
+ballGlass.position.copy(ball.position); cockpit.add(ballGlass);
 
 // Markers live on the ball, in ball-local coordinates (+X prograde, +Y radial-up, +Z normal)
 const markerZ = new THREE.Vector3(0, 0, 1);
