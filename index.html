@@ -72,6 +72,7 @@ const TORP_ACCEL = 40, TORP_BURN = 30, TORP_KILL_R = 1.5, TORP_HULL_R = 20, HOST
 let torpedoes = [], tracers = [], hullHits = 0;
 let pdcActive = false, pdcSlewRate = 0, pdcLastFire = -1e9;   // sound state set by the physics step
 let torpWarn = false;                 // a torpedo is inbound within TORP_WARN_R
+let torpMute = false;                 // mute button: silences the warning tone (the lamp still blinks)
 const TORP_WARN_R = 10000;
 const POWER = { reactor: 200e3, reactorWaste: 200e3, avionics: 40e3, battCap: 5e6 };
 const THERM = { capacity: 2e5, radArea: 600, radStowedArea: 40, eps: 0.9, sigma: 5.670374e-8,
@@ -917,6 +918,16 @@ function bezelFrame(x, y, w, h, z) {
   add(box(t, h, d), M.metal, x + w/2 - t/2, y, z);
 }
 const clickables = [];
+// Round push button (same press travel as makeButton), used for the torpedo warning mute
+function makeRoundButton(x, y, onPress) {
+  add(new THREE.CylinderGeometry(0.0165, 0.0165, 0.006, 32).rotateX(Math.PI/2), M.dark, x, y, PANEL_Z + 0.003);
+  const pivot = new THREE.Group(); pivot.position.set(x, y, PANEL_Z + 0.008);
+  const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.013, 0.013, 0.016, 32).rotateX(Math.PI/2), M.btn);
+  cap.position.z = 0.008;
+  cap.userData = { onPress, pivot, pressT: 0 };
+  pivot.add(cap); cockpit.add(pivot); clickables.push(cap);
+  return cap;
+}
 function makeButton(x, y, label, onPress) {
   add(box(0.072, 0.046, 0.006), M.dark, x, y, PANEL_Z + 0.003);   // recessed housing
   const pivot = new THREE.Group(); pivot.position.set(x, y, PANEL_Z + 0.008);
@@ -1129,6 +1140,15 @@ makeButton(0.50, -0.43, 'LEAD', () => onAction('leadHold'));
 const leadLampMat = new THREE.MeshStandardMaterial({ color: '#2a1600', emissive: '#ffb000', emissiveIntensity: 0, roughness: 0.4 });
 add(new THREE.SphereGeometry(0.008, 16, 12), leadLampMat, 0.50, -0.39, PANEL_Z + 0.012);
 makeButton(-0.26, -0.43, 'TEST', () => { lampTestT = 3; sfx.click(); });
+// Torpedo warning: a blinking red lamp with a round mute button underneath
+const torpLampMat = new THREE.MeshStandardMaterial({ color: '#3a0000', emissive: '#ff2a2a', emissiveIntensity: 0, roughness: 0.4 });
+add(new THREE.SphereGeometry(0.016, 16, 12), torpLampMat, 0.66, -0.30, PANEL_Z + 0.012);
+labelMesh('TORP', 0.2, 0.03, 0.66, -0.255, PANEL_Z + 0.003, '#d9d2b8');
+makeRoundButton(0.66, -0.36, () => {
+  torpMute = !torpMute; sfx.click();
+  log(torpMute ? 'TORP WARN MUTED' : 'TORP WARN UNMUTED');
+});
+labelMesh('MUTE', 0.2, 0.03, 0.66, -0.405, PANEL_Z + 0.003, '#d9d2b8');
 makeButton(0.26, -0.43, 'RESET', () => {
   mfds.forEach((m, i) => { m.page = mfdDefs[i].page; m.on = true; drawMFD(m); });
   sfx.click();
@@ -1828,6 +1848,9 @@ function updateDisplays() {
   };
   for (const d of lampDefs) d.mat.emissiveIntensity = (lampOn[d.id] || lampTestT > 0) ? 2.5 : 0;
   leadLampMat.emissiveIntensity = (leadHold || lampTestT > 0) ? 2.5 : 0;
+  // Torpedo lamp blinks at 2 Hz while a torpedo is inbound
+  const torpBlink = Math.floor(performance.now()/250) % 2 === 0;
+  torpLampMat.emissiveIntensity = ((torpWarn && torpBlink) || lampTestT > 0) ? 2.5 : 0;
   for (const m of mfds) drawMFD(m);
 }
 
@@ -2121,7 +2144,7 @@ function audioFrame() {
   pdcChatG.gain.setTargetAtTime(pdcFiring ? 0.08 : 0, t, pdcFiring ? 0.02 : 0.08);
   // Torpedo warning: a fast two-pitch pulse while a torpedo is inbound within the warning range
   torpWarnO.frequency.setTargetAtTime(Math.floor(t*4) % 2 ? 1300 : 1000, t, 0.005);
-  torpWarnG.gain.setTargetAtTime(torpWarn && Math.floor(t*8) % 2 === 0 ? 0.06 : 0, t, 0.005);
+  torpWarnG.gain.setTargetAtTime(torpWarn && !torpMute && Math.floor(t*8) % 2 === 0 ? 0.06 : 0, t, 0.005);
 }
 
 /* ================= CONTROLS, MENU, POINTER ================= */
