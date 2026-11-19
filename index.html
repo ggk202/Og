@@ -232,7 +232,7 @@ function fireRail() {
     const P = propagateTo({ x: ship.x+fwd.x*4, y: ship.y+fwd.y*4, z: ship.z+fwd.z*4,
       vx: ship.vx+fwd.x*V, vy: ship.vy+fwd.y*V, vz: ship.vz+fwd.z*V }, tt);
     const T = propagateTo(targets[curTarget], tt);
-    log(`SOLUTION  NOSE OFF ${off.toFixed(3)} DEG  PREDICTED MISS ${Math.hypot(T.x-P.x, T.y-P.y, T.z-P.z).toFixed(1)} M  TOF ${tt.toFixed(1)} S`);
+    log(`SOLN OFF ${off.toFixed(3)}°  PRED MISS ${Math.hypot(T.x-P.x, T.y-P.y, T.z-P.z).toFixed(1)} M`);
   }
   projectiles.push({ x: ship.x+fwd.x*4, y: ship.y+fwd.y*4, z: ship.z+fwd.z*4,
     vx: ship.vx+fwd.x*V, vy: ship.vy+fwd.y*V, vz: ship.vz+fwd.z*V,
@@ -413,11 +413,8 @@ function physicsStep(h) {
     const dm = SHIP.mainThrust/(SHIP.mainIsp*G0)*h;
     if (podProp > 0) podProp = Math.max(0, podProp - dm); else mainProp = Math.max(0, mainProp - dm);
   }
-  const mass = shipMass();
-  const fw = new THREE.Vector3(F[0], F[1], F[2]).applyQuaternion(shipQ);
-  rk4(ship, h, fw.x/mass, fw.y/mass, fw.z/mass);
-
-  /* --- railgun --- */
+  /* --- railgun: fires from the state at the start of this step, the same time the target and projectile
+     integrate from, so the fire-control solution and the flight agree --- */
   railCD = Math.max(0, railCD - h);
   if (railReq) {
     railReq = false;
@@ -425,6 +422,9 @@ function physicsStep(h) {
     else if (railCD > 0) log(`RAIL CYCLING ${railCD.toFixed(1)} s`);
     else log('RAIL CAPACITOR LOW');
   }
+  const mass = shipMass();
+  const fw = new THREE.Vector3(F[0], F[1], F[2]).applyQuaternion(shipQ);
+  rk4(ship, h, fw.x/mass, fw.y/mass, fw.z/mass);
 
   /* --- other bodies and projectiles (gravity only) --- */
   for (const t of targets) { t.px = t.x; t.py = t.y; t.pz = t.z; rk4(t, h, 0, 0, 0); }
