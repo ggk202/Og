@@ -91,6 +91,7 @@ const ACTIONS = [
   { id:'toggleRad',  label:'Radiators deploy / stow',  def:'KeyN', edge:true },
   { id:'cycleTarget',label:'Cycle target',             def:'KeyT', edge:true },
   { id:'cycleRange', label:'Tactical range scale',     def:'KeyM', edge:true },
+  { id:'guardMaster', label:'Master arm cover (toggle)', def:'KeyK', edge:true },
   { id:'masterArm',  label:'Master arm (toggle)',      def:'KeyH', edge:true },
   { id:'jettison',   label:'Jettison fuel pods',       def:'KeyJ', edge:true },
   { id:'warpUp',     label:'Time warp up',             def:'Period', edge:true },
@@ -114,7 +115,7 @@ let ship = { ...SHIP_START };
 const shipQ = SHIP_Q0.clone();
 const omega = new THREE.Vector3();
 let mainProp = SHIP.mainProp0, rcsProp = SHIP.rcsProp0;
-let podProp = SHIP.podProp0, podsOn = true, masterArm = false;   // fuel pods (feed the main drive first)
+let podProp = SHIP.podProp0, podsOn = true, masterArm = false, masterGuardOpen = false;   // fuel pods (feed the main drive first)
 function shipMass() { return SHIP.dry + mainProp + podProp + rcsProp; }
 let battery = POWER.battCap, hullT = THERM.tStart;
 let radDeployed = true, rcsStab = true, laserArmed = false, guardOpen = false, brownout = false;
@@ -744,12 +745,23 @@ const noseRet = ringMarker(0xffffff, 0.009, 0.0115);
 noseRet.position.set(0, BALL_Y, BALL_Z + BALL_R*1.01);
 cockpit.add(noseRet);
 
-// Switches and guarded laser arm
+// Switches, guarded laser arm and guarded master arm
+// Master arm cover: black and yellow hazard stripes. Its lever knob is red.
+const stripeTex = canvasTex(128, 128, (g, w, h) => {
+  g.fillStyle = '#111'; g.fillRect(0, 0, w, h);
+  g.save(); g.translate(w/2, h/2); g.rotate(Math.PI/4);
+  for (let x = -200, i = 0; x < 200; x += 32, i++) {
+    g.fillStyle = i % 2 ? '#111' : '#e8b400'; g.fillRect(x, -200, 16, 400);
+  }
+  g.restore();
+});
+const masterStripeMat = new THREE.MeshStandardMaterial({ map: stripeTex.tex, roughness: 0.5, metalness: 0.2 });
+const masterRedMat = new THREE.MeshStandardMaterial({ color: 0xc81e1e, roughness: 0.3, metalness: 0.1 });
 const switchDefs = [
   { id:'rad',    x:-0.85,   label:'RADIATORS' },
   { id:'stab',   x:-0.5667, label:'RCS STAB' },
   { id:'arm',    x:-0.2833, label:'LASER ARM', guard: true },
-  { id:'master', x: 0,      label:'MASTER ARM' },
+  { id:'master', x: 0,      label:'MASTER ARM', guard: true },
   { id:'aux1',   x: 0.2833, label:'AUX PWR' },
   { id:'aux2',   x: 0.5667, label:'COMMS' },
   { id:'aux3',   x: 0.85,   label:'BEACON' },
@@ -763,13 +775,13 @@ for (const s of switchDefs) {
   add(box(0.05, 0.035, 0.02), M.dark, s.x, SW_Y, PANEL_Z + 0.005);
   const pivot = new THREE.Group(); pivot.position.set(s.x, SW_Y, PANEL_Z + 0.01);
   const lever = new THREE.Mesh(leverGeo, M.metal); pivot.add(lever);
-  const knob = new THREE.Mesh(new THREE.SphereGeometry(0.008, 12, 8), M.metal); knob.position.set(0, 0, 0.05); pivot.add(knob);
+  const knob = new THREE.Mesh(new THREE.SphereGeometry(0.008, 12, 8), s.id === 'master' ? masterRedMat : M.metal); knob.position.set(0, 0, 0.05); pivot.add(knob);
   add(box(0.07, 0.05, 0.006), M.bezel, s.x, SW_Y, PANEL_Z + 0.003);   // switch housing plate
   cockpit.add(pivot); s.pivot = pivot;
   labelMesh(s.label, 0.16, 0.022, s.x, -0.64, PANEL_Z + 0.003, '#d9d2b8');
   if (s.guard) {
     const hinge = new THREE.Group(); hinge.position.set(s.x, -0.555, PANEL_Z + 0.075);
-    const plate = new THREE.Mesh(box(0.07, 0.07, 0.012), M.metal); plate.position.set(0, 0.035, 0);
+    const plate = new THREE.Mesh(box(0.07, 0.07, 0.012), s.id === 'master' ? masterStripeMat : M.metal); plate.position.set(0, 0.035, 0);
     hinge.add(plate); cockpit.add(hinge); s.guardPivot = hinge;
   }
 }
@@ -1315,7 +1327,8 @@ function animateCockpit(dt) {
       s.pivot.rotation.x += (target - s.pivot.rotation.x) * k;
     }
     if (s.guardPivot) {
-      const target = guardOpen ? 1.9 : 0;
+      const open = s.id === 'master' ? masterGuardOpen : guardOpen;
+      const target = open ? 1.9 : 0;
       s.guardPivot.rotation.x += (target - s.guardPivot.rotation.x) * k;
     }
   }
@@ -1487,7 +1500,11 @@ function onEdge(code) {
         log(radDeployed ? 'RADIATORS DEPLOYED' : 'RADIATORS STOWED'); break;
       case 'cycleTarget': if (targets.length) curTarget = (curTarget+1) % targets.length; break;
       case 'cycleRange': rangeIdx = (rangeIdx+1) % RANGES.length; break;
-      case 'masterArm': masterArm = !masterArm; sfx.click(); log(masterArm ? 'MASTER ARM ON' : 'MASTER ARM SAFE'); break;
+      case 'guardMaster': masterGuardOpen = !masterGuardOpen; sfx.click(); break;
+      case 'masterArm':
+        if (masterGuardOpen) { masterArm = !masterArm; sfx.click(); log(masterArm ? 'MASTER ARM ON' : 'MASTER ARM SAFE'); }
+        else log('MASTER ARM COVER CLOSED');
+        break;
       case 'jettison': jettisonPods(); break;
       case 'warpUp': warpIdx = Math.min(warpIdx+1, WARPS.length-1); break;
       case 'warpDown': warpIdx = Math.max(warpIdx-1, 0); break;
