@@ -279,29 +279,43 @@ function leadBodyDir() {
 // Fire-control hold: body-axis RCS commands (-1..1) that rotate the nose onto the lead point.
 // Uses the same torque path as manual control, so it spends RCS propellant and respects the torque limit.
 // Damping ratio of the hold is 1/(2*sqrt(LEAD_GAIN*LEAD_TAU_TIME)): about 1.1 here, so it settles without overshoot.
-const LEAD_GAIN = 0.4, LEAD_MAX_RATE = 0.25, LEAD_TAU_TIME = 0.5;   // 1/s, rad/s, s
-const LEAD_DEADBAND_MAX = 0.2 * Math.PI/180;                       // widest deadband, used only for distant targets
+const LEAD_GAIN = 0.4, LEAD_MAX_RATE = 0.5, LEAD_TAU_TIME = 0.5;   // 1/s (error correction), rad/s (cap), s
+// Previous lead point, used to find how fast the lead direction turns (the feed-forward term)
+let leadPrev = null;
 // Turn axis from the last well-defined direction. When the lead point is nearly behind the nose, fwd x Lb
 // is almost zero and its sign flips with any sideways wobble, which made the nose spin back and forth.
 let leadAxisPrev = new THREE.Vector3(0, 1, 0);
-function leadHoldCmd() {
-  const Lb = leadBodyDir();
-  if (!Lb) return null;
+// Commanded body rate = feed-forward (how fast the lead direction turns, so the nose keeps up with a moving
+// target) + proportional correction of the angle error. There is no deadband: a deadband switches the RCS
+// on and off at its edge, which is itself a source of sway.
+function leadHoldCmd(h) {
+  const L = leadVector();
+  const tgt = targets[curTarget];
+  if (!L || !tgt) { leadPrev = null; return null; }
+  const Lb = L.clone().applyQuaternion(toBodyQ()).normalize();
   const fwd = new THREE.Vector3(0, 0, -1);
   const ang = Math.acos(clamp(fwd.dot(Lb), -1, 1));
   const axis = new THREE.Vector3().crossVectors(fwd, Lb);
   if (axis.length() > 0.02) leadAxisPrev.copy(axis).normalize();   // only update where the axis is well defined
-  // Deadband: half the target's radius seen as an angle, so the hold stops where a shot would still hit.
-  // The 0.2 deg cap alone is far wider than a 0.5-3 m target at 2-10 km.
-  const tgt = targets[curTarget];
-  const range = Math.hypot(tgt.x-ship.x, tgt.y-ship.y, tgt.z-ship.z);
-  const deadband = Math.min(LEAD_DEADBAND_MAX, 0.5*tgt.radius/range);
-  const err = Math.max(0, ang - deadband);
-  const wdes = leadAxisPrev.clone().multiplyScalar(Math.min(LEAD_MAX_RATE, err*LEAD_GAIN));
-  const wm = [omega.x, omega.y, omega.z], wd = [wdes.x, wdes.y, wdes.z];
-  // Inside the deadband and nearly still: stop firing RCS
-  if (err === 0 && omega.length() < 0.002) return [0, 0, 0];
-  return wd.map((v, i) => clamp(SHIP.I*(v - wm[i])/LEAD_TAU_TIME/SHIP.rcsTorque, -1, 1));
+  const corr = leadAxisPrev.clone().multiplyScalar(ang*LEAD_GAIN);
+  // Feed-forward: angular rate of the line of sight, r x dr/dt / |r|^2, in world axes, then into body axes.
+  // Skipped on the first step after a target change, when the lead point jumps.
+  // Acceleration feed-forward: the rate at which the line of sight turns is itself changing, so the torque
+  // also needs its time derivative. Without it the nose lags a few hundredths of a degree on a curving target.
+  let wLos = null, dwLos = new THREE.Vector3();
+  if (leadPrev && leadPrev.tgt === tgt && h > 0) {
+    const dL = L.clone().sub(leadPrev.L).divideScalar(h);
+    wLos = new THREE.Vector3().crossVectors(L, dL).divideScalar(L.lengthSq());
+    if (leadPrev.wLos) dwLos = wLos.clone().sub(leadPrev.wLos).divideScalar(h);
+  }
+  leadPrev = { tgt, L: L.clone(), wLos: wLos ? wLos.clone() : null };
+  const qb = toBodyQ();
+  const ff = (wLos || new THREE.Vector3()).clone().applyQuaternion(qb);
+  const dff = dwLos.applyQuaternion(qb);
+  const wdes = ff.add(corr);
+  if (wdes.length() > LEAD_MAX_RATE) wdes.setLength(LEAD_MAX_RATE);
+  const wm = [omega.x, omega.y, omega.z], wd = [wdes.x, wdes.y, wdes.z], dd = [dff.x, dff.y, dff.z];
+  return wd.map((v, i) => clamp(SHIP.I*((v - wm[i])/LEAD_TAU_TIME + dd[i])/SHIP.rcsTorque, -1, 1));
 }
 
 function physicsStep(h) {
@@ -311,7 +325,7 @@ function physicsStep(h) {
   const cmd = [c.pitch, c.yaw, c.roll];
   if (leadHold) {
     // Manual input on an axis overrides the hold on that axis
-    const hc = leadHoldCmd();
+    const hc = leadHoldCmd(h);
     if (hc) for (let i = 0; i < 3; i++) if (cmd[i] === 0) cmd[i] = hc[i];
   }
   const w = [omega.x, omega.y, omega.z];
@@ -1865,7 +1879,7 @@ function onAction(id) {
   switch (id) {
     case 'fireRail': railReq = true; break;
     case 'rcsStab': rcsStab = !rcsStab; sfx.click(); break;
-    case 'leadHold': leadHold = !leadHold; sfx.click();
+    case 'leadHold': leadHold = !leadHold; leadPrev = null; sfx.click();
       log(leadHold ? 'LEAD HOLD ON' : 'LEAD HOLD OFF'); break;
     case 'guardLaser': guardOpen = !guardOpen; sfx.click(); break;
     case 'armLaser':
