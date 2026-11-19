@@ -94,7 +94,8 @@ const DMG_SYSTEMS = [
   { id: 'rcs',        name: 'RCS',         dir: [0, 0, 0] },
 ];
 let damage = {}, hullInt = 1, hitShakeUntil = 0;
-function resetDamage() { damage = Object.fromEntries(DMG_SYSTEMS.map(s => [s.id, 1])); hullInt = 1; }
+let hullImpacts = [];   // where torpedoes struck, for the ship view: body direction (y, z) and time
+function resetDamage() { damage = Object.fromEntries(DMG_SYSTEMS.map(s => [s.id, 1])); hullInt = 1; hullImpacts = []; }
 resetDamage();
 const dmgState = v => v >= 0.999 ? 'OK' : v > 0 ? 'DEGR' : 'OFF';
 const anyDamage = () => hullInt < 1 || DMG_SYSTEMS.some(s => damage[s.id] < 1);
@@ -111,6 +112,7 @@ function applyTorpedoHit(tp) {
   // Side the torpedo came from, in body axes, from the start-of-step positions
   const from = new THREE.Vector3(tp.px - ship.px, tp.py - ship.py, tp.pz - ship.pz).applyQuaternion(toBodyQ());
   if (from.lengthSq() > 0) from.normalize();
+  hullImpacts.push({ y: from.y, z: from.z, t: simT });
   const w = DMG_SYSTEMS.map(s => {
     const d = new THREE.Vector3(...s.dir), L = d.length();
     const c = L > 0 ? Math.max(0, from.dot(d)/L) : 0.3;
@@ -1667,7 +1669,10 @@ function drawComms(g, W, H, idx) {
 // Ship coordinates: u = lateral (screen up is +u), v = longitudinal (aft at screen right).
 // Mapping to screen: x = cx + v, y = cy - u.
 function drawShip(g, W, H, idx) {
-  mfdHeader(g, W, `SHIP  ${radDeployed ? 'RAD DEPLOYED' : 'RAD STOWED'}  HULL ${hullT.toFixed(0)} K${podsOn ? '  PODS ' + Math.round(podProp) + ' KG' : ''}`, idx);
+  mfdHeader(g, W, `SHIP  HULL ${(hullInt*100).toFixed(0)}%  ${hullT.toFixed(0)} K${podsOn ? '  PODS ' + Math.round(podProp) + ' KG' : ''}`, idx);
+  if (hullInt < 1) {   // header tint: amber when damaged, red at 25% or below
+    g.fillStyle = hullInt <= 0.25 ? 'rgba(255,60,50,0.25)' : 'rgba(255,176,32,0.18)'; g.fillRect(0, 0, W, 40);
+  }
   const cx = W/2, cy = 255;
   const HW = 40, HS = -270, HE = 300, RL = 110;   // half-width, nose, aft, radiator length
   const PV = 250;                                 // radiator centre along the hull (aft)
@@ -1839,6 +1844,33 @@ function drawShip(g, W, H, idx) {
   dmgBox('main', -22, HE, 44, 18);
   dmgBox('scope', -8, -290, 16, 16);
 
+  // RCS quads at the hull corners: shown permanently when damaged (amber degraded, red offline)
+  if (damage.rcs < 1) {
+    g.fillStyle = damage.rcs <= 0 ? RED : AMB;
+    for (const s of [-1, 1]) for (const v of [HS+16, HE-16]) g.fillRect(s*(HW+2) - (s>0?0:8), v-4, 8, 8);
+  }
+  // Impact markers: where each torpedo struck the hull, from the direction it came in. New hits pulse for 3 s.
+  {
+    const vc = (HS + HE)/2, halfL = (HE - HS)/2;
+    hullImpacts.forEach((im, i) => {
+      let du = im.y, dv = im.z, L = Math.hypot(du, dv);
+      if (L < 0.05) { const a = i*2.4; du = Math.cos(a); dv = Math.sin(a)*0.3; L = Math.hypot(du, dv); }   // head-on: spread around
+      du /= L; dv /= L;
+      const t = Math.min(HW/Math.max(Math.abs(du), 1e-6), halfL/Math.max(Math.abs(dv), 1e-6));
+      const u = du*t, v = vc + dv*t;
+      const age = simT - im.t, fresh = age < 3;
+      const r = fresh ? 9 + 5*Math.abs(Math.sin(age*8)) : 8;
+      g.strokeStyle = RED; g.lineWidth = fresh ? 3 : 2;
+      g.beginPath();
+      for (let k = 0; k < 8; k++) {
+        const a = k*Math.PI/4, rr = k % 2 ? r*0.45 : r;
+        g.moveTo(u, v); g.lineTo(u + rr*Math.cos(a), v + rr*Math.sin(a));
+      }
+      g.stroke();
+      g.fillStyle = fresh ? '#ffffff' : RED; g.beginPath(); g.arc(u, v, 3, 0, Math.PI*2); g.fill();
+    });
+  }
+
   // PDC mounts: one on each side of the hull, with their coverage (PDC_ARC either side of the outward axis).
   // The barrel points along the last shot for 1.5 s, otherwise straight out.
   // Body to drawing frame: u = body Y, v = body Z (aft positive); frame angle 0 is +u.
@@ -1879,20 +1911,26 @@ function drawShip(g, W, H, idx) {
   callArrow(sx(-151), 98, sx(-151), 219);
   label('ECM', sx(-70), 60);
   callArrow(sx(-70), 66, sx(-70), 219);
-  label(`REACTOR LOAD ${kWload}kW`, sx(90), 60, laserFiring ? AMB : PH);
+  // Damaged systems replace the normal label text with their state: amber with % when degraded, red OFF
+  const dTxt = id => damage[id] <= 0 ? 'OFF' : `${(damage[id]*100).toFixed(0)}%`;
+  const dCol = (id, normal) => damage[id] <= 0 ? RED : damage[id] < 1 ? AMB : normal;
+  label(damage.reactor < 1 ? `REACTOR ${dTxt('reactor')}` : `REACTOR LOAD ${kWload}kW`, sx(90), 60, dCol('reactor', laserFiring ? AMB : PH));
   callArrow(sx(90), 66, sx(90), 219);
 
   // below the ship (module outer edge at screen y 293)
-  label('FCS', sx(-231), 438, fcsCol);
+  label(damage.rail < 1 ? `FCS ${dTxt('rail')}` : 'FCS', sx(-231), 438, dCol('rail', fcsCol));
   callArrow(sx(-231), 428, sx(-231), 292);
-  label(`CAPACITORS ${(chg*100).toFixed(0)}%`, sx(-122), 462);
+  label(damage.capacitors < 1 ? `CAPACITORS ${dTxt('capacitors')}` : `CAPACITORS ${(chg*100).toFixed(0)}%`, sx(-122), 462, dCol('capacitors', PH));
   callArrow(sx(-122), 444, sx(-122), 292);
-  label('COOLANT', sx(120), 438, hot ? AMB : PH);
+  label(damage.radiators < 1 ? `COOLANT ${dTxt('radiators')}` : 'COOLANT', sx(120), 438, dCol('radiators', hot ? AMB : PH));
   callArrow(sx(120), 428, sx(120), 292);
-  label('GIMBAL', sx(HE+9) + 40, 438);
+  label(damage.main < 1 ? `DRIVE ${dTxt('main')}` : 'GIMBAL', sx(HE+9) + 40, 438, dCol('main', PH));
   callArrow(sx(HE+9) + 40, 428, sx(HE+9), 280);
-  label('SCOPE', sx(-282), 438);
+  label(damage.scope < 1 ? `SCOPE ${dTxt('scope')}` : 'SCOPE', sx(-282), 438, dCol('scope', PH));
   callArrow(sx(-282), 428, sx(-282), 262);
+  // Systems without a module drawn: shown only when damaged, on the bottom row
+  if (damage.laser < 1) txt(g, 14, 462, `LASER ${dTxt('laser')}`, dCol('laser', PH), '20px monospace', 'left');
+  if (damage.rcs < 1) txt(g, W - 14, 462, `RCS ${dTxt('rcs')}`, dCol('rcs', PH), '20px monospace', 'right');
 }
 
 // Combat telescope: a 4-degree field centred on the ship's forward axis. Stars, the Moon and targets are
