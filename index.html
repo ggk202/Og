@@ -64,7 +64,11 @@ const GM_E = 3.986004418e14, R_E = 6.371e6;            // Earth
 const GM_M = 4.9048695e12, R_EM = 3.844e8, T_MOON = 27.321661 * 86400, MOON_PHASE0 = 0.7;
 const LEO_R = R_E + 400e3;
 
-const SHIP = { dry: 6000, mainProp0: 1000, podProp0: 800, rcsProp0: 180, I: 2.2e5,
+// Propellant: internal tanks give 5000 m/s; the drop tanks (pods) add 2500 m/s, for 7500 m/s in total when the
+// pods are burned first and dropped once dry. podDry is the empty pod structure, lost with them.
+// Inertia: I is the ship without pods; the pods sit podR m out on the hull, so their mass adds podMass*podR^2
+// (2.2e5 kg m^2 when full, about 29% more than without them).
+const SHIP = { dry: 6000, mainProp0: 1067.6, podProp0: 607, podDry: 73, podR: 8.5, rcsProp0: 180, I: 170870,
   rcsTorque: 25000, rcsLever: 2, rcsThrust: 250, rcsIsp: 250, mainThrust: 20000, mainIsp: 3200 };
 const WEAPON = { railMass: 5, railV: 1000, railCooldown: 3, railEnergy: 2.5e6, railHeat: 1e6, railDmgDiv: 5e4,
   laserElec: 300e3, laserDmgRate: 10, laserRange: 5000, laserTol: 2 };
@@ -177,6 +181,7 @@ function restartAfterDeath() {
   resetShip(); resetDamage(); resetPdcMounts(); resetTargets();
   projectiles = [];
   battery = POWER.battCap; hullT = THERM.tStart; railCD = 0; warpIdx = 0;
+  mainProp = SHIP.mainProp0; rcsProp = SHIP.rcsProp0; podProp = SHIP.podProp0; podsOn = true;
   leadHold = false; leadPrev = null; hullHits = 0;
   for (const t of targets) if (t.hostile) t.fireT = 10;
   const el = document.getElementById('death');
@@ -361,7 +366,15 @@ const shipQ = SHIP_Q0.clone();
 const omega = new THREE.Vector3();
 let mainProp = SHIP.mainProp0, rcsProp = SHIP.rcsProp0;
 let podProp = SHIP.podProp0, podsOn = true, masterMode = 'OFF', masterGuardOpen = false;   // master arm: OFF / ON / TNG   // fuel pods (feed the main drive first)
-function shipMass() { return SHIP.dry + mainProp + podProp + rcsProp; }
+function shipMass() { return SHIP.dry + mainProp + rcsProp + (podsOn ? SHIP.podDry + podProp : 0); }
+// Moment of inertia: the pods (structure and propellant) far out on the hull make the ship slower to turn
+function shipI() { return SHIP.I + (podsOn ? (SHIP.podDry + podProp)*SHIP.podR*SHIP.podR : 0); }
+// Delta-v the pods' remaining propellant gives (burned first, with the pods still attached)
+function podDv() {
+  if (!podsOn) return 0;
+  const m = SHIP.dry + mainProp + rcsProp + SHIP.podDry;
+  return SHIP.mainIsp*G0*Math.log((m + podProp)/m);
+}
 let battery = POWER.battCap, hullT = THERM.tStart;
 let radDeployed = true, rcsStab = true, laserArmed = false, guardOpen = false, brownout = false;
 let lampTestT = 0;   // seconds of lamp test remaining
@@ -626,7 +639,7 @@ function leadHoldCmd(h) {
   const wdes = ff.add(corr);
   if (wdes.length() > LEAD_MAX_RATE) wdes.setLength(LEAD_MAX_RATE);
   const wm = [omega.x, omega.y, omega.z], wd = [wdes.x, wdes.y, wdes.z], dd = [dff.x, dff.y, dff.z];
-  return wd.map((v, i) => clamp(SHIP.I*((v - wm[i])/LEAD_TAU_TIME + dd[i])/SHIP.rcsTorque, -1, 1));
+  return wd.map((v, i) => clamp(shipI()*((v - wm[i])/LEAD_TAU_TIME + dd[i])/SHIP.rcsTorque, -1, 1));
 }
 
 function physicsStep(h) {
@@ -643,12 +656,13 @@ function physicsStep(h) {
   const tau = [0, 0, 0];
   for (let i = 0; i < 3; i++) {
     if (cmd[i] !== 0) tau[i] = cmd[i]*SHIP.rcsTorque*rcsK();
-    else if (rcsStab) tau[i] = clamp(-SHIP.I*w[i]/1.5, -SHIP.rcsTorque*rcsK(), SHIP.rcsTorque*rcsK());
+    else if (rcsStab) tau[i] = clamp(-shipI()*w[i]/1.5, -SHIP.rcsTorque*rcsK(), SHIP.rcsTorque*rcsK());
   }
   let tauMag = Math.hypot(tau[0], tau[1], tau[2]);
   if (rcsProp <= 0) { tau[0] = tau[1] = tau[2] = 0; tauMag = 0; }
   rcsProp = Math.max(0, rcsProp - tauMag/(SHIP.rcsLever*2*SHIP.rcsIsp*G0)*h);
-  for (let i = 0; i < 3; i++) w[i] += tau[i]/SHIP.I*h;
+  const Inow = shipI();
+  for (let i = 0; i < 3; i++) w[i] += tau[i]/Inow*h;
   omega.set(w[0], w[1], w[2]);
   const wm = omega.length();
   if (wm > 1e-12) shipQ.multiply(new THREE.Quaternion().setFromAxisAngle(omega.clone().divideScalar(wm), wm*h)).normalize();
@@ -1425,9 +1439,10 @@ const keypadKeys = [['1', '2', '3'], ['4', '5', '6'], ['7', '8', '9'], ['CLR', '
 keypadKeys.forEach((row, r) => row.forEach((k, c) => makeButton(-0.08 + c*0.08, -0.226 - r*0.044, k, () => keypadPress(k))));
 
 /* ================= DISPLAY HELPERS ================= */
+// Total delta-v left, staged: the pods' propellant first, then the internal tanks once the pods are dropped
 function dvRemaining() {
-  const m0 = shipMass(), m1 = SHIP.dry + rcsProp;
-  return SHIP.mainIsp*G0*Math.log(m0/m1);
+  const mInt = SHIP.dry + rcsProp;
+  return podDv() + SHIP.mainIsp*G0*Math.log((mInt + mainProp)/mInt);
 }
 function fmtDist(m) { return m >= 1e3 ? (m/1e3).toFixed(m >= 1e5 ? 0 : 1) + ' km' : m.toFixed(0) + ' m'; }
 function fmtTime(s) {
@@ -1711,6 +1726,9 @@ function drawPropulsion(g, W, H, idx) {
   txt(g, x, y, `RATE  P ${dps(omega.x)}  Y ${dps(omega.y)}  R ${dps(omega.z)} °/s`, PH, '25px monospace');
   y += 32;
   txt(g, x, y, `RCS STAB ${rcsStab ? 'ON' : 'OFF'}   RCS ${rcsActive ? 'FIRING' : 'IDLE'}`, rcsStab ? PH : AMB, '25px monospace');
+  y += 32;
+  txt(g, x, y, podsOn ? `PODS ${podProp.toFixed(0)} kg  ${podDv().toFixed(0)} m/s   INERTIA +${((shipI()/SHIP.I - 1)*100).toFixed(0)}%`
+    : 'PODS JETTISONED', podsOn ? PH : DIM, '25px monospace');
 }
 
 function drawComms(g, W, H, idx) {
@@ -2640,8 +2658,10 @@ function assignBinding(actionId, code) {
 
 function jettisonPods() {
   if (!podsOn) return;
+  const lost = podDv();
   podsOn = false; podProp = 0;
-  sfx.hullThump(); log('FUEL PODS JETTISONED');
+  sfx.hullThump();
+  log(lost > 1 ? `FUEL PODS JETTISONED · ${lost.toFixed(0)} M/S LOST` : 'FUEL PODS JETTISONED · DRY');
 }
 // Flavour toggles for the auxiliary switches (they move the lever and click; no other effect)
 let auxOn = { aux1: false, aux2: false, aux3: false };
