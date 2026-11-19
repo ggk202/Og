@@ -123,6 +123,7 @@ let radDeployed = true, rcsStab = true, laserArmed = false, guardOpen = false, b
 let lampTestT = 0;   // seconds of lamp test remaining
 let keyBuf = '';     // keypad entry buffer, shown on the COMMS page
 let irOn = false;    // scope thermal (IR) mode
+let scopeAz = 0, scopeEl = 0;   // telescope gimbal angles relative to the ship's nose (rad)
 let simT = 0, warpIdx = 0, paused = false, menuOpen = false, started = false;
 let railCD = 0, railReq = false, thrustFrac = 0, rcsActive = false, laserFiring = false;
 let curTarget = 0, rangeIdx = 1, tickAcc = 0;
@@ -1267,6 +1268,10 @@ function drawShip(g, W, H, idx) {
     g.beginPath(); g.moveTo(-21 - 9*Math.cos(spin), v - 9*Math.sin(spin)); g.lineTo(-21 + 9*Math.cos(spin), v + 9*Math.sin(spin)); g.stroke();
   }
 
+  // Telescope gimbal on the nose tower: the pointer shows the gimbal azimuth
+  g.strokeStyle = PH; g.lineWidth = 2;
+  g.beginPath(); g.arc(0, -282, 6, 0, Math.PI*2); g.stroke();
+  g.beginPath(); g.moveTo(0, -282); g.lineTo(18*Math.sin(scopeAz), -282 - 18*Math.cos(scopeAz)); g.stroke();
   // Fuel pods: one pill on each side, attached to the hull edge and clear of the callout arrows.
   // The fill shows the remaining propellant.
   if (podsOn) {
@@ -1304,11 +1309,19 @@ function drawShip(g, W, H, idx) {
   callArrow(sx(120), 428, sx(120), 292);
   label('GIMBAL', sx(HE+9) + 40, 438);
   callArrow(sx(HE+9) + 40, 428, sx(HE+9), 280);
+  label('SCOPE', sx(-282), 438);
+  callArrow(sx(-282), 428, sx(-282), 262);
 }
 
 // Combat telescope: a 4-degree field centred on the ship's forward axis. Stars, the Moon and targets are
 // projected through the ship's attitude. IR mode shows targets as white-hot blobs and hides the stars.
 const SCOPE_FOV = 4 * Math.PI/180;
+const SCOPE_AZ_MAX = 60 * Math.PI/180, SCOPE_EL_MAX = 45 * Math.PI/180, SCOPE_SLEW = 25 * Math.PI/180;
+// Scope view rotation: the gimbal turns the boresight, so the view is taken in the gimbal's frame
+function scopeViewQ() {
+  const gq = new THREE.Quaternion().setFromEuler(new THREE.Euler(scopeEl, -scopeAz, 0, 'YXZ'));
+  return gq.invert().multiply(toBodyQ());
+}
 const STAR_DIRS = Array.from({ length: 260 }, () => ({
   v: new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize(),
   b: 0.3 + Math.random()*0.7,
@@ -1322,7 +1335,7 @@ function drawScope(g, W, H, idx) {
   mfdHeader(g, W, `SCOPE  ${irOn ? 'IR' : 'VIS'}`, idx);
   // Frame and view area, following the reference layout: status text above, labels at the sides, softkeys below
   const FX = 60, FY = 108, FW = 640, FH = 292, cx = FX + FW/2, cy = FY + FH/2, R = 150;
-  const bq = toBodyQ();
+  const bq = scopeViewQ();
   const tgt = targets[curTarget];
   const lockOk = !!tgt && !tgt.gone;
   const proj = v => {
@@ -1391,7 +1404,7 @@ function drawScope(g, W, H, idx) {
   txt(g, 14, 150, 'AGC', PH, '20px monospace');
   txt(g, 14, 172, 'OFF', PH, '20px monospace');
   txt(g, 80, 92, lockOk ? 'LOCK' : 'NO LOCK', lockOk ? AMB : PH, '20px monospace');
-  txt(g, cx, 92, `${irOn ? 'WHOT' : 'VIS'}   FOV 4.0`, PH, '20px monospace', 'center');
+  txt(g, cx, 92, `${irOn ? 'WHOT' : 'VIS'}   AZ ${(scopeAz*180/Math.PI).toFixed(0)}  EL ${(scopeEl*180/Math.PI).toFixed(0)}`, PH, '20px monospace', 'center');
   txt(g, 700, 92, lockOk ? fmtDist(Math.hypot(tgt.x-ship.x, tgt.y-ship.y, tgt.z-ship.z)) : '--', PH, '20px monospace', 'right');
   txt(g, cx, FY + FH + 20, lockOk ? 'TRACK' : 'POINT', PH, '20px monospace', 'center');
   // Softkeys, with the active page (TGP) inverted
@@ -1479,6 +1492,19 @@ function animateCockpit(dt) {
     d.p = clamp((d.p ?? tgt) + d.pv*sdt, -0.02, 1.02);
     drawDial(d.g, d, d.min + d.p*span);
     d.tex.needsUpdate = true;
+  }
+  // Telescope gimbal: slews toward the locked target at a limited rate, and stows to the nose when unlocked
+  {
+    const tg = targets[curTarget];
+    let azT = 0, elT = 0;
+    if (tg && !tg.gone) {
+      const vb = new THREE.Vector3(tg.x-ship.x, tg.y-ship.y, tg.z-ship.z).applyQuaternion(toBodyQ());
+      azT = Math.atan2(vb.x, -vb.z); elT = Math.atan2(vb.y, -vb.z);
+    }
+    azT = clamp(azT, -SCOPE_AZ_MAX, SCOPE_AZ_MAX); elT = clamp(elT, -SCOPE_EL_MAX, SCOPE_EL_MAX);
+    const rate = SCOPE_SLEW*sdt;
+    scopeAz += clamp(azT - scopeAz, -rate, rate);
+    scopeEl += clamp(elT - scopeEl, -rate, rate);
   }
   const k = 1 - Math.exp(-dt*18);
   const state = { rad: radDeployed, stab: rcsStab, arm: laserArmed, master: true, ...auxOn };
