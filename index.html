@@ -229,6 +229,12 @@ function fireRail() {
     px:0, py:0, pz:0, age: 0, dead: false });
   const p = projectiles[projectiles.length-1];
   p.px = p.x; p.py = p.y; p.pz = p.z;
+  // Track the closest approach to the target at fire time, so a miss can be reported with its distance
+  const aim = targets[curTarget];
+  if (aim) {
+    const range = Math.hypot(aim.x-ship.x, aim.y-ship.y, aim.z-ship.z);
+    p.tgt = aim; p.minD = Infinity; p.limit = 2*range/V + 5;   // stop tracking after about twice the flight time
+  }
   // Newton's third law: recoil on the ship
   const dv = m*V/mass;
   ship.vx -= fwd.x*dv; ship.vy -= fwd.y*dv; ship.vz -= fwd.z*dv;
@@ -374,6 +380,13 @@ function physicsStep(h) {
   /* --- projectile hits (swept test over the step) --- */
   for (const p of projectiles) {
     if (p.dead) continue;
+    if (p.tgt) {
+      p.minD = Math.min(p.minD, segDist(p, p.tgt));
+      if (p.age > p.limit) {
+        log(`RAIL MISS  ${p.tgt.name}  CLOSEST ${p.minD.toFixed(1)} M`);
+        p.dead = true; continue;
+      }
+    }
     for (const t of targets) {
       if (t.gone) continue;
       if (segDist(p, t) < t.radius) {
