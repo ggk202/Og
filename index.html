@@ -268,14 +268,57 @@ function controlState() {
   };
 }
 
+// Propagate a plain state under gravity for T seconds, starting at the current simulation time
+function propagateTo(s, T) {
+  const st = { x: s.x, y: s.y, z: s.z, vx: s.vx, vy: s.vy, vz: s.vz };
+  const n = Math.max(1, Math.ceil(T)), hh = T/n;
+  for (let i = 0; i < n; i++) {
+    const t0 = simT + i*hh;
+    const d = (x, y, z, vx, vy, vz, tt) => { const a = gravAcc(x, y, z, tt); return [vx, vy, vz, a[0], a[1], a[2]]; };
+    const k1 = d(st.x, st.y, st.z, st.vx, st.vy, st.vz, t0);
+    const k2 = d(st.x+0.5*hh*k1[0], st.y+0.5*hh*k1[1], st.z+0.5*hh*k1[2], st.vx+0.5*hh*k1[3], st.vy+0.5*hh*k1[4], st.vz+0.5*hh*k1[5], t0+0.5*hh);
+    const k3 = d(st.x+0.5*hh*k2[0], st.y+0.5*hh*k2[1], st.z+0.5*hh*k2[2], st.vx+0.5*hh*k2[3], st.vy+0.5*hh*k2[4], st.vz+0.5*hh*k2[5], t0+0.5*hh);
+    const k4 = d(st.x+hh*k3[0], st.y+hh*k3[1], st.z+hh*k3[2], st.vx+hh*k3[3], st.vy+hh*k3[4], st.vz+hh*k3[5], t0+hh);
+    st.x += hh/6*(k1[0]+2*k2[0]+2*k3[0]+k4[0]); st.y += hh/6*(k1[1]+2*k2[1]+2*k3[1]+k4[1]); st.z += hh/6*(k1[2]+2*k2[2]+2*k3[2]+k4[2]);
+    st.vx += hh/6*(k1[3]+2*k2[3]+2*k3[3]+k4[3]); st.vy += hh/6*(k1[4]+2*k2[4]+2*k3[4]+k4[4]); st.vz += hh/6*(k1[5]+2*k2[5]+2*k3[5]+k4[5]);
+  }
+  return st;
+}
+// Ballistic fire-control solution for the current target. The railgun shot is a real trajectory under gravity,
+// so the solver propagates the shot and the target together, then corrects the launch direction and flight time
+// until they meet. A straight-line lead drifts by metres on far targets because orbital curvature is ignored.
+// Returns { dir, L } (unit launch direction in world axes, and the intercept point relative to the ship), or null.
+const SOLVE_ITERS = 25;
+let leadCache = null;
+function shootingSolution(tgt) {
+  const V = WEAPON.railV;
+  const rel = new THREE.Vector3(tgt.x-ship.x, tgt.y-ship.y, tgt.z-ship.z);
+  const relV = new THREE.Vector3(tgt.vx-ship.vx, tgt.vy-ship.vy, tgt.vz-ship.vz);
+  let tt = leadTime(rel, relV);
+  if (tt === null) return null;
+  const dir = rel.clone().addScaledVector(relV, tt).normalize();
+  for (let it = 0; it < SOLVE_ITERS; it++) {
+    const P = propagateTo({ x: ship.x + dir.x*4, y: ship.y + dir.y*4, z: ship.z + dir.z*4,
+      vx: ship.vx + dir.x*V, vy: ship.vy + dir.y*V, vz: ship.vz + dir.z*V }, tt);
+    const T = propagateTo(tgt, tt);
+    const m = new THREE.Vector3(T.x-P.x, T.y-P.y, T.z-P.z);
+    const md = m.dot(dir);                                   // along-track miss: fix the flight time
+    const lat = m.clone().addScaledVector(dir, -md);         // lateral miss: fix the direction
+    if (lat.length() < 1e-3 && Math.abs(md) < 1e-3) break;
+    const R = Math.hypot(T.x-ship.x, T.y-ship.y, T.z-ship.z);
+    dir.addScaledVector(lat, 1/R).normalize();
+    tt = Math.max(1, tt + md/V);
+  }
+  return { dir, L: dir.clone().multiplyScalar(V*tt) };
+}
 // Lead point for the current target, relative to the ship (world axes), or null without an intercept
 function leadVector() {
   const tgt = targets[curTarget];
   if (!tgt || tgt.gone) return null;
-  const rel = new THREE.Vector3(tgt.x-ship.x, tgt.y-ship.y, tgt.z-ship.z);
-  const relV = new THREE.Vector3(tgt.vx-ship.vx, tgt.vy-ship.vy, tgt.vz-ship.vz);
-  const tt = leadTime(rel, relV);
-  return tt === null ? null : rel.addScaledVector(relV, tt);
+  if (leadCache && leadCache.simT === simT && leadCache.tgt === tgt) return leadCache.L ? leadCache.L.clone() : null;
+  const sol = shootingSolution(tgt);
+  leadCache = { simT, tgt, L: sol ? sol.L.clone() : null };
+  return sol ? sol.L.clone() : null;
 }
 // Lead point in body axes (nose is -Z), unit length, or null
 function leadBodyDir() {
