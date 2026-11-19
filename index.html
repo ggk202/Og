@@ -1949,7 +1949,8 @@ function animateCockpit(dt) {
 /* ================= AUDIO (interior sounds; hull-conducted via low-pass bus) ================= */
 let actx = null, noiseBuf = null, intBus, hullBus, hullLP;
 let engineG, engineLP, rcsG, laserG, pumpG, alarmG;
-let pdcMotorO, pdcMotorG, pdcSlewO, pdcSlewG, pdcRumbleG, pdcChatG, torpWarnO, torpWarnG;
+let pdcMotorO, pdcMotorH, pdcMotorG, pdcSlewO, pdcSlewG, pdcRumbleG, pdcChatG, torpWarnO, torpWarnG;
+let pdcSpin = 0, pdcAudioT = 0;   // motor spin state (0 = stopped, 1 = full speed) and the last audio time
 // Hull shudder after a railgun shot: a deep sawtooth boom plus a rattle that is tremolo-modulated.
 // Everything goes through the hull bus, so it is heard as conducted vibration.
 function hullShudder(delay = 0) {
@@ -2081,7 +2082,7 @@ function initAudio() {
   // PDC motor whine: a sawtooth with a harmonic, through a bandpass. The pitch and level are set per frame
   // in audioFrame, so it spins up on engagement and winds down afterwards.
   pdcMotorO = actx.createOscillator(); pdcMotorO.type = 'sawtooth'; pdcMotorO.frequency.value = 300;
-  const pdcMotorH = actx.createOscillator(); pdcMotorH.type = 'sine'; pdcMotorH.frequency.value = 600;
+  pdcMotorH = actx.createOscillator(); pdcMotorH.type = 'sine'; pdcMotorH.frequency.value = 375;
   const pdcMotorF = actx.createBiquadFilter(); pdcMotorF.type = 'bandpass'; pdcMotorF.frequency.value = 1600; pdcMotorF.Q.value = 1.5;
   pdcMotorG = actx.createGain(); pdcMotorG.gain.value = 0;
   pdcMotorO.connect(pdcMotorF); pdcMotorH.connect(pdcMotorF);
@@ -2135,10 +2136,18 @@ function audioFrame() {
   const warn = hullT > THERM.tWarn || battery < 0.15*POWER.battCap;
   alarmG.gain.setTargetAtTime(warn && (Math.floor(t*2) % 2 === 0) ? 0.02 : 0, t, 0.01);
   // PDC: motor spin-up and wind-down, slew whine, and the hull rumble while rounds are going out
-  pdcMotorO.frequency.setTargetAtTime(pdcActive ? 1400 : 300, t, pdcActive ? 0.35 : 0.5);
-  pdcMotorG.gain.setTargetAtTime(pdcActive ? 0.02 : 0, t, pdcActive ? 0.25 : 0.4);
-  pdcSlewO.frequency.setTargetAtTime(800 + 2400*Math.min(1, pdcSlewRate/0.1), t, 0.05);
-  pdcSlewG.gain.setTargetAtTime(pdcActive ? 0.004 + 0.02*Math.min(1, pdcSlewRate/0.05) : 0, t, 0.05);
+  // Spin state ramps linearly over a short time (0.2 s up, 0.3 s down); the pitch follows its square,
+  // so the whine climbs slowly at first and then steeply, and falls back the same way.
+  const dtA = Math.min(0.1, Math.max(0, t - pdcAudioT)); pdcAudioT = t;
+  pdcSpin = pdcActive ? Math.min(1, pdcSpin + dtA/0.2) : Math.max(0, pdcSpin - dtA/0.3);
+  const spinSq = pdcSpin*pdcSpin;
+  pdcMotorO.frequency.setValueAtTime(250 + 1250*spinSq, t);
+  pdcMotorH.frequency.setValueAtTime(1.5*(250 + 1250*spinSq), t);
+  pdcMotorG.gain.setTargetAtTime(0.02*pdcSpin, t, 0.02);
+  // Slew whine: pitch follows the square of the normalised line-of-sight rate, with a fast response
+  const slewR = Math.min(1, pdcSlewRate/0.1);
+  pdcSlewO.frequency.setValueAtTime(800 + 2400*slewR*slewR, t);
+  pdcSlewG.gain.setTargetAtTime(pdcActive ? 0.004 + 0.02*Math.min(1, pdcSlewRate/0.05) : 0, t, 0.015);
   const pdcFiring = simT - pdcLastFire < 0.25;
   pdcRumbleG.gain.setTargetAtTime(pdcFiring ? 0.35 : 0, t, pdcFiring ? 0.03 : 0.15);
   pdcChatG.gain.setTargetAtTime(pdcFiring ? 0.08 : 0, t, pdcFiring ? 0.02 : 0.08);
