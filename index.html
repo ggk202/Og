@@ -23,6 +23,14 @@
   #hangar .hp.on { border-color:#5fbf72; } #hangar .hp.on .st { color:#7dff9a; }
   #hangar .hp.off { color:#7d8a78; } #hangar .hp.off .st { color:#c8a050; }
   #hangar .hp:hover, #hangar .hp.hover { background:#18261b; }
+  #hangar #hpList { overflow-y:auto; min-height:0; flex:0 1 auto; }
+  #hangar .hp .slot { font-size:10.5px; letter-spacing:.18em; opacity:.6; display:block; }
+  #hangar .hp.sel { border-color:#ffb020; background:#1d1a10; }
+  #hangar .pick { margin:-2px 0 8px 12px; border-left:2px solid #ffb020; padding-left:8px; }
+  #hangar .opt { padding:6px 8px; margin-bottom:4px; border:1px solid #2a352a; cursor:pointer; font-size:12.5px; user-select:none; }
+  #hangar .opt:hover { background:#18261b; }
+  #hangar .opt.cur { border-color:#7dff9a; }
+  #hangar .opt .d { display:block; font-size:11px; opacity:.65; margin-top:2px; letter-spacing:.02em; }
   #hangar .stats { white-space:pre; font-size:12.5px; line-height:1.6; color:#b9c8b0; border-top:1px solid #2a352a; padding-top:9px; }
   #hangar #launchBtn { margin-top:auto; font-size:16px; padding:11px; letter-spacing:.4em; background:#1f2e1f; border-color:#7dff9a; color:#d9ffe0; }
   #hangar #launchBtn:hover { background:#2c4a2e; }
@@ -60,8 +68,8 @@
 <canvas id="gl"></canvas>
 <div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small></div>
 <div id="hangar"><div class="load" id="hangarLoad">LOADING SHIP</div>
-  <div class="hint">DRAG TO ORBIT · WHEEL TO ZOOM · CLICK A HARDPOINT TO FIT OR EMPTY IT</div>
-  <div class="panel"><h2>HANGAR</h2><div class="sub">LOADOUT · CLICK TO FIT OR EMPTY</div>
+  <div class="hint">DRAG TO ORBIT · WHEEL TO ZOOM · CLICK A HARDPOINT TO CHOOSE ITS MODULE</div>
+  <div class="panel"><h2>HANGAR</h2><div class="sub">LOADOUT · SELECT A HARDPOINT, THEN A MODULE</div>
     <div id="hpList"></div><div class="stats" id="hangarStats"></div><button id="launchBtn">LAUNCH</button></div></div>
 <div id="death"><div class="msg"><h1>SHIP LOST</h1><div class="cause" id="deathCause"></div><div class="stats" id="deathStats"></div><small>CLICK TO RETURN TO THE HANGAR</small></div></div>
 <div id="settings">
@@ -87,9 +95,9 @@ const GM_M = 4.9048695e12, R_EM = 3.844e8, T_MOON = 27.321661 * 86400, MOON_PHAS
 const LEO_R = R_E + 400e3;
 
 // Propellant: internal tanks give 5000 m/s; the two drop tanks (pods) add 2500 m/s, for 7500 m/s in total with
-// the full loadout, when the pods are burned first and dropped once dry. tankDry is one empty tank's structure.
-// hullDry is the hull without any modules; the fitted modules add their mass (see MODULES).
-const SHIP = { hullDry: 4250, mainProp0: 1067.6, tankProp0: 303.5, tankDry: 36.5, rcsProp0: 180,
+// the full loadout, when the pods are burned first and dropped once dry. Tank capacity and structure mass are in
+// the module catalog. hullDry is the hull without any modules; the fitted modules add their mass.
+const SHIP = { hullDry: 4250, mainProp0: 1067.6, rcsProp0: 180,
   rcsThrust: 250, rcsIsp: 250, mainThrust: 20000, mainIsp: 3200 };
 // RCS torque per axis [pitch, yaw, roll]. Pitch and yaw thrusters act on a ~10.5 m arm; roll on ~1.9 m with fewer
 // thrusters, scaled so the ship rolls about 1.5x faster than it pitches. RCS_K keeps the full-loadout pitch
@@ -97,48 +105,111 @@ const SHIP = { hullDry: 4250, mainProp0: 1067.6, tankProp0: 303.5, tankDry: 36.5
 const RCS_K = 51602, RCS_ROLL = 0.08, RCS_ARM = [10.5, 10.5, 1.9];
 const rcsTorqueAxis = i => RCS_K*(i === 2 ? RCS_ROLL : 1);
 
-/* ---------- Loadout: modules on the ship model's hardpoints ----------
-   Positions are module centres in body axes (x right, y up, z aft): the model's +Z nose maps to body -Z, so a
-   model point (x, y, z) is (-x, y, -z) here. Values come from the model files (hardpoint + module bounds). */
-const MODULES = {
-  railgun: { name: 'SPINAL RAILGUN', mass: 900, pos: [0, -1.15, -10.04], file: 'att_spinal_railgun.glb', hp: 'HP_Spinal_Railgun' },
-  laser:   { name: 'GIMBAL LASER',   mass: 250, pos: [-0.96, -0.05, -10.59], file: 'att_gimbal_laser.glb', hp: 'HP_Gimbal_Laser' },
-  pdcTop:  { name: 'PDC TOP',        mass: 300, pos: [0.06, 2.34, -0.275], file: 'att_pdc_turret.glb', hp: 'HP_PDC_Top' },
-  pdcBot:  { name: 'PDC BOTTOM',     mass: 300, pos: [-0.06, -2.34, -0.275], file: 'att_pdc_turret.glb', hp: 'HP_PDC_Bot' },
-  tankTop: { name: 'DROP TANK TOP',  mass: 0,   pos: [0, 2.25, 6.78], file: 'att_drop_tank.glb', hp: 'HP_DropTank_Top', tank: true },
-  tankBot: { name: 'DROP TANK BOTTOM', mass: 0, pos: [0, -2.25, 6.78], file: 'att_drop_tank.glb', hp: 'HP_DropTank_Bot', tank: true },
+/* ---------- Loadout: hardpoints on the hull, and a catalog of modules that fit them ----------
+   To add a module: add a catalog entry (and its .glb in models/). `fits` lists the hardpoint types it mounts
+   on; `role` is what gameplay does with it (railgun, laser, pdc, tank; any other role adds only mass and
+   inertia until gameplay supports it); `stats` override the weapon defaults for that role.
+   Axes: hardpoint positions are in body axes (x right, y up, z aft). Module points (com, muzzle, emitter,
+   barrel) are in the module file's own axes, as the model was built (+Y up, +Z toward the nose); hpToBody()
+   maps them through the hardpoint, including the bottom ones that are mounted upside down (flip). */
+const HARDPOINTS = {
+  spinal:  { name: 'SPINAL MOUNT',   tag: 'SPINAL', node: 'HP_Spinal_Railgun', type: 'spinal', pos: [0, -0.86, -10.24] },
+  nose:    { name: 'NOSE GIMBAL',    tag: 'NOSE',   node: 'HP_Gimbal_Laser',   type: 'gimbal', pos: [-0.96, -0.05, -10.24] },
+  pdcTop:  { name: 'DORSAL TURRET',  tag: 'TOP',    node: 'HP_PDC_Top',        type: 'turret', pos: [0, 1.64, -0.15] },
+  pdcBot:  { name: 'VENTRAL TURRET', tag: 'BOT',    node: 'HP_PDC_Bot',        type: 'turret', pos: [0, -1.64, -0.15], flip: true },
+  tankTop: { name: 'DORSAL PYLON',   tag: 'TOP',    node: 'HP_DropTank_Top',   type: 'pylon',  pos: [0, 1.68, 6.78] },
+  tankBot: { name: 'VENTRAL PYLON',  tag: 'BOT',    node: 'HP_DropTank_Bot',   type: 'pylon',  pos: [0, -1.68, 6.78], flip: true },
 };
-// Weapon origins in body axes: railgun muzzle (front of the barrel), laser emitter (front of the lens)
-const RAIL_MUZZLE = [0, -0.86, -12.5], LASER_EMITTER = [-0.96, -0.05, -10.94];
-const LOADOUT_KEY = 'og-loadout-v1';
-let loadout = Object.fromEntries(Object.keys(MODULES).map(k => [k, true]));
-try { Object.assign(loadout, JSON.parse(localStorage.getItem(LOADOUT_KEY) || '{}')); } catch (e) {}
+const MODULE_CATALOG = {
+  rail_mk1:  { name: 'SPINAL RAILGUN', short: 'RAIL', role: 'railgun', fits: ['spinal'], file: 'att_spinal_railgun.glb',
+               mass: 900, com: [0, -0.29, -0.2], muzzle: [0, 0, 2.26],
+               stats: { railV: 1000, railCooldown: 3, railEnergy: 2.5e6 }, desc: '5 kg slug at 1000 m/s · 3 s cycle · 2.5 MJ' },
+  laser_mk1: { name: 'GIMBAL LASER',   short: 'LASER', role: 'laser', fits: ['gimbal'], file: 'att_gimbal_laser.glb',
+               mass: 250, com: [0, 0, 0.35], emitter: [0, 0, 0.7],
+               stats: { laserElec: 300e3, laserDmgRate: 10, laserRange: 5000 }, desc: '300 kW beam · 5 km · ±2° gimbal' },
+  pdc_mk1:   { name: 'PDC TURRET',     short: 'PDC', role: 'pdc', fits: ['turret'], file: 'att_pdc_turret.glb',
+               mass: 300, com: [-0.06, 0.70, 0.125], barrel: [0, 0.9, 0],
+               stats: { rounds: 2000 }, desc: 'Gatling point defence · 2000 rds · 5 km' },
+  tank_mk1:  { name: 'DROP TANK',      short: 'TANK', role: 'tank', fits: ['pylon'], file: 'att_drop_tank.glb',
+               mass: 36.5, prop: 303.5, com: [0, 0.57, 0], desc: '303 kg propellant · jettisonable' },
+};
+const DEFAULT_LOADOUT = { spinal: 'rail_mk1', nose: 'laser_mk1', pdcTop: 'pdc_mk1', pdcBot: 'pdc_mk1', tankTop: 'tank_mk1', tankBot: 'tank_mk1' };
+const LOADOUT_KEY = 'og-loadout-v2';
+// Modules that can go on a hardpoint
+const modulesFor = slot => Object.keys(MODULE_CATALOG).filter(id => MODULE_CATALOG[id].fits.includes(HARDPOINTS[slot].type));
+// A saved loadout is kept only where its module still exists and fits; the old v1 format (one fixed module per
+// hardpoint, fitted or not) is converted
+function loadLoadout() {
+  const lo = { ...DEFAULT_LOADOUT };
+  try {
+    const v2 = JSON.parse(localStorage.getItem(LOADOUT_KEY) || 'null');
+    const v1 = v2 ? null : JSON.parse(localStorage.getItem('og-loadout-v1') || 'null');
+    const src = v2 || (v1 && { spinal: v1.railgun === false ? null : 'rail_mk1', nose: v1.laser === false ? null : 'laser_mk1',
+      pdcTop: v1.pdcTop === false ? null : 'pdc_mk1', pdcBot: v1.pdcBot === false ? null : 'pdc_mk1',
+      tankTop: v1.tankTop === false ? null : 'tank_mk1', tankBot: v1.tankBot === false ? null : 'tank_mk1' }) || {};
+    for (const slot of Object.keys(HARDPOINTS)) {
+      if (!(slot in src)) continue;
+      const id = src[slot];
+      if (id === null || (MODULE_CATALOG[id] && modulesFor(slot).includes(id))) lo[slot] = id;
+    }
+  } catch (e) {}
+  return lo;
+}
+let loadout = loadLoadout();
 const saveLoadout = () => { try { localStorage.setItem(LOADOUT_KEY, JSON.stringify(loadout)); } catch (e) {} };
-const tankCount = () => (loadout.tankTop ? 1 : 0) + (loadout.tankBot ? 1 : 0);
-// Dry mass with the fitted weapon modules (tanks are counted separately, while attached)
-const dryMass = () => SHIP.hullDry + Object.entries(MODULES).reduce((a, [k, m]) => a + (loadout[k] && !m.tank ? m.mass : 0), 0);
+// Lookups by role, so gameplay never names a hardpoint
+const modAt = slot => MODULE_CATALOG[loadout[slot]] || null;
+const slotsWithRole = role => Object.keys(HARDPOINTS).filter(s => modAt(s) && modAt(s).role === role);
+const roleSlot = role => slotsWithRole(role)[0] || null;
+const hasRole = role => !!roleSlot(role);
+const slotLabel = slot => `${modAt(slot) ? modAt(slot).short : 'EMPTY'} ${HARDPOINTS[slot].tag}`;
+// Module-file point -> body axes, through its hardpoint
+function hpToBody(slot, v) {
+  const hp = HARDPOINTS[slot];
+  let [x, y, z] = v;
+  if (hp.flip) { x = -x; y = -y; }                   // mounted upside down (rotated 180 deg about the long axis)
+  return [hp.pos[0] - x, hp.pos[1] + y, hp.pos[2] - z];
+}
+const tankCount = () => slotsWithRole('tank').length;
+const tankProp0Total = () => slotsWithRole('tank').reduce((a, s) => a + modAt(s).prop, 0);
+const tankDryTotal = () => slotsWithRole('tank').reduce((a, s) => a + modAt(s).mass, 0);
+// Dry mass with the fitted modules (tanks are counted separately, while attached)
+const dryMass = () => SHIP.hullDry + Object.keys(HARDPOINTS).reduce((a, s) => { const m = modAt(s); return a + (m && m.role !== 'tank' ? m.mass : 0); }, 0);
+// Weapon origins in body axes from the fitted modules
+const railMuzzle = () => { const s = roleSlot('railgun'); return s ? hpToBody(s, modAt(s).muzzle) : [0, 0, -12]; };
+const laserEmitter = () => { const s = roleSlot('laser'); return s ? hpToBody(s, modAt(s).emitter) : [0, 0, -11]; };
 // Body-axis offset to world axes at the current attitude
 const bodyOff = p => new THREE.Vector3(p[0], p[1], p[2]).applyQuaternion(shipQ);
 const WEAPON = { railMass: 5, railV: 1000, railCooldown: 3, railEnergy: 2.5e6, railHeat: 1e6, railDmgDiv: 5e4,
   laserElec: 300e3, laserDmgRate: 10, laserRange: 5000, laserTol: 2 };
+// The fitted railgun and laser modules' stats override these defaults (applied at launch)
+const WEAPON_BASE = { ...WEAPON };
+function applyModuleStats() {
+  Object.assign(WEAPON, WEAPON_BASE);
+  for (const role of ['railgun', 'laser']) { const s = roleSlot(role); if (s && modAt(s).stats) Object.assign(WEAPON, modAt(s).stats); }
+}
+applyModuleStats();
 // Laser gimbal: a small independent mount slaved to the locked target, so the laser can fire while the nose
 // and railgun are aimed elsewhere. It is limited to a few degrees either side of the nose.
 const LASER_GIMBAL_MAX = 2 * Math.PI/180, LASER_SLEW = 30 * Math.PI/180;
-// Point-defence cannons: two mounts on opposite hull faces, across from each other. Both faces are parallel to
-// the radiators (their normal is body Y). Each fires tracers at the nearest torpedo inside its arc.
-const PDC_MOUNTS = [
-  { name: 'PDC TOP', sys: 'pdcTop', pos: [0, 2.54, -0.15], dir: [0, 1, 0], cd: 0 },    // turret centre on the model
-  { name: 'PDC BOT', sys: 'pdcBot', pos: [0, -2.54, -0.15], dir: [0, -1, 0], cd: 0 },
-];
+// Point-defence mounts: one per hardpoint fitted with a PDC module, built from the loadout at launch. Each fires
+// tracers at the nearest torpedo inside its arc, around the hardpoint's outward axis (body +Y or -Y).
+const PDC_MOUNTS = [];
 // Magazine and barrel heat, per mount. A mount fires about 4 rounds/s (once per 0.25 s physics step), so
 // continuous fire overheats it in about 17 s ((4*0.025 - 0.04) per s); it locks out until the heat falls to
 // PDC_HEAT_RESUME, about 16 s later. 2000 rounds is about 8 minutes of fire.
 const PDC_ROUNDS = 2000, PDC_LOW_ROUNDS = 200, PDC_HEAT_ROUND = 0.025, PDC_COOL = 0.04, PDC_HEAT_RESUME = 0.35;
-function resetPdcMounts() { for (const m of PDC_MOUNTS) Object.assign(m, { cd: 0, rounds: PDC_ROUNDS, heat: 0, hot: false }); }
+function resetPdcMounts() {
+  PDC_MOUNTS.length = 0;
+  for (const slot of slotsWithRole('pdc')) {
+    const mod = modAt(slot), hp = HARDPOINTS[slot];
+    PDC_MOUNTS.push({ name: `${mod.short} ${hp.tag}`, tag: hp.tag[0], sys: slot, pos: hpToBody(slot, mod.barrel),
+      dir: [0, hp.flip ? -1 : 1, 0], cd: 0, rounds: (mod.stats && mod.stats.rounds) || PDC_ROUNDS, heat: 0, hot: false });
+  }
+}
 resetPdcMounts();
 // Short status for displays: OFF (destroyed), HOT (overheated), EMPTY, or the normal state
 function pdcStatus(m) {
-  if (!loadout[m.sys]) return 'NONE';
   if (damage[m.sys] <= 0) return 'OFFLINE';
   if (m.rounds <= 0) return 'EMPTY';
   if (m.hot) return 'OVERHEAT';
@@ -160,21 +231,26 @@ const TORP_WARN_R = 10000;
    -Y bottom, -Z nose, +Z aft; [0,0,0] = anywhere). Systems run from 1 (nominal) down to 0 (offline).
    At zero hull integrity the ship is lost and the state resets. */
 const HIT_HULL = 0.15, HIT_SYS_MIN = 0.4, HIT_SYS_RAND = 0.25;
-const DMG_SYSTEMS = [
+// Hull systems are always present; each fitted module (except tanks) is a system too, under its hardpoint's id,
+// placed by the hardpoint's position
+const HULL_SYSTEMS = [
   { id: 'reactor',    name: 'REACTOR',     dir: [0, 1, 0.6] },
   { id: 'radiators',  name: 'RADIATORS',   dir: [0, 0, 1] },
   { id: 'capacitors', name: 'CAPACITORS',  dir: [0, -1, -0.4] },
-  { id: 'rail',       name: 'RAILGUN FCS', dir: [0, -1, -1] },
-  { id: 'laser',      name: 'LASER',       dir: [0, 0.4, -1] },
   { id: 'scope',      name: 'TELESCOPE',   dir: [0, 0, -1] },
-  { id: 'pdcTop',     name: 'PDC TOP',     dir: [0, 1, 0] },
-  { id: 'pdcBot',     name: 'PDC BOT',     dir: [0, -1, 0] },
   { id: 'main',       name: 'MAIN DRIVE',  dir: [0, 0, 1] },
   { id: 'rcs',        name: 'RCS',         dir: [0, 0, 0] },
 ];
+let DMG_SYSTEMS = [];
 let damage = {}, hullInt = 1, hitShakeUntil = 0;
 let hullImpacts = [];   // where torpedoes struck, for the ship view: body direction (y, z) and time
-function resetDamage() { damage = Object.fromEntries(DMG_SYSTEMS.map(s => [s.id, 1])); hullInt = 1; hullImpacts = []; }
+function resetDamage() {
+  DMG_SYSTEMS = [...HULL_SYSTEMS, ...Object.keys(HARDPOINTS).filter(sl => modAt(sl) && modAt(sl).role !== 'tank')
+    .map(sl => ({ id: sl, name: slotLabel(sl), dir: HARDPOINTS[sl].pos }))];
+  damage = Object.fromEntries(DMG_SYSTEMS.map(s => [s.id, 1])); hullInt = 1; hullImpacts = [];
+}
+// Damage of the module fitted for a role (0 when none is fitted)
+const roleDamage = role => { const sl = roleSlot(role); return sl ? (damage[sl] ?? 1) : 0; };
 resetDamage();
 const dmgState = v => v >= 0.999 ? 'OK' : v > 0 ? 'DEGR' : 'OFF';
 const anyDamage = () => hullInt < 1 || DMG_SYSTEMS.some(s => damage[s.id] < 1);
@@ -195,8 +271,6 @@ function applyTorpedoHit(tp) {
   const w = DMG_SYSTEMS.map(s => {
     const d = new THREE.Vector3(...s.dir), L = d.length();
     const c = L > 0 ? Math.max(0, from.dot(d)/L) : 0.3;
-    const notFitted = { rail: !loadout.railgun, laser: !loadout.laser, pdcTop: !loadout.pdcTop, pdcBot: !loadout.pdcBot }[s.id];
-    if (notFitted) return 0;                         // nothing there to damage
     return damage[s.id] > 0 ? 0.15 + c*c : 0.02;
   });
   let r = Math.random()*w.reduce((a, b) => a + b, 0), k = 0;
@@ -230,10 +304,10 @@ function shipDestroyed(cause) {
 function restartAfterDeath() {
   // The whole scenario restarts: the ship returns to its starting orbit position, so the targets and the
   // frigate must too, or they are left hundreds of km away (resetTargets also clears torpedoes and flashes)
-  resetShip(); resetDamage(); resetPdcMounts(); resetTargets();
+  applyModuleStats(); resetShip(); resetDamage(); resetPdcMounts(); resetTargets();
   projectiles = [];
   battery = POWER.battCap; hullT = THERM.tStart; railCD = 0; warpIdx = 0;
-  mainProp = SHIP.mainProp0; rcsProp = SHIP.rcsProp0; podProp = SHIP.tankProp0*tankCount(); podsOn = tankCount() > 0;
+  mainProp = SHIP.mainProp0; rcsProp = SHIP.rcsProp0; podProp = tankProp0Total(); podsOn = tankCount() > 0;
   leadHold = false; leadPrev = null; hullHits = 0;
   for (const t of targets) if (t.hostile) t.fireT = 10;
   const el = document.getElementById('death');
@@ -417,19 +491,22 @@ let ship = { ...SHIP_START };
 const shipQ = SHIP_Q0.clone();
 const omega = new THREE.Vector3();
 let mainProp = SHIP.mainProp0, rcsProp = SHIP.rcsProp0;
-let podProp = SHIP.tankProp0*tankCount(), podsOn = tankCount() > 0, masterMode = 'OFF', masterGuardOpen = false;   // master arm: OFF / ON / TNG   // fuel pods (feed the main drive first)
-function shipMass() { return dryMass() + mainProp + rcsProp + (podsOn ? SHIP.tankDry*tankCount() + podProp : 0); }
+let podProp = tankProp0Total(), podsOn = tankCount() > 0, masterMode = 'OFF', masterGuardOpen = false;   // master arm: OFF / ON / TNG   // fuel pods (feed the main drive first)
+function shipMass() { return dryMass() + mainProp + rcsProp + (podsOn ? tankDryTotal() + podProp : 0); }
 // Moments of inertia [pitch, yaw, roll] about the model origin (centre of mass offsets are ignored):
 // the hull with its internal propellant as a 3.6 x 3.8 x 23.7 m box, the radiator fins (300 kg, 9.8 m aft,
-// 11.6 m tall), and each fitted module as a point mass at its centre. The railgun, far forward, dominates.
+// 11.6 m tall), and each fitted module as a point mass at its centre (com). A spinal gun, far forward, dominates.
 function shipI() {
   const mh = SHIP.hullDry + mainProp + rcsProp;
   const I = [mh*(3.8*3.8 + 23.7*23.7)/12, mh*(3.6*3.6 + 23.7*23.7)/12, mh*(3.6*3.6 + 3.8*3.8)/12];
   I[0] += 300*(5.8*5.8/3 + 9.8*9.8); I[1] += 300*9.8*9.8; I[2] += 300*5.8*5.8/3;
-  for (const [k, m] of Object.entries(MODULES)) {
-    if (!loadout[k]) continue;
-    const mass = m.tank ? (podsOn ? SHIP.tankDry + podProp/Math.max(1, tankCount()) : 0) : m.mass;
-    const [x, y, z] = m.pos;
+  const p0 = tankProp0Total();
+  for (const slot of Object.keys(HARDPOINTS)) {
+    const m = modAt(slot);
+    if (!m) continue;
+    // A tank holds its share of the remaining pod propellant while the pods are attached
+    const mass = m.role === 'tank' ? (podsOn ? m.mass + (p0 > 0 ? podProp*m.prop/p0 : 0) : 0) : m.mass;
+    const [x, y, z] = hpToBody(slot, m.com);
     I[0] += mass*(y*y + z*z); I[1] += mass*(x*x + z*z); I[2] += mass*(x*x + y*y);
   }
   return I;
@@ -439,7 +516,7 @@ const turnAccel = () => shipI().map((v, i) => rcsTorqueAxis(i)/v*180/Math.PI);
 // Delta-v the pods' remaining propellant gives (burned first, with the pods still attached)
 function podDv() {
   if (!podsOn) return 0;
-  const m = dryMass() + mainProp + rcsProp + SHIP.tankDry*tankCount();
+  const m = dryMass() + mainProp + rcsProp + tankDryTotal();
   return SHIP.mainIsp*G0*Math.log((m + podProp)/m);
 }
 let battery = POWER.battCap, hullT = THERM.tStart;
@@ -666,7 +743,7 @@ function orbitInfo() {
 function fireRail() {
   const mass = shipMass();
   const fwd = new THREE.Vector3(0,0,-1).applyQuaternion(shipQ);
-  const mz = bodyOff(RAIL_MUZZLE);
+  const mz = bodyOff(railMuzzle());
   const V = WEAPON.railV, m = WEAPON.railMass;
   // Diagnostic: nose error to the solver's direction, and the miss the solver predicts for this exact shot
   const Ls = leadVector();
@@ -694,7 +771,7 @@ function fireRail() {
   ship.vx -= fwd.x*dv; ship.vy -= fwd.y*dv; ship.vz -= fwd.z*dv;
   battery -= WEAPON.railEnergy;
   hullT += WEAPON.railHeat/THERM.capacity;
-  railCD = WEAPON.railCooldown/Math.max(0.34, damage.rail);   // damaged fire control cycles slower
+  railCD = WEAPON.railCooldown/Math.max(0.34, roleDamage('railgun'));   // a damaged railgun cycles slower
   sfx.railShot();
   log(`RAIL FIRED  MUZZLE ${V} m/s`);
 }
@@ -751,7 +828,7 @@ function shootingSolution(tgt) {
   let tt = leadTime(rel, relV);
   if (tt === null) return null;
   const dir = rel.clone().addScaledVector(relV, tt).normalize();
-  const mz = bodyOff(RAIL_MUZZLE);                           // the shot leaves from the muzzle, below and ahead of the origin
+  const mz = bodyOff(railMuzzle());                          // the shot leaves from the muzzle, below and ahead of the origin
   for (let it = 0; it < SOLVE_ITERS; it++) {
     const P = propagateTo({ x: ship.x + mz.x, y: ship.y + mz.y, z: ship.z + mz.z,
       vx: ship.vx + dir.x*V, vy: ship.vy + dir.y*V, vz: ship.vz + dir.z*V }, tt);
@@ -769,7 +846,7 @@ function shootingSolution(tgt) {
 // Lead point for the current target, relative to the ship (world axes), or null without an intercept
 function leadVector() {
   const tgt = tgtLocal(targets[curTarget]);   // no fire-control solution beyond own-sensor range
-  if (!tgt || !loadout.railgun) return null;   // the solution is for the railgun
+  if (!tgt || !hasRole('railgun')) return null;   // the solution is for the railgun
   if (leadCache && leadCache.simT === simT && leadCache.tgt === tgt) return leadCache.L ? leadCache.L.clone() : null;
   const sol = shootingSolution(tgt);
   leadCache = { simT, tgt, L: sol ? sol.L.clone() : null };
@@ -868,8 +945,8 @@ function physicsStep(h) {
   railCD = Math.max(0, railCD - h);
   if (railReq) {
     railReq = false;
-    if (!loadout.railgun) log('RAIL NOT FITTED');
-    else if (damage.rail <= 0) log('RAIL OFFLINE');
+    if (!hasRole('railgun')) log('RAIL NOT FITTED');
+    else if (roleDamage('railgun') <= 0) log('RAIL OFFLINE');
     else if (railCD <= 0 && battery >= WEAPON.railEnergy && masterMode !== 'OFF') fireRail();
     else if (railCD > 0) log(`RAIL CYCLING ${railCD.toFixed(1)} s`);
     else log('RAIL CAPACITOR LOW');
@@ -924,7 +1001,7 @@ function physicsStep(h) {
     // Barrel cooling, every step; an overheated mount comes back once it has cooled to PDC_HEAT_RESUME
     m.heat = Math.max(0, m.heat - PDC_COOL*h);
     if (m.hot && m.heat <= PDC_HEAT_RESUME) { m.hot = false; log(`${m.name} COOLED · READY`); }
-    if (!loadout[m.sys] || m.cd > 0 || masterMode === 'OFF' || battery < PDC_ENERGY || damage[m.sys] <= 0 || m.hot || m.rounds <= 0) continue;
+    if (m.cd > 0 || masterMode === 'OFF' || battery < PDC_ENERGY || damage[m.sys] <= 0 || m.hot || m.rounds <= 0) continue;
     const nW = new THREE.Vector3(...m.dir).applyQuaternion(shipQ);
     const mP = new THREE.Vector3(...m.pos).applyQuaternion(shipQ).add(new THREE.Vector3(ship.x, ship.y, ship.z));
     // Nearest torpedo inside range and the mount's arc
@@ -1006,14 +1083,14 @@ function physicsStep(h) {
   }
 
   /* --- laser: instant, beam-limited, line-of-sight check in body frame --- */
-  laserFiring = c.laser && laserArmed && masterMode !== 'OFF' && battery > 0 && hullT < THERM.tMax && !brownout && damage.laser > 0 && loadout.laser;
+  laserFiring = c.laser && laserArmed && masterMode !== 'OFF' && battery > 0 && hullT < THERM.tMax && !brownout && roleDamage('laser') > 0;
   if (laserFiring) {
     const qi = shipQ.clone().invert();
     const ld = laserDirBody();
     let best = null, bestD = Infinity;
     for (const t of targets) {
       const b = new THREE.Vector3(t.x-ship.x, t.y-ship.y, t.z-ship.z).applyQuaternion(qi)
-        .sub(new THREE.Vector3(...LASER_EMITTER));             // from the emitter, in body axes
+        .sub(new THREE.Vector3(...laserEmitter()));            // from the emitter, in body axes
       const dist = b.dot(ld);                                   // distance along the beam
       const off = b.clone().addScaledVector(ld, -dist).length();  // miss distance from the beam
       if (dist > 0 && dist < WEAPON.laserRange && off < t.radius + WEAPON.laserTol && dist < bestD) {
@@ -1805,8 +1882,8 @@ function drawTactical(g, W, H, idx) {
   const line = (s, col = PH) => { txt(g, RX, y, s, col, '24px monospace'); y += 31; };
   line(`ALT ${((Math.hypot(ship.x,ship.y,ship.z)-R_E)/1e3).toFixed(1)} km`);
   line(`DV  ${dvRemaining().toFixed(0)} m/s`);
-  if (!loadout.railgun) line('RAIL NOT FITTED', DIM); else line(damage.rail <= 0 ? 'RAIL OFFLINE' : `RAIL ${railCD > 0 ? 'CYC ' + railCD.toFixed(1) + 's' : 'READY'}`, damage.rail <= 0 ? RED : PH);
-  if (!loadout.laser) line('LASER NOT FITTED', DIM); else line(damage.laser <= 0 ? 'LASER OFFLINE' : `LASER ${laserArmed ? (laserFiring ? 'FIRING' : 'ARMED') : 'SAFE'}`, laserArmed || damage.laser <= 0 ? RED : PH);
+  if (!hasRole('railgun')) line('RAIL NOT FITTED', DIM); else line(roleDamage('railgun') <= 0 ? 'RAIL OFFLINE' : `RAIL ${railCD > 0 ? 'CYC ' + railCD.toFixed(1) + 's' : 'READY'}`, roleDamage('railgun') <= 0 ? RED : PH);
+  if (!hasRole('laser')) line('LASER NOT FITTED', DIM); else line(roleDamage('laser') <= 0 ? 'LASER OFFLINE' : `LASER ${laserArmed ? (laserFiring ? 'FIRING' : 'ARMED') : 'SAFE'}`, laserArmed || roleDamage('laser') <= 0 ? RED : PH);
   y += 10;
   for (const l of tgtLines) line(l);
   y += 10;
@@ -1814,8 +1891,8 @@ function drawTactical(g, W, H, idx) {
   line(threats ? `THREAT ${threats} TORP` : 'THREAT NONE', threats ? RED : DIM);
   line(tti !== null ? `TTI ${tti.toFixed(1)}s ${fmtDist(tRng)}` : 'TTI --', tti !== null && tti < 20 ? RED : PH);
   const pdcS = m => ({ NONE: '--', OFFLINE: 'OFF', EMPTY: 'EMP', OVERHEAT: 'HOT', SAFE: 'SAFE', FIRING: 'FIRE', READY: 'RDY' })[pdcStatus(m)];
-  line(`PDC T ${pdcS(PDC_MOUNTS[0])} B ${pdcS(PDC_MOUNTS[1])}`,
-    PDC_MOUNTS.some(m => ['OFFLINE', 'EMPTY', 'OVERHEAT'].includes(pdcStatus(m))) ? AMB : PH);
+  line(PDC_MOUNTS.length ? 'PDC ' + PDC_MOUNTS.map(m => `${m.tag} ${pdcS(m)}`).join(' ') : 'PDC NONE',
+    PDC_MOUNTS.some(m => ['OFFLINE', 'EMPTY', 'OVERHEAT'].includes(pdcStatus(m))) ? AMB : PDC_MOUNTS.length ? PH : DIM);
   line(`HULL ${(hullInt*100).toFixed(0)}%`, hullInt <= 0.25 ? RED : hullInt < 1 ? AMB : PH);
 }
 
@@ -1885,16 +1962,17 @@ function drawWeapons(g, W, H, idx) {
   let y = 78;
   const line = (s, col = PH) => { txt(g, 30, y, s, col, '25px monospace'); y += 27; };
   const dmgTag = id => damage[id] < 1 && damage[id] > 0 ? '  DMG' : '';
-  if (!loadout.railgun) line('RAIL  NOT FITTED', DIM);
-  else if (damage.rail <= 0) line('RAIL  OFFLINE', RED);
-  else line(`RAIL  ${railCD > 0 ? 'CYCLING ' + railCD.toFixed(1) + ' s' : 'READY'}${dmgTag('rail')}`, railCD > 0 || damage.rail < 1 ? AMB : PH);
-  if (!loadout.laser) line('LASER NOT FITTED', DIM);
-  else if (damage.laser <= 0) line('LASER OFFLINE', RED);
-  else line(`LASER ${laserArmed ? (guardOpen ? 'ARMED' : 'ARMED (GUARD)') : 'SAFE'}${laserFiring ? ' FIRING' : ''}${dmgTag('laser')}`, laserArmed ? RED : PH);
+  const rs = roleSlot('railgun'), ls = roleSlot('laser');
+  if (!rs) line('RAIL  NOT FITTED', DIM);
+  else if (damage[rs] <= 0) line('RAIL  OFFLINE', RED);
+  else line(`RAIL  ${railCD > 0 ? 'CYCLING ' + railCD.toFixed(1) + ' s' : 'READY'}${dmgTag(rs)}`, railCD > 0 || damage[rs] < 1 ? AMB : PH);
+  if (!ls) line('LASER NOT FITTED', DIM);
+  else if (damage[ls] <= 0) line('LASER OFFLINE', RED);
+  else line(`LASER ${laserArmed ? (guardOpen ? 'ARMED' : 'ARMED (GUARD)') : 'SAFE'}${laserFiring ? ' FIRING' : ''}${dmgTag(ls)}`, laserArmed ? RED : PH);
   line(`IN FLIGHT ${projectiles.length}`);
+  if (!PDC_MOUNTS.length) line('PDC   NOT FITTED', DIM);
   for (const m of PDC_MOUNTS) {
     const st = pdcStatus(m);
-    if (st === 'NONE') { line(`${m.name} NOT FITTED`, DIM); continue; }
     const col = st === 'OFFLINE' || st === 'EMPTY' || st === 'OVERHEAT' ? RED : st === 'SAFE' ? PH : AMB;
     line(`${m.name} ${st.padEnd(8)} ${String(m.rounds).padStart(4)} RDS  HEAT ${String(Math.round(m.heat*100)).padStart(3)}%${dmgTag(m.sys)}`, col);
   }
@@ -2300,9 +2378,10 @@ function drawShip(g, W, H, idx) {
   // Fuel pods: one pill on each side, attached to the hull edge and clear of the callout arrows.
   // The fill shows the remaining propellant.
   if (podsOn) {
-    const f = clamp(podProp/(SHIP.tankProp0*Math.max(1, tankCount())), 0, 1);
+    const f = clamp(podProp/Math.max(1e-9, tankProp0Total()), 0, 1);
     for (const s of [-1, 1]) {
-      if (!(s > 0 ? loadout.tankTop : loadout.tankBot)) continue;
+      // a pod on this side if a tank is fitted on a pylon of that side (u > 0 is body +Y, the top)
+      if (!slotsWithRole('tank').some(sl => (HARDPOINTS[sl].pos[1] > 0) === (s > 0))) continue;
       const pu0 = s > 0 ? 36 : -72, pw = 36, pl = 70, pv0 = 136;
       g.beginPath();
       if (g.roundRect) g.roundRect(pu0, pv0, pw, pl, pw/2); else g.rect(pu0, pv0, pw, pl);
@@ -2327,7 +2406,7 @@ function drawShip(g, W, H, idx) {
   };
   dmgBox('reactor', 4, -30, 34, 300);
   dmgBox('capacitors', -38, -192, 34, 152);
-  dmgBox('rail', -38, -262, 34, 62);              // FCS module
+  if (roleSlot('railgun')) dmgBox(roleSlot('railgun'), -38, -262, 34, 62);   // FCS module: the railgun's state
   dmgBox('radiators', -38, -30, 34, 300);         // coolant loop
   if (radDeployed) for (const s of [-1, 1]) dmgBox('radiators', s > 0 ? HW : -HW - RL, PV - 35, RL, 70);
   dmgBox('main', -22, HE, 44, 18);
@@ -2363,8 +2442,8 @@ function drawShip(g, W, H, idx) {
   // PDC mounts: one on each side of the hull, with their coverage (PDC_ARC either side of the outward axis).
   // The barrel points along the last shot for 1.5 s, otherwise straight out.
   // Body to drawing frame: u = body Y, v = body Z (aft positive); frame angle 0 is +u.
-  for (const [m, s] of [[PDC_MOUNTS[0], 1], [PDC_MOUNTS[1], -1]]) {
-    if (!loadout[m.sys]) continue;
+  for (const m of PDC_MOUNTS) {
+    const s = m.pos[1] >= 0 ? 1 : -1;                // top or bottom of the hull
     const u0 = s*(HW + 10), v0 = -10, e = damage[m.sys];
     const firingNow = simT - (m.lastFire ?? -1e9) < 0.3;
     const col = e <= 0 ? RED : masterMode === 'OFF' ? DIM : firingNow ? AMB : e < 1 ? AMB : PH;
@@ -2390,7 +2469,6 @@ function drawShip(g, W, H, idx) {
   // PDC labels beside their coverage fans (screen coordinates)
   // Label: name and rounds left, or the fault; a heat bar under it fills toward overheat
   const pdcLab = (m, y) => {
-    if (!loadout[m.sys]) return;
     const st = pdcStatus(m), bad = st === 'OFFLINE' || st === 'EMPTY' || st === 'OVERHEAT';
     const text = st === 'OFFLINE' ? `${m.name} OFF` : st === 'EMPTY' ? `${m.name} EMPTY` : st === 'OVERHEAT' ? `${m.name} HOT` : `${m.name} ${m.rounds}`;
     txt(g, sx(5), y, text, bad ? RED : damage[m.sys] < 1 || m.rounds <= PDC_LOW_ROUNDS ? AMB : PH, '18px monospace', 'center');
@@ -2398,8 +2476,7 @@ function drawShip(g, W, H, idx) {
     g.strokeStyle = DIM; g.lineWidth = 1; g.strokeRect(bx, by, 90, 6);
     g.fillStyle = m.hot ? RED : m.heat > 0.7 ? AMB : PH; g.fillRect(bx + 1, by + 1, 88*m.heat, 4);
   };
-  pdcLab(PDC_MOUNTS[0], cy - HW - 74);
-  pdcLab(PDC_MOUNTS[1], cy + HW + 82);
+  for (const m of PDC_MOUNTS) pdcLab(m, m.pos[1] >= 0 ? cy - HW - 74 : cy + HW + 82);
 
   /* ---------- callouts, in screen coordinates ---------- */
   // above the ship (module outer edge at screen y 217)
@@ -2416,7 +2493,8 @@ function drawShip(g, W, H, idx) {
   callArrow(sx(90), 66, sx(90), 219);
 
   // below the ship (module outer edge at screen y 293)
-  label(damage.rail < 1 ? `FCS ${dTxt('rail')}` : 'FCS', sx(-231), 438, dCol('rail', fcsCol));
+  const rsl = roleSlot('railgun'), lsl = roleSlot('laser');
+  label(rsl && damage[rsl] < 1 ? `FCS ${dTxt(rsl)}` : 'FCS', sx(-231), 438, rsl ? dCol(rsl, fcsCol) : fcsCol);
   callArrow(sx(-231), 428, sx(-231), 292);
   label(damage.capacitors < 1 ? `CAPACITORS ${dTxt('capacitors')}` : `CAPACITORS ${(chg*100).toFixed(0)}%`, sx(-122), 462, dCol('capacitors', PH));
   callArrow(sx(-122), 444, sx(-122), 292);
@@ -2427,7 +2505,7 @@ function drawShip(g, W, H, idx) {
   label(damage.scope < 1 ? `SCOPE ${dTxt('scope')}` : 'SCOPE', sx(-282), 438, dCol('scope', PH));
   callArrow(sx(-282), 428, sx(-282), 262);
   // Systems without a module drawn: shown only when damaged, on the bottom row
-  if (damage.laser < 1) txt(g, 14, 462, `LASER ${dTxt('laser')}`, dCol('laser', PH), '20px monospace', 'left');
+  if (lsl && damage[lsl] < 1) txt(g, 14, 462, `LASER ${dTxt(lsl)}`, dCol(lsl, PH), '20px monospace', 'left');
   if (damage.rcs < 1) txt(g, W - 14, 462, `RCS ${dTxt('rcs')}`, dCol('rcs', PH), '20px monospace', 'right');
 }
 
@@ -3170,13 +3248,14 @@ startEl.addEventListener('click', () => {
 });
 
 /* ================= HANGAR: 3D loadout editor ================= */
-// The ship model and its modules load the first time the hangar opens (models/ beside index.html).
-// Modules attach to the hull's hardpoint nodes; an empty hardpoint shows a ring that can be clicked.
+// The hull loads the first time the hangar opens (models/ beside index.html); module files load when a module
+// using them is first fitted, and each file is shared by every hardpoint carrying it. Selecting a hardpoint
+// (in the panel or on the model) opens a picker with the catalog modules that fit it.
 const MODEL_DIR = 'models/';
 const hangarEl = document.getElementById('hangar'), hangarLoadEl = document.getElementById('hangarLoad');
 let hangarOpen = false;
-const hangar = { scene: null, cam: null, ship: null, mods: {}, markers: {}, loading: false, loaded: false,
-  yaw: 0.9, pitch: 0.28, dist: 36, drag: null, hover: null, idle: 0 };
+const hangar = { scene: null, cam: null, ship: null, slotObj: {}, markers: {}, files: {}, hullPromise: null, loaded: false,
+  yaw: 0.9, pitch: 0.28, dist: 36, drag: null, hover: null, sel: null, idle: 0 };
 function buildHangarScene() {
   const sc = new THREE.Scene();
   sc.background = new THREE.Color(0x05070a);
@@ -3188,113 +3267,147 @@ function buildHangarScene() {
   hangar.scene = sc;
   hangar.cam = new THREE.PerspectiveCamera(38, window.innerWidth/window.innerHeight, 0.1, 500);
 }
-function loadHangarModels() {
-  if (hangar.loading) return;
-  hangar.loading = true;
-  const loader = new GLTFLoader();
-  const files = ['ship_bare.glb', ...new Set(Object.values(MODULES).map(m => m.file))];
-  const prog = {};
-  let failed = false;
-  const show = () => {
-    if (failed || hangar.loaded) return;             // a late progress event must not hide the failure message
-    const v = Object.values(prog), done = v.reduce((a, q) => a + q.l, 0), tot = v.reduce((a, q) => a + q.t, 0);
-    hangarLoadEl.textContent = `LOADING SHIP ${tot ? Math.round(100*done/tot) : 0}%`;
-  };
-  // Each model is tried as a .glb file (repository, GitHub Pages), then as <name>.glb.json holding the same bytes
-  // in base64 under "glb" (the published artifact can't serve .glb files, but serves JSON)
-  const viaJson = (f, res, rej) => {
-    prog[f] = { l: 0, t: 1 }; show();
-    fetch(MODEL_DIR + f + '.json').then(r => { if (!r.ok) throw new Error(`${r.status} ${f}.json`); return r.json(); })
+// One model file, loaded once (cached promise). Tried as .glb (repository, GitHub Pages), then as <name>.glb.json
+// holding the same bytes in base64 under "glb" (the published artifact can't serve .glb files, but serves JSON).
+const gltfLoader = new GLTFLoader();
+function loadModel(file, onProgress) {
+  if (hangar.files[file]) return hangar.files[file];
+  const viaJson = (res, rej) => {
+    fetch(MODEL_DIR + file + '.json').then(r => { if (!r.ok) throw new Error(`${r.status} ${file}.json`); return r.json(); })
       .then(j => {
         const b64 = atob(j.glb), bytes = new Uint8Array(b64.length);
         for (let i = 0; i < b64.length; i++) bytes[i] = b64.charCodeAt(i);
-        loader.parse(bytes.buffer, MODEL_DIR, gl => { prog[f] = { l: 1, t: 1 }; show(); res([f, gl.scene]); }, rej);
+        gltfLoader.parse(bytes.buffer, MODEL_DIR, gl => res(gl.scene), rej);
       }).catch(rej);
   };
-  const get = f => new Promise((res, rej) => loader.load(MODEL_DIR + f, gl => res([f, gl.scene]),
-    e => { prog[f] = { l: e.loaded, t: e.total || e.loaded }; show(); },
-    () => viaJson(f, res, rej)));
-  Promise.all(files.map(get)).then(list => assembleHangar(Object.fromEntries(list))).catch(err => {
+  const pr = new Promise((res, rej) => gltfLoader.load(MODEL_DIR + file, gl => res(gl.scene),
+    e => onProgress && onProgress(e), () => viaJson(res, rej)));
+  pr.catch(() => { delete hangar.files[file]; });     // a failed file is retried next time
+  return (hangar.files[file] = pr);
+}
+function loadHangar() {
+  if (hangar.hullPromise) return;
+  hangarLoadEl.style.display = ''; hangarLoadEl.textContent = 'LOADING SHIP';
+  let failed = false;
+  const fitted = [...new Set(Object.keys(HARDPOINTS).map(modAt).filter(Boolean).map(m => m.file))];
+  hangar.hullPromise = Promise.all([
+    loadModel('ship_bare.glb', e => { if (!failed && e.total) hangarLoadEl.textContent = `LOADING SHIP ${Math.round(100*e.loaded/e.total)}%`; }),
+    ...fitted.map(f => loadModel(f)),
+  ]).then(([hull]) => {
+    hangar.ship = hull; hangar.scene.add(hull);
+    for (const [slot, hp] of Object.entries(HARDPOINTS)) {
+      const node = hull.getObjectByName(hp.node);
+      if (!node) { console.warn('missing hardpoint node', hp.node); continue; }
+      hp.obj = node;
+      // Hardpoint marker: a ring flat on the mount, and an invisible sphere to make it easy to click
+      const mk = new THREE.Group();
+      const ring = new THREE.Mesh(new THREE.TorusGeometry(0.65, 0.06, 8, 48),
+        new THREE.MeshBasicMaterial({ color: 0x7dff9a, transparent: true, opacity: 0.85, toneMapped: false }));
+      ring.rotation.x = Math.PI/2; mk.add(ring); mk.userData.ring = ring;
+      const pick = new THREE.Mesh(new THREE.SphereGeometry(1.1, 12, 8), new THREE.MeshBasicMaterial({ visible: false }));
+      pick.userData.slot = slot; mk.add(pick); mk.userData.pick = pick;
+      node.add(mk); hangar.markers[slot] = mk;
+    }
+    hangar.loaded = true;
+    hangarLoadEl.style.display = 'none';
+    for (const slot of Object.keys(HARDPOINTS)) showSlotModel(slot);
+    refreshHangar();
+  }).catch(err => {
     console.error(err);
-    failed = true; hangar.loading = false;           // opening the hangar again retries
+    failed = true; hangar.hullPromise = null;          // opening the hangar again retries
     hangarLoadEl.textContent = 'SHIP MODEL FAILED TO LOAD · LAUNCH STILL WORKS';
   });
 }
-function assembleHangar(by) {
-  const ship = by['ship_bare.glb'];
-  hangar.scene.add(ship); hangar.ship = ship;
-  for (const [k, m] of Object.entries(MODULES)) {
-    const hp = ship.getObjectByName(m.hp);
-    if (!hp) { console.warn('missing hardpoint', m.hp); continue; }
-    const mod = by[m.file].clone(true);              // shares geometry and materials with the loaded file
-    mod.traverse(o => { if (o.isMesh) o.userData.slot = k; });
-    hp.add(mod); hangar.mods[k] = mod;
-    // Empty-hardpoint marker: a ring flat on the mount, and an invisible sphere to make it easy to click
-    const mk = new THREE.Group();
-    const ring = new THREE.Mesh(new THREE.TorusGeometry(0.65, 0.06, 8, 48),
-      new THREE.MeshBasicMaterial({ color: 0x7dff9a, transparent: true, opacity: 0.85, toneMapped: false }));
-    ring.rotation.x = Math.PI/2; mk.add(ring); mk.userData.ring = ring;
-    const pick = new THREE.Mesh(new THREE.SphereGeometry(1.1, 12, 8), new THREE.MeshBasicMaterial({ visible: false }));
-    pick.userData.slot = k; mk.add(pick); mk.userData.pick = pick;
-    hp.add(mk); hangar.markers[k] = mk;
-  }
-  hangar.loaded = true;
-  hangarLoadEl.style.display = 'none';
-  refreshHangar();
+// Put the module currently fitted on a hardpoint onto the 3D hull (loading its file if needed)
+function showSlotModel(slot) {
+  const hp = HARDPOINTS[slot];
+  if (!hangar.loaded || !hp.obj) return;
+  if (hangar.slotObj[slot]) { hp.obj.remove(hangar.slotObj[slot]); hangar.slotObj[slot] = null; }
+  const mod = modAt(slot);
+  if (!mod) return;
+  const id = loadout[slot];
+  loadModel(mod.file).then(tpl => {
+    if (loadout[slot] !== id || hangar.slotObj[slot]) return;   // changed again while loading
+    const obj = tpl.clone(true);                     // shares geometry and materials with the loaded file
+    obj.traverse(o => { if (o.isMesh) o.userData.slot = slot; });
+    hp.obj.add(obj); hangar.slotObj[slot] = obj;
+  }).catch(err => console.error('module model failed', mod.file, err));
 }
 // Fresh propellant for the current loadout, so the stats show what the ship launches with
 function applyLoadoutToShip() {
   mainProp = SHIP.mainProp0; rcsProp = SHIP.rcsProp0;
-  podProp = SHIP.tankProp0*tankCount(); podsOn = tankCount() > 0;
+  podProp = tankProp0Total(); podsOn = tankCount() > 0;
 }
-function toggleSlot(k) {
-  loadout[k] = !loadout[k];
+function fitModule(slot, id) {
+  if (id !== null && !modulesFor(slot).includes(id)) return;
+  loadout[slot] = id;
   saveLoadout(); sfx.click();
+  showSlotModel(slot);
+  hangar.sel = null;
   refreshHangar();
 }
+function selectSlot(slot) {
+  hangar.sel = hangar.sel === slot ? null : slot;
+  sfx.click();
+  refreshHangar();
+}
+const moduleKg = m => Math.round(m.mass + (m.prop || 0));
 function refreshHangar() {
   applyLoadoutToShip();
-  for (const k of Object.keys(MODULES)) {
-    if (hangar.mods[k]) hangar.mods[k].visible = loadout[k];
-    const mk = hangar.markers[k];
-    if (mk) {
-      mk.visible = !loadout[k] || hangar.hover === k;
-      mk.userData.ring.material.color.set(loadout[k] ? 0xffb020 : 0x7dff9a);
-    }
-  }
+  refreshMarkers();
   const list = document.getElementById('hpList');
   list.innerHTML = '';
-  for (const [k, m] of Object.entries(MODULES)) {
+  for (const [slot, hp] of Object.entries(HARDPOINTS)) {
+    const mod = modAt(slot);
     const row = document.createElement('div');
-    row.className = 'hp ' + (loadout[k] ? 'on' : 'off') + (hangar.hover === k ? ' hover' : '');
-    const kg = m.tank ? SHIP.tankDry + SHIP.tankProp0 : m.mass;
-    row.innerHTML = `<span>${m.name}</span><span class="st">${loadout[k] ? 'FITTED · ' + Math.round(kg) + ' KG' : 'EMPTY'}</span>`;
-    row.addEventListener('click', () => toggleSlot(k));
-    row.addEventListener('mouseenter', () => { hangar.hover = k; refreshMarkers(); });
+    row.className = 'hp ' + (mod ? 'on' : 'off') + (hangar.sel === slot ? ' sel' : '') + (hangar.hover === slot ? ' hover' : '');
+    row.dataset.slot = slot;
+    row.innerHTML = `<span><span class="slot">${hp.name}</span>${mod ? mod.name : '— EMPTY —'}</span>` +
+      `<span class="st">${mod ? moduleKg(mod) + ' KG' : ''} ${hangar.sel === slot ? '▾' : '▸'}</span>`;
+    row.addEventListener('click', () => selectSlot(slot));
+    row.addEventListener('mouseenter', () => { hangar.hover = slot; refreshMarkers(); });
     row.addEventListener('mouseleave', () => { hangar.hover = null; refreshMarkers(); });
     list.appendChild(row);
+    if (hangar.sel !== slot) continue;
+    // Picker: every catalog module that fits this hardpoint type, and EMPTY
+    const pick = document.createElement('div');
+    pick.className = 'pick';
+    for (const id of [...modulesFor(slot), null]) {
+      const m = id && MODULE_CATALOG[id];
+      const opt = document.createElement('div');
+      opt.className = 'opt' + (loadout[slot] === id ? ' cur' : '');
+      opt.innerHTML = m ? `${m.name} · ${moduleKg(m)} KG<span class="d">${m.desc || ''}</span>` : 'EMPTY<span class="d">leave the hardpoint free</span>';
+      opt.addEventListener('click', ev => { ev.stopPropagation(); fitModule(slot, id); });
+      pick.appendChild(opt);
+    }
+    list.appendChild(pick);
   }
   const ta = turnAccel();
-  const weapons = [loadout.railgun && 'RAIL', loadout.laser && 'LASER',
-    (loadout.pdcTop || loadout.pdcBot) && `PDC x${(loadout.pdcTop ? 1 : 0) + (loadout.pdcBot ? 1 : 0)}`].filter(Boolean).join(' · ') || 'NONE';
+  const counts = {};
+  for (const slot of Object.keys(HARDPOINTS)) { const m = modAt(slot); if (m && m.role !== 'tank') counts[m.short] = (counts[m.short] || 0) + 1; }
+  const weapons = Object.entries(counts).map(([k, n]) => n > 1 ? `${k} x${n}` : k).join(' · ') || 'NONE';
   document.getElementById('hangarStats').textContent =
     `MASS       ${shipMass().toFixed(0)} kg\n` +
     `DELTA-V    ${dvRemaining().toFixed(0)} m/s${tankCount() ? `  (TANKS ${podDv().toFixed(0)})` : ''}\n` +
     `TURN P/Y   ${ta[0].toFixed(1)} / ${ta[1].toFixed(1)} °/s²\n` +
     `TURN ROLL  ${ta[2].toFixed(1)} °/s²\n` +
-    `WEAPONS    ${weapons}`;
+    `MODULES    ${weapons}`;
 }
-// Hover changes only the markers and row highlight (no stats rebuild)
+// Rings: green on empty hardpoints, amber on the selected one, shown on hover too; the rows follow the hover
 function refreshMarkers() {
-  for (const [k, mk] of Object.entries(hangar.markers)) mk.visible = !loadout[k] || hangar.hover === k;
-  document.querySelectorAll('#hpList .hp').forEach((row, i) => row.classList.toggle('hover', Object.keys(MODULES)[i] === hangar.hover));
+  for (const [slot, mk] of Object.entries(hangar.markers)) {
+    mk.visible = !modAt(slot) || hangar.hover === slot || hangar.sel === slot;
+    mk.userData.ring.material.color.set(hangar.sel === slot ? 0xffb020 : modAt(slot) ? 0xc8d8c0 : 0x7dff9a);
+  }
+  document.querySelectorAll('#hpList .hp').forEach(row => row.classList.toggle('hover', row.dataset.slot === hangar.hover));
 }
 function openHangar() {
   hangarOpen = true;
   hangarEl.style.display = 'block';
   if (actx && actx.state === 'running') actx.suspend();   // the cockpit is not running here
   if (!hangar.scene) buildHangarScene();
-  loadHangarModels();
+  hangar.sel = null;
+  loadHangar();
   refreshHangar();
 }
 function launch() {
@@ -3302,17 +3415,17 @@ function launch() {
   hangarEl.style.display = 'none';
   restartAfterDeath();                               // fresh ship and scenario with this loadout
   if (!started) { started = true; log('ORBIT NOMINAL · LEO 400 KM · PROGRADE'); log('GROUND LINK ESTABLISHED'); }
-  const fit = Object.entries(MODULES).filter(([k]) => loadout[k]).map(([, m]) => m.name.replace('DROP TANK', 'TANK'));
+  const fit = Object.keys(HARDPOINTS).filter(modAt).map(slotLabel);
   log(`LOADOUT · ${fit.length ? fit.join(' · ') : 'BARE HULL'}`);
 }
 document.getElementById('launchBtn').addEventListener('click', launch);
-// Clickable things in the hangar: fitted modules, and the pick spheres of empty hardpoints
+// Clickable things in the hangar: fitted modules, and every hardpoint's pick sphere
 function hangarPick(e) {
   if (!hangar.loaded) return null;
   const objs = [];
-  for (const k of Object.keys(MODULES)) {
-    if (loadout[k] && hangar.mods[k]) hangar.mods[k].traverse(o => { if (o.isMesh) objs.push(o); });
-    else if (hangar.markers[k]) objs.push(hangar.markers[k].userData.pick);
+  for (const slot of Object.keys(HARDPOINTS)) {
+    if (hangar.slotObj[slot]) hangar.slotObj[slot].traverse(o => { if (o.isMesh) objs.push(o); });
+    if (hangar.markers[slot]) objs.push(hangar.markers[slot].userData.pick);
   }
   ndc.set(e.clientX/window.innerWidth*2 - 1, -(e.clientY/window.innerHeight)*2 + 1);
   raycaster.setFromCamera(ndc, hangar.cam);
@@ -3339,7 +3452,7 @@ window.addEventListener('pointerup', e => {
   if (!hangarOpen || !hangar.drag) return;
   const click = hangar.drag.moved < 5;
   hangar.drag = null;
-  if (click && e.target === canvas) { const k = hangarPick(e); if (k) toggleSlot(k); }
+  if (click && e.target === canvas) { const k = hangarPick(e); if (k) selectSlot(k); else if (hangar.sel) { hangar.sel = null; refreshHangar(); } }
 });
 canvas.addEventListener('wheel', e => {
   if (!hangarOpen) return;
@@ -3351,14 +3464,14 @@ window.addEventListener('resize', () => {
 });
 function renderHangar(dt) {
   hangar.idle += dt;
-  if (hangar.idle > 4 && !hangar.drag) hangar.yaw += dt*0.08;   // slow turntable when left alone
+  if (hangar.idle > 4 && !hangar.drag && !hangar.sel) hangar.yaw += dt*0.08;   // slow turntable when left alone
   const cp = Math.cos(hangar.pitch);
-  // The view centre sits left of the screen centre, clear of the panel
   hangar.cam.position.set(hangar.dist*cp*Math.sin(hangar.yaw), hangar.dist*Math.sin(hangar.pitch), hangar.dist*cp*Math.cos(hangar.yaw));
   hangar.cam.lookAt(0, 0, 0);
+  // The view centre sits left of the screen centre, clear of the panel
   hangar.cam.setViewOffset(window.innerWidth, window.innerHeight, 180, 0, window.innerWidth, window.innerHeight);
   const t = performance.now()/1000;
-  for (const mk of Object.values(hangar.markers)) mk.userData.ring.material.opacity = 0.55 + 0.35*Math.sin(t*3);
+  for (const [slot, mk] of Object.entries(hangar.markers)) mk.userData.ring.material.opacity = hangar.sel === slot ? 0.95 : 0.55 + 0.35*Math.sin(t*3);
   renderer.render(hangar.scene, hangar.cam);
 }
 
