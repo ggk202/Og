@@ -56,6 +56,9 @@
   .ovl .rank { font-size:92px; font-weight:bold; line-height:1; letter-spacing:.05em; color:#ffb020; text-align:center; }
   .ovl .rank.s { color:#7dff9a; } .ovl .rank.f { color:#c8382c; }
   .ovl .res { text-align:center; letter-spacing:.3em; font-size:14px; margin-top:6px; }
+  /* Mission briefing transmission: a full-screen CRT drawn on its own canvas */
+  #briefing { position:fixed; inset:0; display:none; z-index:14; background:#000; cursor:pointer; }
+  #briefing canvas { display:block; width:100%; height:100%; }
   /* Death: black at once; the message fades in when .show is added (2 s later) */
   #death { position:fixed; inset:0; display:none; flex-direction:column; align-items:center; justify-content:center;
     background:#000; z-index:15; text-align:center; cursor:default; }
@@ -99,6 +102,7 @@
     <div class="res" id="debriefBest" style="opacity:.7;font-size:12px"></div></div>
     <div class="detail"><table id="debriefTable"></table><div class="sub" style="margin:14px 0 4px">PREVIOUS RUNS</div><table id="debriefRuns"></table></div></div>
   <div class="btns"><button class="go" id="debriefRetry">RETRY · HANGAR</button><button id="debriefMissions">MISSIONS</button></div></div></div>
+<div id="briefing"><canvas id="briefCanvas"></canvas></div>
 <div id="death"><div class="msg"><h1>SHIP LOST</h1><div class="cause" id="deathCause"></div><div class="stats" id="deathStats"></div><small>CLICK TO CONTINUE</small></div></div>
 <div id="settings">
   <div class="panel">
@@ -825,11 +829,31 @@ function planMission1(t0) {
 }
 const MISSIONS = {
   m1: { id: 'm1', name: 'OPERATION LANTERN', title: 'HELIUM-3 DEPOT STRIKE', plan: planMission1,
+    // Briefing transmission: [text, typing speed in chars/s, pause after in s]; 'ANIM' is the transfer diagram
+    orders: [
+      ['// LASER LINK ESTABLISHED - MILITARY SATELLITE LCM-52C092 //', 38, 1.4],
+      ['ORDERS RECEIVED. STAND BY FOR FILE TRANSMISSION.', 32, 1.6],
+      ['', 0, 0.2],
+      ['FILE 7731-LN // CLASSIFIED // COMMANDING OFFICER EYES ONLY', 160, 0.12],
+      ['OPERATION LANTERN', 160, 0.12],
+      ['TARGET .......... HE-3 DEPOT KORVA, LOW LUNAR ORBIT, ALT 100 KM', 170, 0.08],
+      ['STATUS .......... REFINED HELIUM-3 STOCKPILE, ENEMY CONTROLLED', 170, 0.08],
+      ['YOUR VESSEL ..... TRANS-LUNAR COAST, CLOSEST APPROACH 150 KM IN 60 MIN', 170, 0.25],
+      ['ANIM', 0, 0.3],
+      ['1. ENTER LUNAR ORBIT WITHOUT BEING DETECTED.', 170, 0.06],
+      ['2. DESTROY THE DEPOT. INTEL TRACK NUMBER UPLINKS AT LAUNCH.', 170, 0.06],
+      ['3. LEAVE THE LUNAR SPHERE OF INFLUENCE (66,000 KM).', 170, 0.2],
+      ['WARNING: ENEMY PATROL STRENGTH AND POSITIONS UNKNOWN.', 120, 0.1],
+      ['ENEMY SENSORS SEE ENGINE BURNS AT LONG RANGE. RUN COLD WHERE YOU CAN.', 170, 0.06],
+      ['A CIVILIAN ORE HAULER IS DOCKED AT THE DEPOT. AVOID COLLATERAL DAMAGE.', 170, 0.2],
+      ['FIT YOUR VESSEL ACCORDINGLY.', 140, 0.4],
+      ['// END OF TRANSMISSION //', 60, 0],
+    ],
     brief: [
       'Enemy forces store refined helium-3 at the KORVA depot in a 100 km lunar orbit.',
       'You arrive on a lunar flyby in about one hour (closest approach 150 km).',
       'Infiltrate lunar orbit, destroy the depot (track number on the map), and leave the',
-      "Moon's sphere of influence (66,000 km). Two patrol corvettes guard it.",
+      "Moon's sphere of influence (66,000 km). Patrol strength and positions are unknown.",
       'Defences only react once they detect you: engine burns are visible from hundreds of km,',
       'deployed radiators from tens of km; a cold, coasting ship from about 12 km.',
       'Stowed radiators keep you hidden but the ship heats up. A civilian ore hauler is',
@@ -3808,9 +3832,185 @@ function renderMissions() {
 }
 document.getElementById('missionGo').addEventListener('click', () => {
   scenario = missionSel; missionsEl.style.display = 'none'; uiOverlay = false;
-  if (scenario === 'sandbox') mission = null;
-  openHangar();
+  if (scenario === 'sandbox') { mission = null; openHangar(); return; }
+  playBriefing(MISSIONS[scenario], openHangar);     // orders first, then the loadout editor
 });
+
+/* ================= BRIEFING TRANSMISSION =================
+   A CRT in the MFD style fills the screen: power-on line, static and relay clatter, then the orders type out
+   line by line with a blinking cursor. The 'ANIM' line holds a diagram of the Earth-Moon transfer with the
+   known depot position and the unknown patrols. A click or key skips to the end; another continues. */
+const briefEl = document.getElementById('briefing'), briefCv = document.getElementById('briefCanvas');
+const brief = { active: false, t: 0, last: 0, M: null, done: null, steps: [], finished: false };
+function playBriefing(M, done) {
+  uiOverlay = true;
+  Object.assign(brief, { active: true, t: 0, last: performance.now(), M, done, finished: false });
+  // Timeline: when each line starts and ends (the boot takes BOOT s)
+  let t = BRIEF_BOOT; brief.steps = [];
+  for (const [text, cps, pause] of M.orders) {
+    const dur = text === 'ANIM' ? BRIEF_ANIM : cps ? text.length/cps : 0;
+    brief.steps.push({ text, t0: t, t1: t + dur });
+    t += dur + pause;
+  }
+  brief.end = t;
+  briefEl.style.display = 'block';
+  if (actx && actx.state === 'suspended') actx.resume();   // this click is a user gesture
+  briefSounds();
+  requestAnimationFrame(briefFrame);
+}
+const BRIEF_BOOT = 2.2, BRIEF_ANIM = 4.5, BRIEF_ANIM_ROWS = 8;
+// Boot sound: a CRT thunk, rising static, and relays clattering back and forth; a tick as each line starts
+function briefSounds() {
+  if (!actx) return;
+  thump(intBus, 55, 0.5, 0.5, 0.2);
+  burst(intBus, 'bandpass', 3200, 0.6, 1.4, 0.06, 0.35);
+  burst(intBus, 'lowpass', 900, 0.7, 0.3, 0.12, 0.25);
+  for (let i = 0; i < 34; i++) {                     // relays: clusters of sharp clicks at two pitches
+    const d = 0.45 + i*0.045 + Math.random()*0.02;
+    burst(intBus, 'bandpass', i % 2 ? 2600 : 1700, 3, 0.012, 0.22 + Math.random()*0.15, d);
+    if (i % 5 === 0) thump(intBus, 140, 0.03, 0.15, d);
+  }
+  for (const st of brief.steps) if (st.text) burst(intBus, 'bandpass', 2300, 2, 0.01, 0.07, st.t0);
+}
+function briefAdvance() {
+  if (!brief.active) return;
+  if (brief.t < brief.end) { brief.t = brief.end; return; }   // first press: show everything
+  brief.active = false; briefEl.style.display = 'none';
+  const done = brief.done; brief.done = null;
+  if (done) done();
+}
+briefEl.addEventListener('click', briefAdvance);
+window.addEventListener('keydown', e => { if (brief.active && e.code !== 'Escape') { e.preventDefault(); briefAdvance(); } });
+function briefFrame(now) {
+  if (!brief.active) return;
+  const dt = Math.min(0.1, (now - brief.last)/1000); brief.last = now;
+  brief.t += dt;
+  const dpr = Math.min(window.devicePixelRatio || 1, 2), W = Math.round(window.innerWidth*dpr), H = Math.round(window.innerHeight*dpr);
+  if (briefCv.width !== W || briefCv.height !== H) { briefCv.width = W; briefCv.height = H; }
+  drawBriefing(briefCv.getContext('2d'), W, H, brief.t);
+  requestAnimationFrame(briefFrame);
+}
+function drawBriefing(g, W, H, t) {
+  g.fillStyle = '#000'; g.fillRect(0, 0, W, H);
+  // Power-on: a bright line opens into the raster (0.2-0.7 s)
+  if (t < 0.2) return;
+  if (t < 0.7) {
+    const k = (t - 0.2)/0.5, h = Math.max(2, H*k*k);
+    g.fillStyle = `rgba(160,255,190,${0.9 - 0.6*k})`; g.fillRect(W*0.05, H/2 - h/2, W*0.9, h);
+    return;
+  }
+  const flick = 0.93 + 0.07*Math.random();          // phosphor flicker
+  g.fillStyle = '#021208'; g.fillRect(0, 0, W, H);
+  const rows = brief.steps.length + BRIEF_ANIM_ROWS + 1, Y0 = H*0.12;
+  const fs = Math.max(11, Math.min((H*0.95 - Y0)/(rows*1.5), W/68)), lh = fs*1.5, X = W*0.06;
+  g.globalAlpha = flick;
+  // Header, like an MFD page
+  g.font = `bold ${fs*1.15}px monospace`; g.textBaseline = 'alphabetic';
+  g.fillStyle = PH; g.textAlign = 'left'; g.fillText('SECURE TERMINAL', X, H*0.07);
+  const linked = brief.steps[0] && t > brief.steps[0].t1;
+  g.textAlign = 'right'; g.fillStyle = linked ? PH : DIM; g.fillText(linked ? 'LCM-52C092 · LINK' : 'NO CARRIER', W - X, H*0.07);
+  g.strokeStyle = DIM; g.lineWidth = Math.max(1, fs/10);
+  g.beginPath(); g.moveTo(X*0.8, H*0.085); g.lineTo(W - X*0.8, H*0.085); g.stroke();
+  // Static while booting
+  if (t < BRIEF_BOOT) {
+    const k = 1 - (t - 0.7)/(BRIEF_BOOT - 0.7);
+    const px = Math.max(2, fs/7);
+    for (let i = 0; i < 5000*k; i++) { g.fillStyle = `rgba(150,255,175,${Math.random()*0.8*k})`; g.fillRect(Math.random()*W, Math.random()*H, px, px); }
+    for (let i = 0; i < 6*k; i++) {                // horizontal tearing bands
+      const ty = Math.random()*H, th = H*(0.004 + Math.random()*0.03);
+      g.fillStyle = `rgba(125,255,154,${0.05 + Math.random()*0.12*k})`; g.fillRect(0, ty, W, th);
+    }
+    g.textAlign = 'left'; g.font = `${fs}px monospace`; g.fillStyle = PH;
+    if (Math.floor(t*3) % 2 === 0) g.fillText(t < 1.4 ? 'INITIALISING RELAY BANK...' : 'ACQUIRING LASER CARRIER...', X, Y0);
+  }
+  // The orders, line by line; the cursor sits after the last character typed
+  g.textAlign = 'left'; g.font = `${fs}px monospace`;
+  let y = Y0, cur = null;
+  for (const st of brief.steps) {
+    if (t < st.t0) break;
+    if (st.text === 'ANIM') { drawTransfer(g, X, y - fs, W - 2*X, lh*BRIEF_ANIM_ROWS - fs*0.5, t - st.t0, fs); y += lh*BRIEF_ANIM_ROWS; cur = null; continue; }
+    const n = st.t1 > st.t0 ? Math.min(st.text.length, Math.floor((t - st.t0)/(st.t1 - st.t0)*st.text.length)) : st.text.length;
+    const shown = st.text.slice(0, n);
+    g.fillStyle = /^WARNING/.test(st.text) ? AMB : /^\/\//.test(st.text) ? '#c8ffd6' : PH;
+    g.fillText(shown, X, y);
+    cur = { x: X + g.measureText(shown).width, y };
+    y += lh;
+  }
+  if (t >= BRIEF_BOOT && Math.floor(t*2.5) % 2 === 0) {   // blinking block cursor
+    const c = cur || { x: X, y };
+    g.fillStyle = PH; g.fillRect(c.x + fs*0.15, c.y - fs*0.8, fs*0.6, fs*0.95);
+  }
+  if (t >= brief.end + 0.6 && Math.floor(t*1.5) % 2 === 0) {   // prompt on the line after the transmission
+    g.textAlign = 'left'; g.fillStyle = AMB; g.fillText('> CLICK OR PRESS ANY KEY TO PROCEED TO HANGAR', X, y + lh*0.4);
+  }
+  g.globalAlpha = 1;
+  // CRT glass: scanlines, a slow rolling bar, vignette and a soft reflection
+  g.fillStyle = 'rgba(0,0,0,0.22)';
+  for (let sy = 0; sy < H; sy += 3*(H/900 + 0.5)) g.fillRect(0, sy, W, Math.max(1, H/900));
+  const bar = ((t*0.12) % 1.3 - 0.15)*H;
+  const bg = g.createLinearGradient(0, bar - H*0.06, 0, bar + H*0.06);
+  bg.addColorStop(0, 'rgba(125,255,154,0)'); bg.addColorStop(0.5, 'rgba(125,255,154,0.035)'); bg.addColorStop(1, 'rgba(125,255,154,0)');
+  g.fillStyle = bg; g.fillRect(0, bar - H*0.06, W, H*0.12);
+  const vg = g.createRadialGradient(W/2, H/2, Math.min(W, H)*0.35, W/2, H/2, Math.max(W, H)*0.72);
+  vg.addColorStop(0, 'rgba(0,0,0,0)'); vg.addColorStop(1, 'rgba(0,0,0,0.7)');
+  g.fillStyle = vg; g.fillRect(0, 0, W, H);
+  const gl = g.createLinearGradient(0, 0, W*0.6, H*0.5);
+  gl.addColorStop(0, 'rgba(255,255,255,0.06)'); gl.addColorStop(0.5, 'rgba(255,255,255,0.01)'); gl.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = gl; g.fillRect(0, 0, W, H);
+}
+// Transfer diagram, inside its box: Earth with its low orbit, a half-ellipse transfer drawing out to the Moon
+// with the ship's blip, the Moon's orbit around Earth (an arc), the depot's known orbit and position, and
+// question marks where patrols might be
+function drawTransfer(g, x, y, w, h, t, fs) {
+  const k = clamp(t/BRIEF_ANIM, 0, 1);
+  g.save();
+  g.strokeStyle = DIM; g.lineWidth = Math.max(1, fs/12); g.strokeRect(x, y, w, h);
+  g.beginPath(); g.rect(x, y, w, h); g.clip();
+  g.font = `${fs*0.8}px monospace`; g.fillStyle = DIM; g.textAlign = 'left';
+  g.fillText('FIG. 1 · TRANS-LUNAR TRANSFER (NOT TO SCALE)', x + fs*0.5, y + fs*1.1);
+  const ey = y + h*0.62, ex = x + w*0.14, mx = x + w*0.68, my = ey, er = h*0.11, mr = h*0.075, lo = er*1.4;
+  g.lineWidth = Math.max(1, fs/10);
+  // Earth and its low orbit
+  g.strokeStyle = PH; g.beginPath(); g.arc(ex, ey, er, 0, Math.PI*2); g.stroke();
+  g.strokeStyle = DIM; g.setLineDash([fs*0.3, fs*0.4]); g.beginPath(); g.arc(ex, ey, lo, 0, Math.PI*2); g.stroke();
+  // The Moon's orbit around Earth: a short arc through the Moon
+  g.beginPath(); g.arc(ex, ey, mx - ex, -0.35, 0.2); g.stroke(); g.setLineDash([]);
+  g.fillStyle = PH; g.textAlign = 'center';
+  g.fillText('EARTH', ex, ey + er + fs*1.3);
+  g.strokeStyle = PH; g.beginPath(); g.arc(mx, my, mr, 0, Math.PI*2); g.stroke();
+  g.fillText('MOON', mx, my + mr*2.2 + fs*1.2);   // below the depot's orbit ring
+  // Transfer: upper half of an ellipse from the far side of Earth's low orbit to just short of the Moon
+  const x0 = ex - lo, x1 = mx - mr*2.3, cxT = (x0 + x1)/2, aT = (x1 - x0)/2, bT = Math.min(h*0.48, aT*0.55);
+  const path = s2 => [cxT - aT*Math.cos(Math.PI*s2), ey - bT*Math.sin(Math.PI*s2)];
+  const kp = clamp(k/0.55, 0, 1);
+  g.strokeStyle = AMB; g.setLineDash([fs*0.5, fs*0.3]); g.beginPath();
+  for (let i = 0; i <= Math.round(80*kp); i++) { const [px, py] = path(i/80); i ? g.lineTo(px, py) : g.moveTo(px, py); }
+  g.stroke(); g.setLineDash([]);
+  const [sx, sy] = path(kp*0.97);
+  if (Math.floor(t*6) % 2 === 0 || kp >= 1) { g.fillStyle = AMB; g.fillRect(sx - fs*0.25, sy - fs*0.25, fs*0.5, fs*0.5); }
+  g.fillStyle = AMB; g.textAlign = 'right';
+  g.fillText(kp < 1 ? 'TRANSFER' : 'YOU · T-60 MIN', sx - fs*0.6, sy - fs*0.5);
+  // Depot: its lunar orbit and known position, once the transfer is drawn
+  if (k > 0.55) {
+    const ko = clamp((k - 0.55)/0.2, 0, 1), ro = mr*2;
+    g.globalAlpha *= ko;
+    g.strokeStyle = PH; g.setLineDash([fs*0.2, fs*0.3]); g.beginPath(); g.arc(mx, my, ro, 0, Math.PI*2); g.stroke(); g.setLineDash([]);
+    const da = -0.5, dx = mx + ro*Math.cos(da), dy = my + ro*Math.sin(da);
+    g.fillStyle = PH; g.beginPath(); g.moveTo(dx, dy - fs*0.45); g.lineTo(dx + fs*0.45, dy); g.lineTo(dx, dy + fs*0.45); g.lineTo(dx - fs*0.45, dy); g.closePath(); g.fill();
+    g.textAlign = 'left'; g.fillText('HE-3 DEPOT KORVA', dx + fs*0.9, dy - fs*0.2);
+    g.fillStyle = DIM; g.fillText('100 KM · KNOWN (INTEL)', dx + fs*0.9, dy + fs*0.9);
+    g.globalAlpha /= ko > 0 ? ko : 1;
+  }
+  // Patrols: unknown, so question marks blink at guessed places around the Moon
+  if (k > 0.8) {
+    g.font = `bold ${fs}px monospace`; g.fillStyle = AMB; g.textAlign = 'center';
+    // Guessed patrol places, clear of the labels: upper left, lower left and lower right of the Moon
+    if (Math.floor(t*3) % 2 === 0) for (const [ox, oy] of [[-2.6, -3.4], [-3.8, 2.2], [3.6, 2.4]]) g.fillText('?', mx + mr*ox, my + mr*oy + fs*0.35);
+    g.font = `${fs*0.8}px monospace`; g.textAlign = 'right';
+    g.fillText('WARNING · PATROLS: STRENGTH AND POSITIONS UNKNOWN', x + w - fs*0.6, y + fs*1.1);   // top right of the box
+  }
+  g.restore();
+}
 function openDebrief() {
   uiOverlay = true; debriefEl.style.display = 'flex';
   if (actx && actx.state === 'running') actx.suspend();
