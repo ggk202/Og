@@ -581,7 +581,7 @@ function drawDial(g, d, val) {
     g.strokeStyle = '#b8321f'; g.lineWidth = 9; g.beginPath(); g.arc(c, c, R-12, ang(f0), ang(1)); g.stroke();
   }
   g.strokeStyle = '#1b1b1b'; g.fillStyle = '#1b1b1b';
-  g.textAlign = 'center'; g.textBaseline = 'middle'; g.font = 'bold 21px monospace';
+  g.textAlign = 'center'; g.textBaseline = 'middle'; g.font = 'bold 18px monospace';
   for (let i = 0; i <= 10; i++) {
     const f = i/10, a = ang(f);
     const r2 = R - (i % 5 === 0 ? 22 : 14);
@@ -589,15 +589,15 @@ function drawDial(g, d, val) {
     g.beginPath(); g.moveTo(c + (R-4)*Math.cos(a), c + (R-4)*Math.sin(a)); g.lineTo(c + r2*Math.cos(a), c + r2*Math.sin(a)); g.stroke();
     if (i % 5 === 0) {
       const v = d.min + f*(d.max - d.min);
-      g.fillText(String(Math.round(v)), c + (R-38)*Math.cos(a), c + (R-38)*Math.sin(a));
+      g.fillText(String(Math.round(v)), c + (R-46)*Math.cos(a), c + (R-46)*Math.sin(a));
     }
   }
   const f = clamp((val - d.min)/(d.max - d.min), 0, 1), a = ang(f);
   g.strokeStyle = '#111'; g.lineWidth = 4; g.beginPath();
   g.moveTo(c - Math.cos(a)*12, c - Math.sin(a)*12); g.lineTo(c + Math.cos(a)*(R-26), c + Math.sin(a)*(R-26)); g.stroke();
   g.fillStyle = '#111'; g.beginPath(); g.arc(c, c, 8, 0, Math.PI*2); g.fill();
-  g.font = 'bold 23px monospace'; g.fillText(d.label, c, c+58);
-  g.font = '26px monospace'; g.fillText(d.unit, c, c+82);
+  g.font = 'bold 22px monospace'; g.fillText(d.label, c, c+78);
+  g.font = '22px monospace'; g.fillText(d.unit, c, c+108);
 }
 for (const d of dials) {
   const T = canvasTex(256, 256);
@@ -1229,7 +1229,6 @@ function drawMFD(m) {
 
 const lampState = {};
 function updateDisplays() {
-  for (const d of dials) { drawDial(d.g, d, d.get()); d.tex.needsUpdate = true; }
   const lampOn = {
     overheat: hullT > THERM.tWarn,
     batt: battery < 0.15*POWER.battCap,
@@ -1260,6 +1259,17 @@ function updateNavball() {
 
 function animateCockpit(dt) {
   lampTestT = Math.max(0, lampTestT - dt);
+  // Needles follow their readings through a damped spring, so they accelerate and settle
+  // rather than jumping. Positions are normalised 0..1 across each dial's span.
+  const sdt = Math.min(dt, 0.05);
+  for (const d of dials) {
+    const span = d.max - d.min;
+    const tgt = clamp((d.get() - d.min)/span, 0, 1);
+    d.pv = (d.pv || 0) + (40*(tgt - (d.p ?? tgt)) - 9*(d.pv || 0)) * sdt;
+    d.p = clamp((d.p ?? tgt) + d.pv*sdt, -0.02, 1.02);
+    drawDial(d.g, d, d.min + d.p*span);
+    d.tex.needsUpdate = true;
+  }
   const k = 1 - Math.exp(-dt*18);
   const state = { rad: radDeployed, stab: rcsStab, arm: laserArmed };
   for (const s of switchDefs) {
