@@ -784,10 +784,25 @@ function keypadPress(k) {
     if (keyBuf) log(`TX ${keyBuf}`);
     keyBuf = '';
   } else if (keyBuf.length < 8) keyBuf += k;
+  drawKP();
   sfx.click();
 }
+// One black housing holds the entry screen and the keys. It sits below the navball ring and above the placard.
+add(box(0.26, 0.212, 0.002), new THREE.MeshStandardMaterial({ color: 0x050605, roughness: 0.4, metalness: 0 }), 0, -0.284, PANEL_Z + 0.001);
+const kpScreen = canvasTex(512, 56);
+const kpMesh = new THREE.Mesh(new THREE.PlaneGeometry(0.2, 0.022),
+  new THREE.MeshBasicMaterial({ map: kpScreen.tex, toneMapped: false }));
+kpMesh.position.set(0, -0.19, PANEL_Z + 0.0025); cockpit.add(kpMesh);
+function drawKP() {
+  const g = kpScreen.g, W = 512, H = 56;
+  g.fillStyle = '#06140c'; g.fillRect(0, 0, W, H);
+  g.fillStyle = '#7dff9a'; g.font = 'bold 34px monospace'; g.textAlign = 'left'; g.textBaseline = 'middle';
+  g.fillText(`> ${keyBuf}_`, 14, H/2 + 2);
+  kpScreen.tex.needsUpdate = true;
+}
+drawKP();
 const keypadKeys = [['1', '2', '3'], ['4', '5', '6'], ['7', '8', '9'], ['CLR', '0', 'ENT']];
-keypadKeys.forEach((row, r) => row.forEach((k, c) => makeButton(-0.08 + c*0.08, -0.19 - r*0.05, k, () => keypadPress(k))));
+keypadKeys.forEach((row, r) => row.forEach((k, c) => makeButton(-0.08 + c*0.08, -0.226 - r*0.044, k, () => keypadPress(k))));
 
 /* ================= DISPLAY HELPERS ================= */
 function dvRemaining() {
