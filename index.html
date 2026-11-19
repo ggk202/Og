@@ -602,7 +602,7 @@ function physicsStep(h) {
     if (Math.hypot(tp.x-ship.x, tp.y-ship.y, tp.z-ship.z) < TORP_HULL_R) {
       tp.dead = true; hullHits++;
       flashes.push({ x: tp.x, y: tp.y, z: tp.z, age: 0, dur: 0.6, peak: 0.8, kind: 'hit' });
-      log(`TORPEDO HIT  HULL ${hullHits}`); sfx.hullThump();
+      log(`TORPEDO HIT  HULL ${hullHits}`); sfx.torpHit();
     }
   }
   torpedoes = torpedoes.filter(tp => !tp.dead && tp.age < 90);
@@ -1997,6 +1997,16 @@ const sfx = {
     if (!actx) return;
     thump(hullBus, big ? 35 : 60, big ? 2.0 : 0.6, big ? 1.2 : 0.5);
     burst(hullBus, 'lowpass', 180, 0.7, big ? 1.2 : 0.3, big ? 0.9 : 0.4);
+  },
+  // Torpedo through the hull: a sharp crack, a deep detonation and a long rumble, mostly conducted through the structure
+  torpHit() {
+    if (!actx) return;
+    burst(hullBus, 'bandpass', 2500, 0.9, 0.03, 0.5);
+    burst(intBus, 'bandpass', 600, 0.8, 0.08, 0.3);
+    thump(hullBus, 40, 1.4, 1.2);
+    thump(hullBus, 95, 0.3, 0.5, 0.01);
+    burst(hullBus, 'lowpass', 220, 0.7, 1.0, 0.9, 0.02);
+    burst(intBus, 'bandpass', 180, 1.0, 0.4, 0.3, 0.05);
   },
   // One PDC round: a mechanical clack in the cabin, a breech slam and a thump through the hull
   // Gatling round: a muffled clack in the cabin and a soft thump through the hull. The chatter loop carries the rate.
