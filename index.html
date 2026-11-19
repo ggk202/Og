@@ -520,6 +520,26 @@ function placard(lines, x, y, z, ry) {
 // Placard in the empty panel band between the lower MFD buttons and the switch row (in view)
 placard(['MAX ACCEL', '9 G'], 0, -0.43, PANEL_Z + 0.004, 0);
 
+// Flavour: stencilled markings and indicator jewels in the free band beside the placard (decorative only)
+function decal(lines, x, y, w, color = 'rgba(214,208,180,0.85)') {
+  const cw = 512, ch = 96;
+  const T = canvasTex(cw, ch, (g, W, H) => {
+    g.fillStyle = color; g.font = 'bold 30px monospace'; g.textAlign = 'center'; g.textBaseline = 'middle';
+    lines.forEach((s, i) => g.fillText(s, W/2, H*(i + 1)/(lines.length + 1)));
+  });
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(w, w*ch/cw),
+    new THREE.MeshStandardMaterial({ map: T.tex, transparent: true, depthWrite: false, roughness: 0.9, metalness: 0.1 }));
+  m.position.set(x, y, PANEL_Z + 0.004); cockpit.add(m);
+}
+decal(['MIL-SPEC MK II', 'ASSY 3 · REV C'], -0.42, -0.42, 0.2);
+decal(['HOT SURFACE', 'DO NOT TOUCH'], 0.42, -0.42, 0.2);
+const jewelCols = [0xff3322, 0x33ff66, 0xffaa22];
+[-0.66, -0.6, -0.54, 0.54, 0.6, 0.66].forEach((x, i) => {
+  add(new THREE.SphereGeometry(0.007, 12, 8),
+    new THREE.MeshStandardMaterial({ color: jewelCols[i % 3], emissive: jewelCols[i % 3], emissiveIntensity: i % 2 ? 0.8 : 0.1, roughness: 0.2 }),
+    x, -0.42, PANEL_Z + 0.007);
+});
+
 // Canvas texture helper
 function canvasTex(w, h, draw) {
   const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
