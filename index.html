@@ -92,7 +92,7 @@ const ACTIONS = [
   { id:'cycleTarget',label:'Cycle target',             def:'KeyT', edge:true },
   { id:'cycleRange', label:'Tactical range scale',     def:'KeyM', edge:true },
   { id:'guardMaster', label:'Master arm cover (toggle)', def:'KeyK', edge:true },
-  { id:'masterArm',  label:'Master arm (toggle)',      def:'KeyH', edge:true },
+  { id:'masterArm',  label:'Master arm (cycle OFF/ON/TNG)', def:'KeyH', edge:true },
   { id:'jettison',   label:'Jettison fuel pods',       def:'KeyJ', edge:true },
   { id:'warpUp',     label:'Time warp up',             def:'Period', edge:true },
   { id:'warpDown',   label:'Time warp down',           def:'Comma', edge:true },
@@ -115,7 +115,7 @@ let ship = { ...SHIP_START };
 const shipQ = SHIP_Q0.clone();
 const omega = new THREE.Vector3();
 let mainProp = SHIP.mainProp0, rcsProp = SHIP.rcsProp0;
-let podProp = SHIP.podProp0, podsOn = true, masterArm = false, masterGuardOpen = false;   // fuel pods (feed the main drive first)
+let podProp = SHIP.podProp0, podsOn = true, masterMode = 'OFF', masterGuardOpen = false;   // master arm: OFF / ON / TNG   // fuel pods (feed the main drive first)
 function shipMass() { return SHIP.dry + mainProp + podProp + rcsProp; }
 let battery = POWER.battCap, hullT = THERM.tStart;
 let radDeployed = true, rcsStab = true, laserArmed = false, guardOpen = false, brownout = false;
@@ -294,7 +294,7 @@ function physicsStep(h) {
   railCD = Math.max(0, railCD - h);
   if (railReq) {
     railReq = false;
-    if (railCD <= 0 && battery >= WEAPON.railEnergy && masterArm) fireRail();
+    if (railCD <= 0 && battery >= WEAPON.railEnergy && masterMode !== 'OFF') fireRail();
     else if (railCD > 0) log(`RAIL CYCLING ${railCD.toFixed(1)} s`);
     else log('RAIL CAPACITOR LOW');
   }
@@ -311,7 +311,7 @@ function physicsStep(h) {
       if (segDist(p, t) < t.radius) {
         const vr = Math.hypot(p.vx-t.vx, p.vy-t.vy, p.vz-t.vz);
         const ke = 0.5*WEAPON.railMass*vr*vr;
-        t.integrity -= ke/WEAPON.railDmgDiv;
+        if (masterMode === 'ON') t.integrity -= ke/WEAPON.railDmgDiv;   // TNG fires training rounds: no damage
         p.dead = true;
         log(`RAIL HIT ${t.name}  KE ${(ke/1e6).toFixed(2)} MJ`);
         sfx.hullThump();
@@ -321,7 +321,7 @@ function physicsStep(h) {
   }
 
   /* --- laser: instant, beam-limited, line-of-sight check in body frame --- */
-  laserFiring = c.laser && laserArmed && masterArm && battery > 0 && hullT < THERM.tMax && !brownout;
+  laserFiring = c.laser && laserArmed && masterMode !== 'OFF' && battery > 0 && hullT < THERM.tMax && !brownout;
   if (laserFiring) {
     const qi = shipQ.clone().invert();
     let best = null, bestD = Infinity;
@@ -332,7 +332,7 @@ function physicsStep(h) {
         best = t; bestD = dist;
       }
     }
-    if (best) best.integrity -= WEAPON.laserDmgRate*h;
+    if (best && masterMode === 'ON') best.integrity -= WEAPON.laserDmgRate*h;
   }
 
   /* --- kills --- */
@@ -755,7 +755,7 @@ const stripeTex = canvasTex(128, 128, (g, w, h) => {
   }
   g.restore();
 });
-const masterStripeMat = new THREE.MeshStandardMaterial({ map: stripeTex.tex, roughness: 0.5, metalness: 0.2 });
+const masterStripeMat = new THREE.MeshStandardMaterial({ map: stripeTex.tex, roughness: 0.5, metalness: 0.2, side: THREE.DoubleSide });
 const masterKnobMat = new THREE.MeshStandardMaterial({ color: 0xefe6c8, roughness: 0.35, metalness: 0.05 });
 // Legend plate beside the master arm: MASTER ARM, ON, OFF, TNG, with four screws
 const legendTex = canvasTex(256, 200, (g, w, h) => {
@@ -802,9 +802,18 @@ for (const s of switchDefs) {
       return p;
     };
     const hinge = new THREE.Group(); hinge.position.set(s.x, -0.555, PANEL_Z + 0.075);
-    const coverGeo = new THREE.ExtrudeGeometry(rr(0.068, 0.068, 0.012),
-      { depth: 0.005, bevelEnabled: true, bevelThickness: 0.002, bevelSize: 0.002, bevelSegments: 3, curveSegments: 8 });
-    const cover = new THREE.Mesh(coverGeo, s.id === 'master' ? masterStripeMat : M.metal);
+    let cover;
+    if (s.id === 'master') {
+      // Bent sheet: a shallow arc about the vertical axis, bulging toward the camera
+      const R = 0.15, th = 0.068/R;
+      const geo = new THREE.CylinderGeometry(R, R, 0.068, 16, 1, true, -th/2, th);
+      geo.translate(0, 0.034, -R);
+      cover = new THREE.Mesh(geo, masterStripeMat);
+    } else {
+      const coverGeo = new THREE.ExtrudeGeometry(rr(0.068, 0.068, 0.012),
+        { depth: 0.005, bevelEnabled: true, bevelThickness: 0.002, bevelSize: 0.002, bevelSegments: 3, curveSegments: 8 });
+      cover = new THREE.Mesh(coverGeo, M.metal);
+    }
     hinge.add(cover);
     const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.003, 0.003, 0.072, 10), M.metal);
     barrel.rotation.z = Math.PI/2; hinge.add(barrel);
@@ -1350,10 +1359,11 @@ function animateCockpit(dt) {
     d.tex.needsUpdate = true;
   }
   const k = 1 - Math.exp(-dt*18);
-  const state = { rad: radDeployed, stab: rcsStab, arm: laserArmed, master: masterArm };
+  const state = { rad: radDeployed, stab: rcsStab, arm: laserArmed, master: true };
   for (const s of switchDefs) {
     if (s.id in state) {
-      const target = state[s.id] ? -0.45 : 0.45;
+      // Master arm is a three-position lever: ON up, OFF centre, TNG down
+      const target = s.id === 'master' ? ({ ON: -0.45, OFF: 0, TNG: 0.45 })[masterMode] : (state[s.id] ? -0.45 : 0.45);
       s.pivot.rotation.x += (target - s.pivot.rotation.x) * k;
     }
     if (s.guardPivot) {
@@ -1532,7 +1542,10 @@ function onEdge(code) {
       case 'cycleRange': rangeIdx = (rangeIdx+1) % RANGES.length; break;
       case 'guardMaster': masterGuardOpen = !masterGuardOpen; sfx.click(); break;
       case 'masterArm':
-        if (masterGuardOpen) { masterArm = !masterArm; sfx.click(); log(masterArm ? 'MASTER ARM ON' : 'MASTER ARM SAFE'); }
+        if (masterGuardOpen) {
+          masterMode = { OFF: 'ON', ON: 'TNG', TNG: 'OFF' }[masterMode];
+          sfx.click(); log(masterMode === 'OFF' ? 'MASTER ARM SAFE' : `MASTER ARM ${masterMode}`);
+        }
         else log('MASTER ARM COVER CLOSED');
         break;
       case 'jettison': jettisonPods(); break;
