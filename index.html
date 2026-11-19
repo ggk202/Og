@@ -11,6 +11,16 @@
   #start { position:fixed; inset:0; display:flex; flex-direction:column; align-items:center; justify-content:center;
     background:rgba(0,0,0,.85); cursor:pointer; z-index:10; letter-spacing:.2em; font-size:18px; text-align:center; }
   #start small { font-size:12px; letter-spacing:.05em; opacity:.6; margin-top:10px; }
+  /* Death: black at once; the message fades in when .show is added (2 s later) */
+  #death { position:fixed; inset:0; display:none; flex-direction:column; align-items:center; justify-content:center;
+    background:#000; z-index:15; text-align:center; cursor:default; }
+  #death .msg { opacity:0; transition:opacity 1.5s ease; }
+  #death.show .msg { opacity:1; }
+  #death.show { cursor:pointer; }
+  #death h1 { margin:0; font-size:34px; letter-spacing:.35em; color:#c8382c; font-weight:bold; }
+  #death .cause { margin-top:14px; font-size:15px; letter-spacing:.2em; color:#b9b39a; }
+  #death .stats { margin-top:8px; font-size:13px; letter-spacing:.12em; color:#7d7a6a; }
+  #death small { display:block; margin-top:28px; font-size:12px; letter-spacing:.15em; opacity:.6; color:#cfd8c0; }
   #settings { position:fixed; inset:0; display:none; align-items:center; justify-content:center;
     background:rgba(0,0,0,.8); z-index:20; }
   #settings .panel { background:#101311; border:1px solid #3c4a3a; padding:18px 24px; width:620px; max-height:88vh; overflow:auto; }
@@ -32,6 +42,7 @@
 <body>
 <canvas id="gl"></canvas>
 <div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small></div>
+<div id="death"><div class="msg"><h1>SHIP LOST</h1><div class="cause" id="deathCause"></div><div class="stats" id="deathStats"></div><small>CLICK TO RESTART</small></div></div>
 <div id="settings">
   <div class="panel">
     <h3>CONTROLS</h3>
@@ -126,13 +137,37 @@ function applyTorpedoHit(tp) {
   log(`TORPEDO HIT  HULL ${(hullInt*100).toFixed(0)}%`);
   log(`${s.name} ${damage[s.id] > 0 ? 'DAMAGED ' + (damage[s.id]*100).toFixed(0) + '%' : 'OFFLINE'}`);
   if (hullInt > 0) return false;
-  log('HULL BREACH · SHIP LOST · STATE RESET');
-  sfx.hullThump(true);
-  resetShip(); resetDamage();
-  torpedoes = []; tracers = [];
-  battery = POWER.battCap; hullT = THERM.tStart;
-  for (const t of targets) if (t.hostile) t.fireT = 10;
+  shipDestroyed('HULL BREACH · TORPEDO IMPACT');
   return true;
+}
+
+/* ---------- Death: the view goes black at once and the sim and sound stop; the death screen fades in
+   after DEATH_MSG_DELAY seconds, and a click restarts with a fresh ship ---------- */
+const DEATH_MSG_DELAY = 2;
+let dead = false, deathTimer = null;
+function shipDestroyed(cause) {
+  if (dead) return;
+  dead = true;
+  log(`SHIP LOST · ${cause}`);
+  const el = document.getElementById('death');
+  el.classList.remove('show'); el.style.display = 'flex';
+  document.getElementById('deathCause').textContent = cause;
+  document.getElementById('deathStats').textContent = `T+ ${fmtTime(simT)} · HULL HITS ${hullHits}`;
+  if (actx && actx.state === 'running') actx.suspend();
+  clearTimeout(deathTimer);
+  deathTimer = setTimeout(() => el.classList.add('show'), DEATH_MSG_DELAY*1000);
+}
+function restartAfterDeath() {
+  resetShip(); resetDamage();
+  torpedoes = []; tracers = []; projectiles = []; flashes = [];
+  battery = POWER.battCap; hullT = THERM.tStart; railCD = 0; warpIdx = 0;
+  leadHold = false; leadPrev = null; hullHits = 0;
+  for (const t of targets) if (t.hostile) t.fireT = 10;
+  const el = document.getElementById('death');
+  el.style.display = 'none'; el.classList.remove('show');
+  dead = false;
+  if (actx && actx.state === 'suspended') actx.resume();
+  log('NEW SHIP · ORBIT NOMINAL · LEO 400 KM');
 }
 
 /* ---------- Torpedo guidance (user-supplied, used as written; only `export` removed) ---------- */
@@ -821,7 +856,7 @@ function physicsStep(h) {
 
   /* --- crash into Earth --- */
   if (Math.hypot(ship.x, ship.y, ship.z) < R_E) {
-    resetShip(); groundMsg('IMPACT · ORBIT DECAY · STATE RESET'); sfx.hullThump(true);
+    shipDestroyed('SURFACE IMPACT · ORBIT DECAYED');
   }
 
   /* --- ground messages that have arrived --- */
@@ -2652,6 +2687,11 @@ window.addEventListener('pointerdown', e => {
 window.addEventListener('pointerup', e => held.delete('Mouse' + e.button));
 window.addEventListener('contextmenu', e => e.preventDefault());
 
+// Death screen: clicks only count once the message is showing, so a click mid-fight can't skip it
+document.getElementById('death').addEventListener('click', e => {
+  if (e.currentTarget.classList.contains('show')) restartAfterDeath();
+});
+
 startEl.addEventListener('click', () => {
   initAudio();
   started = true;
@@ -2667,7 +2707,7 @@ function step(dt) {
   const simTime = dt * WARPS[warpIdx];
   const n = Math.max(1, Math.ceil(simTime / PHYS_DT));
   const h = simTime / n;
-  for (let i = 0; i < n; i++) { physicsStep(h); simT += h; }
+  for (let i = 0; i < n && !dead; i++) { physicsStep(h); simT += h; }
 }
 
 let lastFrame = performance.now(), uiAcc = 0;
@@ -2675,7 +2715,7 @@ function frame(now) {
   requestAnimationFrame(frame);
   const dt = Math.min((now - lastFrame)/1000, 0.1);
   lastFrame = now;
-  if (started && !paused && !menuOpen) step(dt);
+  if (started && !paused && !menuOpen && !dead) step(dt);
   animateCockpit(dt);
   uiAcc += dt;
   if (uiAcc > 0.066) { uiAcc = 0; updateDisplays(); }
