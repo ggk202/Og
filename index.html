@@ -74,6 +74,121 @@ let pdcActive = false, pdcSlewRate = 0, pdcLastFire = -1e9;   // sound state set
 let torpWarn = false;                 // a torpedo is inbound within TORP_WARN_R
 let torpMute = false;                 // mute button: silences the warning tone (the lamp still blinks)
 const TORP_WARN_R = 10000;
+
+/* ---------- Torpedo guidance (user-supplied, used as written; only `export` removed) ---------- */
+const TORP_GUIDANCE_DEFAULTS = {
+  N: 4.0,
+  maxAccel: 40,
+  reserveBurn: 4.0,
+  cruiseSpeed: 900,
+  minTgoFactor: 2.0,
+};
+
+function computeTorpedoGuidance(tp, target, h, opts = {}) {
+  const cfg = { ...TORP_GUIDANCE_DEFAULTS, ...opts };
+  const burnLeft = tp.burn ?? 0;
+  if (burnLeft <= 0) return [0, 0, 0];
+
+  const rx = target.x - tp.x;
+  const ry = target.y - tp.y;
+  const rz = target.z - tp.z;
+  const R = Math.hypot(rx, ry, rz);
+  if (R < 1e-3) return [0, 0, 0];
+
+  const ux = rx / R, uy = ry / R, uz = rz / R;
+  const vx = target.vx - tp.vx;
+  const vy = target.vy - tp.vy;
+  const vz = target.vz - tp.vz;
+
+  const vDotU = vx * ux + vy * uy + vz * uz;
+  const Vc = -vDotU;
+
+  const vpx = vx - vDotU * ux;
+  const vpy = vy - vDotU * uy;
+  const vpz = vz - vDotU * uz;
+
+  let dax = 0, day = 0, daz = 0;
+  const tNow = opts.t ?? 0;
+  if (opts.targetAccel) {
+    dax += opts.targetAccel[0];
+    day += opts.targetAccel[1];
+    daz += opts.targetAccel[2];
+    if (opts.gravFn) {
+      const gt = opts.gravFn(target.x, target.y, target.z, tNow);
+      const gm = opts.gravFn(tp.x, tp.y, tp.z, tNow);
+      dax += gt[0] - gm[0];
+      day += gt[1] - gm[1];
+      daz += gt[2] - gm[2];
+    }
+  } else if (tp._prevTgtV && tp._prevH > 1e-6) {
+    const atx = (target.vx - tp._prevTgtV[0]) / tp._prevH;
+    const aty = (target.vy - tp._prevTgtV[1]) / tp._prevH;
+    const atz = (target.vz - tp._prevTgtV[2]) / tp._prevH;
+    const gm = opts.gravFn ? opts.gravFn(tp.x, tp.y, tp.z, tNow) : [0, 0, 0];
+    dax = atx - gm[0];
+    day = aty - gm[1];
+    daz = atz - gm[2];
+  }
+  tp._prevTgtV = [target.vx, target.vy, target.vz];
+  tp._prevH = h;
+
+  const daDotU = dax * ux + day * uy + daz * uz;
+  const dapx = dax - daDotU * ux;
+  const dapy = day - daDotU * uy;
+  const dapz = daz - daDotU * uz;
+
+  let axLat = 0, ayLat = 0, azLat = 0;
+  let axAx = 0, ayAx = 0, azAx = 0;
+
+  if (Vc > 10) {
+    const tGo = R / Vc;
+    const tEff = Math.max(tGo, cfg.minTgoFactor * h);
+    const gain = cfg.N / tEff;
+
+    axLat = gain * vpx + 0.5 * cfg.N * dapx;
+    ayLat = gain * vpy + 0.5 * cfg.N * dapy;
+    azLat = gain * vpz + 0.5 * cfg.N * dapz;
+
+    const latMag = Math.hypot(axLat, ayLat, azLat);
+    if (latMag > cfg.maxAccel) {
+      const s = cfg.maxAccel / latMag;
+      axLat *= s; ayLat *= s; azLat *= s;
+    }
+
+    const clampedLat = Math.min(latMag, cfg.maxAccel);
+    const availAx = Math.sqrt(Math.max(0, cfg.maxAccel * cfg.maxAccel - clampedLat * clampedLat));
+    const shouldBoost = (burnLeft > cfg.reserveBurn && Vc < cfg.cruiseSpeed) || (tGo < burnLeft * 0.85);
+    if (shouldBoost && availAx > 0) {
+      axAx = availAx * ux;
+      ayAx = availAx * uy;
+      azAx = availAx * uz;
+    }
+  } else {
+    const vpMag = Math.hypot(vpx, vpy, vpz);
+    const corrScale = vpMag > 1e-3 ? Math.min(cfg.maxAccel * 0.7, vpMag / Math.max(h, 0.5)) / vpMag : 0;
+    axLat = vpx * corrScale;
+    ayLat = vpy * corrScale;
+    azLat = vpz * corrScale;
+
+    const latMag = Math.hypot(axLat, ayLat, azLat);
+    const availAx = Math.sqrt(Math.max(0, cfg.maxAccel * cfg.maxAccel - latMag * latMag));
+    axAx = availAx * ux;
+    ayAx = availAx * uy;
+    azAx = availAx * uz;
+  }
+
+  let ax = axLat + axAx;
+  let ay = ayLat + ayAx;
+  let az = azLat + azAx;
+  const aMag = Math.hypot(ax, ay, az);
+  if (aMag > cfg.maxAccel) {
+    const s = cfg.maxAccel / aMag;
+    ax *= s; ay *= s; az *= s;
+  }
+
+  tp.burn = Math.max(0, burnLeft - (Math.min(aMag, cfg.maxAccel) / cfg.maxAccel) * h);
+  return [ax, ay, az];
+}
 const POWER = { reactor: 200e3, reactorWaste: 200e3, avionics: 40e3, battCap: 5e6 };
 const THERM = { capacity: 2e5, radArea: 600, radStowedArea: 40, eps: 0.9, sigma: 5.670374e-8,
   tSpace: 3, tMax: 400, tWarn: 380, tStart: 297 };
@@ -528,13 +643,13 @@ function physicsStep(h) {
   /* --- other bodies and projectiles (gravity only) --- */
   for (const t of targets) { t.px = t.x; t.py = t.y; t.pz = t.z; rk4(t, h, 0, 0, 0); }
   for (const p of projectiles) { p.px = p.x; p.py = p.y; p.pz = p.z; rk4(p, h, 0, 0, 0); p.age += h; }
+  // Torpedoes: thrust from computeTorpedoGuidance (tp.burn = seconds of full thrust left), gravity added by rk4
+  const shipThrustA = [fw.x/mass, fw.y/mass, fw.z/mass];
   for (const tp of torpedoes) {
     tp.px = tp.x; tp.py = tp.y; tp.pz = tp.z;
-    let ax = 0, ay = 0, az = 0;
-    if (tp.age < tp.burn) {                          // powered: accelerate toward the ship
-      const dx = ship.x-tp.x, dy = ship.y-tp.y, dz = ship.z-tp.z, d = Math.hypot(dx, dy, dz);
-      ax = TORP_ACCEL*dx/d; ay = TORP_ACCEL*dy/d; az = TORP_ACCEL*dz/d;
-    }
+    const [ax, ay, az] = computeTorpedoGuidance(tp, ship, h,
+      { maxAccel: TORP_ACCEL, gravFn: gravAcc, t: simT, targetAccel: shipThrustA });
+    tp.cmd = [ax, ay, az];                           // kept for the thruster plume on the telescope
     rk4(tp, h, ax, ay, az); tp.age += h;
   }
   for (const tr of tracers) { tr.px = tr.x; tr.py = tr.y; tr.pz = tr.z; rk4(tr, h, 0, 0, 0); tr.age += h; }
@@ -1701,7 +1816,21 @@ function drawScope(g, W, H, idx) {
     if (dotR && p1) { g.fillStyle = col; g.beginPath(); g.arc(p1.x, p1.y, dotR, 0, Math.PI*2); g.fill(); }
   };
   for (const tr of tracers) drawTrail(tr, irOn ? '#ffffff' : '#ffd060', 2, 0);
-  for (const tp of torpedoes) drawTrail(tp, irOn ? '#ffffff' : '#ff8a4a', 2, 3);
+  for (const tp of torpedoes) {
+    drawTrail(tp, irOn ? '#ffffff' : '#ff8a4a', 2, 3);
+    // Thruster plume: a flickering streak opposite the commanded thrust, sized to the range so it stays visible
+    const c = tp.cmd, cm = c ? Math.hypot(c[0], c[1], c[2]) : 0;
+    if (cm > 1) {
+      const rel = new THREE.Vector3(tp.x-ship.x, tp.y-ship.y, tp.z-ship.z), d = rel.length();
+      const len = d*0.004*(cm/TORP_ACCEL)*(0.7 + 0.6*Math.random());
+      const tail = rel.clone().add(new THREE.Vector3(-c[0], -c[1], -c[2]).multiplyScalar(len/cm));
+      const p1 = proj(rel.applyQuaternion(bq)), p2 = proj(tail.applyQuaternion(bq));
+      if (p1 && p2) {
+        g.strokeStyle = irOn ? 'rgba(255,255,255,0.9)' : 'rgba(255,220,150,0.9)'; g.lineWidth = 1.5;
+        g.beginPath(); g.moveTo(p1.x, p1.y); g.lineTo(p2.x, p2.y); g.stroke();
+      }
+    }
+  }
   // Hit and kill flashes: a fast rise, then decay. Drawn additively so they read as bright light.
   g.globalCompositeOperation = 'lighter';
   for (const f of flashes) {
