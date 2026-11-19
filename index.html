@@ -238,7 +238,7 @@ function controlState() {
   const h = a => (held.has(bindings[a]) ? 1 : 0);
   return {
     pitch: h('pitchUp') - h('pitchDown'),
-    yaw:   h('yawLeft') - h('yawRight'),
+    yaw:   h('yawRight') - h('yawLeft'),
     roll:  h('rollLeft') - h('rollRight'),
     tx: h('transRight') - h('transLeft'),
     ty: h('transUp') - h('transDown'),
@@ -1146,6 +1146,7 @@ const sfx = {
     burst(hullBus, 'lowpass', 180, 0.7, big ? 1.2 : 0.3, big ? 0.9 : 0.4);
   },
   tick() { if (actx) burst(hullBus, 'lowpass', 600, 0.7, 0.012, 0.25); },
+  rcsPuff() { if (actx) burst(intBus, 'bandpass', 1500, 1.2, 0.08, 0.12); },
   click() { if (actx) burst(intBus, 'bandpass', 2800, 2, 0.02, 0.35); },
   chime() {
     if (!actx) return;
@@ -1198,7 +1199,7 @@ function initAudio() {
   const eo = actx.createOscillator(); eo.frequency.value = 27; eo.connect(engineG); eo.start();
   const rcs = loopNoise(), rcsF = actx.createBiquadFilter(); rcsF.type = 'bandpass'; rcsF.frequency.value = 2400; rcsF.Q.value = 1.2;
   rcsG = actx.createGain(); rcsG.gain.value = 0;
-  rcs.connect(rcsF).connect(rcsG).connect(hullBus); rcs.start();
+  rcs.connect(rcsF).connect(rcsG); rcsG.connect(hullBus); rcsG.connect(intBus); rcs.start();
   const lo = actx.createOscillator(); lo.frequency.value = 1180;
   const lfo = actx.createOscillator(); lfo.frequency.value = 7;
   const lfoG = actx.createGain(); lfoG.gain.value = 25; lfo.connect(lfoG).connect(lo.frequency);
@@ -1207,12 +1208,15 @@ function initAudio() {
   const al = actx.createOscillator(); al.type = 'square'; al.frequency.value = 880;
   alarmG = actx.createGain(); alarmG.gain.value = 0; al.connect(alarmG).connect(intBus); al.start();
 }
+let rcsWasOn = false;
 function audioFrame() {
   if (!actx) return;
   const t = actx.currentTime;
+  if (rcsActive && !rcsWasOn) sfx.rcsPuff();
+  rcsWasOn = rcsActive;
   engineG.gain.setTargetAtTime(0.5*thrustFrac, t, 0.05);
   engineLP.frequency.setTargetAtTime(80 + 120*thrustFrac, t, 0.1);
-  rcsG.gain.setTargetAtTime(rcsActive ? 0.08 : 0, t, 0.02);
+  rcsG.gain.setTargetAtTime(rcsActive ? 0.1 : 0, t, 0.02);
   laserG.gain.setTargetAtTime(laserFiring ? 0.03 : 0, t, 0.02);
   const warn = hullT > THERM.tWarn || battery < 0.15*POWER.battCap;
   alarmG.gain.setTargetAtTime(warn && (Math.floor(t*2) % 2 === 0) ? 0.02 : 0, t, 0.01);
