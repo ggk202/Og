@@ -280,7 +280,7 @@ function leadBodyDir() {
 // Uses the same torque path as manual control, so it spends RCS propellant and respects the torque limit.
 // Damping ratio of the hold is 1/(2*sqrt(LEAD_GAIN*LEAD_TAU_TIME)): about 1.1 here, so it settles without overshoot.
 const LEAD_GAIN = 0.4, LEAD_MAX_RATE = 0.25, LEAD_TAU_TIME = 0.5;   // 1/s, rad/s, s
-const LEAD_DEADBAND = 0.2 * Math.PI/180;                           // no RCS firing inside 0.2 deg of the lead
+const LEAD_DEADBAND_MAX = 0.2 * Math.PI/180;                       // widest deadband, used only for distant targets
 // Turn axis from the last well-defined direction. When the lead point is nearly behind the nose, fwd x Lb
 // is almost zero and its sign flips with any sideways wobble, which made the nose spin back and forth.
 let leadAxisPrev = new THREE.Vector3(0, 1, 0);
@@ -291,7 +291,12 @@ function leadHoldCmd() {
   const ang = Math.acos(clamp(fwd.dot(Lb), -1, 1));
   const axis = new THREE.Vector3().crossVectors(fwd, Lb);
   if (axis.length() > 0.02) leadAxisPrev.copy(axis).normalize();   // only update where the axis is well defined
-  const err = Math.max(0, ang - LEAD_DEADBAND);          // deadband: no correction for small errors
+  // Deadband: half the target's radius seen as an angle, so the hold stops where a shot would still hit.
+  // The 0.2 deg cap alone is far wider than a 0.5-3 m target at 2-10 km.
+  const tgt = targets[curTarget];
+  const range = Math.hypot(tgt.x-ship.x, tgt.y-ship.y, tgt.z-ship.z);
+  const deadband = Math.min(LEAD_DEADBAND_MAX, 0.5*tgt.radius/range);
+  const err = Math.max(0, ang - deadband);
   const wdes = leadAxisPrev.clone().multiplyScalar(Math.min(LEAD_MAX_RATE, err*LEAD_GAIN));
   const wm = [omega.x, omega.y, omega.z], wd = [wdes.x, wdes.y, wdes.z];
   // Inside the deadband and nearly still: stop firing RCS
