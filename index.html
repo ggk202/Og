@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OG — Cockpit prototype v0.5.0</title>
+<title>OG — Cockpit prototype v0.5.1</title>
 <style>
   html, body { margin:0; height:100%; background:#000; overflow:hidden;
     font-family: ui-monospace, Menlo, Consolas, monospace; color:#cfd8c0; }
@@ -90,7 +90,7 @@
 </head>
 <body>
 <canvas id="gl"></canvas>
-<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.5.0</span></div>
+<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.5.1</span></div>
 <div id="hangar"><div class="load" id="hangarLoad">LOADING SHIP</div>
   <div class="hint">DRAG TO ORBIT · WHEEL TO ZOOM · CLICK A HARDPOINT TO CHOOSE ITS MODULE</div>
   <div class="panel"><h2>HANGAR</h2><div class="sub">LOADOUT · SELECT A HARDPOINT, THEN A MODULE</div>
@@ -1384,8 +1384,11 @@ function orbitInfo() {
 
 function fireRail() {
   const mass = shipMass();
-  const fwd = new THREE.Vector3(0,0,-1).applyQuaternion(shipQ);
-  const mz = bodyOff(railMuzzle());
+  // The slug leaves from the start-of-step state: position and attitude both (the attitude has already been
+  // stepped by the time weapons fire; using it put the shot one step of turn ahead of the solution)
+  const q0 = shipQStep || shipQ;
+  const fwd = new THREE.Vector3(0,0,-1).applyQuaternion(q0);
+  const mzB = railMuzzle(), mz = new THREE.Vector3(mzB[0], mzB[1], mzB[2]).applyQuaternion(q0);
   const V = WEAPON.railV, m = WEAPON.railMass;
   // Diagnostic: nose error to the solver's direction, and the miss the solver predicts for this exact shot
   const Ls = leadVector();
@@ -1473,16 +1476,38 @@ function shootingSolution(tgt) {
   if (tt === null) return null;
   const dir = rel.clone().addScaledVector(relV, tt).normalize();
   const mz = bodyOff(railMuzzle());                          // the shot leaves from the muzzle, below and ahead of the origin
-  for (let it = 0; it < SOLVE_ITERS; it++) {
+  const shoot = (d, t) => {                           // miss vector (target minus slug) for a shot along d, at time t
     const P = propagateTo({ x: ship.x + mz.x, y: ship.y + mz.y, z: ship.z + mz.z,
-      vx: ship.vx + dir.x*V, vy: ship.vy + dir.y*V, vz: ship.vz + dir.z*V }, tt);
-    const T = propagateTo(tgt, tt);
-    const m = new THREE.Vector3(T.x-P.x, T.y-P.y, T.z-P.z);
+      vx: ship.vx + d.x*V, vy: ship.vy + d.y*V, vz: ship.vz + d.z*V }, t);
+    const T = propagateTo(tgt, t);
+    return new THREE.Vector3(T.x-P.x, T.y-P.y, T.z-P.z);
+  };
+  // Newton iteration. Near targets: the free-space step (lateral miss / range) converges at once. Far targets
+  // (long flights, where gravity bends both paths): the 2x2 sensitivity of the lateral miss to the aim is
+  // measured by finite differences, since it can differ from the range by tens of percent.
+  for (let it = 0; it < SOLVE_ITERS; it++) {
+    const m = shoot(dir, tt);
     const md = m.dot(dir);                                   // along-track miss: fix the flight time
     const lat = m.clone().addScaledVector(dir, -md);         // lateral miss: fix the direction
-    if (lat.length() < 1e-3 && Math.abs(md) < 1e-3) break;
-    const R = Math.hypot(T.x-ship.x, T.y-ship.y, T.z-ship.z);
-    dir.addScaledVector(lat, 1/R).normalize();
+    if (lat.length() < 0.05 && Math.abs(md) < 0.05) break;
+    const any = Math.abs(dir.x) < 0.9 ? new THREE.Vector3(1, 0, 0) : new THREE.Vector3(0, 1, 0);
+    const e1 = new THREE.Vector3().crossVectors(dir, any).normalize(), e2 = new THREE.Vector3().crossVectors(dir, e1);
+    if (tt > 30) {
+      const dl = 1e-5, J = [[0, 0], [0, 0]];
+      [e1, e2].forEach((e, j) => {
+        const mm = shoot(dir.clone().addScaledVector(e, dl).normalize(), tt), dm = mm.sub(m);
+        J[0][j] = -dm.dot(e1)/dl; J[1][j] = -dm.dot(e2)/dl;   // change of the slug's lateral position per radian
+      });
+      const det = J[0][0]*J[1][1] - J[0][1]*J[1][0];
+      const b1 = lat.dot(e1), b2 = lat.dot(e2);
+      if (Math.abs(det) > 1e-6) {
+        const a1 = (b1*J[1][1] - b2*J[0][1])/det, a2 = (J[0][0]*b2 - J[1][0]*b1)/det;
+        dir.addScaledVector(e1, a1).addScaledVector(e2, a2).normalize();
+      } else dir.addScaledVector(lat, 1/(V*tt)).normalize();
+    } else {
+      const R = Math.hypot(tgt.x-ship.x, tgt.y-ship.y, tgt.z-ship.z);
+      dir.addScaledVector(lat, 1/R).normalize();
+    }
     tt = Math.max(1, tt + md/V);
   }
   return { dir, L: dir.clone().multiplyScalar(V*tt) };
@@ -1522,7 +1547,9 @@ function leadHoldCmd(h) {
   const fwd = new THREE.Vector3(0, 0, -1);
   const ang = Math.acos(clamp(fwd.dot(Lb), -1, 1));
   const axis = new THREE.Vector3().crossVectors(fwd, Lb);
-  if (axis.length() > 0.02) leadAxisPrev.copy(axis).normalize();   // only update where the axis is well defined
+  // Keep the last axis only where it is ill-defined: lead almost directly behind (the sign flips). Near zero error
+  // the axis must still follow the error; a stale axis there let the error grow sideways to about 1 deg.
+  if (axis.length() > 1e-9 && ang < Math.PI - 0.05) leadAxisPrev.copy(axis).normalize();
   const corr = leadAxisPrev.clone().multiplyScalar(ang*LEAD_GAIN);
   // Feed-forward: angular rate of the line of sight, r x dr/dt / |r|^2, in world axes, then into body axes.
   // Skipped on the first step after a target change, when the lead point jumps.
@@ -1583,7 +1610,9 @@ function fireMissile() {
   log(`MISSILE AWAY · ${t.name} · VLS ${Object.values(vlsCells).reduce((a, b) => a + b, 0)} LEFT`); sfx.missileLaunch();
 }
 
+let shipQStep = null;                                // attitude at the start of the current physics step
 function physicsStep(h) {
+  shipQStep = shipQ.clone();
   const c = controlState();
 
   /* --- attitude: RCS torque, rate damping, body-frame integration --- */
@@ -1987,7 +2016,7 @@ function physicsStep(h) {
   for (const f of flashes) { f.age += h; if (f.vx !== undefined && f.t0 !== simT) { f.x += f.vx*h; f.y += f.vy*h; f.z += f.vz*h; } }
   flashes = flashes.filter(f => f.age < f.dur);
   if (curTarget >= targets.length) curTarget = 0;
-  projectiles = projectiles.filter(p => !p.dead && p.age < 300 && Math.hypot(p.x, p.y, p.z) < 3e8);
+  projectiles = projectiles.filter(p => !p.dead && p.age < (p.limit ? p.limit + 1 : 300) && Math.hypot(p.x, p.y, p.z) < 3e8);   // aimed slugs live until their miss is called
 
   /* --- power --- */
   const loadE = POWER.avionics + (laserFiring ? WEAPON.laserElec : 0) + lpdLoadE + wheelLoadE;
@@ -4206,7 +4235,23 @@ function drawScope(g, W, H, idx) {
   // Lead indicator: where the target will be when a railgun shot fired now arrives.
   // Point the nose (and the spinal reticle) at this diamond to hit a moving target.
   const leadW = leadVector();
-  const leadP = leadW ? proj(leadW.clone().applyQuaternion(bq)) : null;
+  // In the frame: the diamond where the lead is. Outside it: the diamond pinned to the frame edge with an arrow
+  // pointing on toward the lead, and its angle from the frame centre.
+  const edge = (vx, vy) => {                         // frame-edge point from the centre along screen direction (vx, vy)
+    const hx = FW/2 - 16, hy = FH/2 - 16, k = Math.min(hx/Math.max(1e-9, Math.abs(vx)), hy/Math.max(1e-9, Math.abs(vy)));
+    return { x: cx + vx*k, y: cy + vy*k };
+  };
+  let leadP = null, leadOut = null;
+  if (leadW) {
+    const lv = leadW.clone().applyQuaternion(bq), lp = projU(lv);
+    if (lp && lp.x > FX + 8 && lp.x < FX + FW - 8 && lp.y > FY + 8 && lp.y < FY + FH - 8) leadP = lp;
+    else {
+      const d2 = Math.hypot(lv.x, lv.y) || 1;
+      leadOut = { ...edge(lv.x/d2, -lv.y/d2), ux: lv.x/d2, uy: -lv.y/d2, ang: Math.acos(clamp(-lv.z/lv.length(), -1, 1))*180/Math.PI };
+    }
+  }
+  const leadCol = masterMode !== 'OFF' ? (irOn ? '#ffffff' : AMB) : (irOn ? '#777' : DIM);
+  const diamond = (x0, y0) => { g.beginPath(); g.moveTo(x0, y0 - 8); g.lineTo(x0 + 8, y0); g.lineTo(x0, y0 + 8); g.lineTo(x0 - 8, y0); g.closePath(); g.stroke(); };
   if (leadP) {
     // Steering cue: dashed line from the unclamped aim point to the lead diamond, when both are in the frame
     const wv = boresightInScope();
@@ -4217,11 +4262,32 @@ function drawScope(g, W, H, idx) {
       g.beginPath(); g.moveTo(rx, ry); g.lineTo(leadP.x, leadP.y); g.stroke();
       g.setLineDash([]);
     }
-    g.strokeStyle = masterMode !== 'OFF' ? (irOn ? '#ffffff' : AMB) : (irOn ? '#777' : DIM);
-    g.lineWidth = 2;
-    g.beginPath();
-    g.moveTo(leadP.x, leadP.y - 8); g.lineTo(leadP.x + 8, leadP.y); g.lineTo(leadP.x, leadP.y + 8); g.lineTo(leadP.x - 8, leadP.y); g.closePath();
-    g.stroke();
+    g.strokeStyle = leadCol; g.lineWidth = 2; diamond(leadP.x, leadP.y);
+  } else if (leadOut) {
+    const { x: ex, y: ey, ux, uy } = leadOut;
+    g.strokeStyle = leadCol; g.fillStyle = leadCol; g.lineWidth = 2; diamond(ex - ux*6, ey - uy*6);
+    g.beginPath(); g.moveTo(ex + ux*10, ey + uy*10); g.lineTo(ex + ux*2 - uy*6, ey + uy*2 + ux*6); g.lineTo(ex + ux*2 + uy*6, ey + uy*2 - ux*6); g.closePath(); g.fill();
+    const tx = clamp(ex - ux*72, FX + 50, FX + FW - 50), ty = clamp(ey - uy*30 + 5, FY + 14, FY + FH - 6);
+    txt(g, tx, ty, `LEAD ${leadOut.ang.toFixed(leadOut.ang < 10 ? 1 : 0)}°`, leadCol, '16px monospace', 'center');
+  }
+  // Gimbal limit: the target lies outside the gimbal's travel, so the scope cannot look at it. Show the warning
+  // and an arrow toward the target (turn the ship that way).
+  {
+    const tk = tgtKnown(targets[curTarget]);
+    if (tk && !flashes.some(f => f.kind === 'kill') && !scopeHold) {
+      const vb = new THREE.Vector3(tk.x-ship.x, tk.y-ship.y, tk.z-ship.z).applyQuaternion(toBodyQ());
+      const az = Math.atan2(vb.x, -vb.z), el = Math.atan2(vb.y, Math.hypot(vb.x, vb.z));
+      if (vb.z > 0 || Math.abs(az) > SCOPE_AZ_MAX || Math.abs(Math.atan2(vb.y, -vb.z)) > SCOPE_EL_MAX) {
+        const tv = new THREE.Vector3(tk.x-ship.x, tk.y-ship.y, tk.z-ship.z).applyQuaternion(bq);
+        const d2 = Math.hypot(tv.x, tv.y) || 1, ux = tv.x/d2, uy = -tv.y/d2;
+        const p0 = edge(ux, uy), col = irOn ? '#ffffff' : RED;
+        g.strokeStyle = col; g.fillStyle = col; g.lineWidth = 3;
+        g.beginPath(); g.moveTo(cx + ux*40, cy + uy*40); g.lineTo(p0.x - ux*6, p0.y - uy*6); g.stroke();
+        g.beginPath(); g.moveTo(p0.x + ux*8, p0.y + uy*8); g.lineTo(p0.x - ux*8 - uy*9, p0.y - uy*8 + ux*9); g.lineTo(p0.x - ux*8 + uy*9, p0.y - uy*8 - ux*9); g.closePath(); g.fill();
+        txt(g, cx, cy - 26, 'GIMBAL LIMIT', col, 'bold 22px monospace', 'center');
+        txt(g, cx, cy + 40, `TGT ${(Math.acos(clamp(-vb.z/vb.length(), -1, 1))*180/Math.PI).toFixed(0)}° OFF NOSE`, col, '16px monospace', 'center');
+      }
+    }
   }
   // Laser glare: a ship firing its laser at us floods the sensor. A blinding core with a halo, diffraction spikes
   // from the secondary-mirror vanes, a vertical blooming smear down the sensor and a wash over the whole frame.
