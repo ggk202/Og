@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OG — Cockpit prototype v0.8.0</title>
+<title>OG — Cockpit prototype v0.9.0</title>
 <style>
   html, body { margin:0; height:100%; background:#000; overflow:hidden;
     font-family: ui-monospace, Menlo, Consolas, monospace; color:#cfd8c0; }
@@ -93,7 +93,7 @@
 </head>
 <body>
 <canvas id="gl"></canvas>
-<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.8.0</span></div>
+<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.9.0</span></div>
 <div id="hangar"><div class="load" id="hangarLoad">LOADING SHIP</div>
   <div class="hint">DRAG TO ORBIT · WHEEL TO ZOOM · CLICK A HARDPOINT TO CHOOSE ITS MODULE</div>
   <div class="panel"><h2>HANGAR</h2><div class="sub" id="hullName"></div><div id="hullSel"></div><div class="sub">LOADOUT · SELECT A HARDPOINT, THEN A MODULE</div>
@@ -573,6 +573,7 @@ function restartAfterDeath() {
   mainProp = SHIP.mainProp0; rcsProp = SHIP.rcsProp0; podProp = tankProp0Total(); podsOn = tankCount() > 0;
   leadHold = false; leadPrev = null; hullHits = 0;
   dock = { state: 'FREE', capArmed: false, lights: true, t: 0, sepArmT: -1e9, prop: 0, g: null };
+  updateSunDir();
   for (const t of targets) if (t.hostile) t.fireT = 10;
   const el = document.getElementById('death');
   el.style.display = 'none'; el.classList.remove('show');
@@ -700,7 +701,8 @@ const OG1_THERM = { capacity: 2e5, radArea: 600, radStowedArea: 40, eps: 0.9, si
   tSpace: 3, tMax: 400, tWarn: 380, tStart: 297 };
 const POWER = { ...OG1_POWER, ...HULL.power }, THERM = { ...OG1_THERM, ...HULL.therm };
 const PHYS_DT = 0.25;
-const WARPS = [1, 10, 100, 1000];
+const WARPS = [1, 10, 100, 1000, 1e4, 1e5, 1e6];
+const WARP_FULL = 3;                                 // above WARPS[3] the ship coasts (coastRun)
 const RANGES = [2000, 10000, 50000, 250000, 1000000];
 const PREVENT = new Set(['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','PageUp','PageDown','Period','Comma']);
 const MFD_PAGES = ['TACTICAL', 'ORBIT', 'POWER / THERMAL', 'WEAPONS', 'PROPULSION', 'COMMS', 'SHIP', 'SCOPE', 'DAMAGE', 'CONTROLS', 'DOCK'];
@@ -1243,7 +1245,10 @@ function integrateTo(s0, t0, t1, hMax = 2) {
   const dir = Math.sign(t1 - t0); let t = t0;
   const d = (q, tt) => { const a = gravAcc(q[0], q[1], q[2], tt); return [q[3], q[4], q[5], a[0], a[1], a[2]]; };
   while ((t1 - t)*dir > 1e-9) {
-    const h = dir*Math.min(hMax, Math.abs(t1 - t));
+    // Beyond the Earth-Moon system the step follows the local gravity (days in deep space, seconds near Mars);
+    // inside it the fixed hMax keeps the planning near Earth and the Moon exactly as it was
+    const hs = Math.hypot(s.x, s.y, s.z) > 1.5e9 ? Math.max(hMax, dynStep(s, t)) : hMax;
+    const h = dir*Math.min(hs, Math.abs(t1 - t));
     const q = [s.x, s.y, s.z, s.vx, s.vy, s.vz];
     const k1 = d(q, t), k2 = d(q.map((v, i) => v + 0.5*h*k1[i]), t + 0.5*h), k3 = d(q.map((v, i) => v + 0.5*h*k2[i]), t + 0.5*h), k4 = d(q.map((v, i) => v + h*k3[i]), t + h);
     const n = q.map((v, i) => v + h/6*(k1[i] + 2*k2[i] + 2*k3[i] + k4[i]));
@@ -1329,11 +1334,7 @@ const MISSIONS = {
    delta-v is frozen and the engine's actual impulse counts it down; the node completes when it is used up. */
 const PLAN_STEPS = [{ dv: 1, dt: 10 }, { dv: 10, dt: 60 }, { dv: 100, dt: 600 }];
 let plan = null, planStep = 1, planPred = null, shipPredCache = null;
-function primaryAtState(s0, t) {
-  const m = moonPos(t);
-  return Math.hypot(s0.x-m[0], s0.y-m[1], s0.z-m[2]) < MOON_SOI
-    ? { name: 'MOON', R: R_MOON, GM: GM_M, c: m, v: moonVel(t) } : { name: 'EARTH', R: R_E, GM: GM_E, c: [0, 0, 0], v: [0, 0, 0] };
-}
+function primaryAtState(s0, t) { return bodyAt(primaryName(s0, t), t); }
 function orbitFrameAt(s0, b) {
   const r = new THREE.Vector3(s0.x - b.c[0], s0.y - b.c[1], s0.z - b.c[2]), v = new THREE.Vector3(s0.vx - b.v[0], s0.vy - b.v[1], s0.vz - b.v[2]);
   const pro = v.clone().normalize(), nrm = new THREE.Vector3().crossVectors(r, v).normalize();
@@ -1358,6 +1359,7 @@ function samplePath(s0, t0, horizon, step, tgt) {
     const m = moonPos(t), dm = Math.hypot(s1.x - m[0], s1.y - m[1], s1.z - m[2]);
     if (dm < R_MOON) { impact = { body: 'MOON', t }; break; }
     if (Math.hypot(s1.x, s1.y, s1.z) < R_E) { impact = { body: 'EARTH', t }; break; }
+    const mp = marsPos(t); if (Math.hypot(s1.x - mp[0], s1.y - mp[1], s1.z - mp[2]) < R_MARS) { impact = { body: 'MARS', t }; break; }
     if (wasInMoon && !soiExit && dm > MOON_SOI) soiExit = t;
     s1 = integrateTo(s1, t, t + step, 10); if (ts) ts = integrateTo(ts, t, t + step, 10); t += step;
   }
@@ -1552,7 +1554,7 @@ function resetShip() {
 
 function log(text) { msgs.push({ t: simT, text }); if (msgs.length > 14) msgs.shift(); }
 function groundMsg(text) {
-  const delay = Math.hypot(ship.x, ship.y, ship.z) / C;   // light-time to Earth
+  const delay = Math.hypot(ship.x, ship.y, ship.z) / C;   // light-time to Earth (over 20 minutes from Mars at times)
   pending.push({ at: simT + delay, text });
 }
 
@@ -1569,16 +1571,86 @@ function moonVel(t) {
 }
 // Moon radius and sphere of influence (Laplace radius, about 66,100 km)
 const R_MOON = 1.7374e6, MOON_SOI = 6.61e7;
+/* ---------- Sun and Mars ----------
+   Earth (the Earth-Moon barycentre) and Mars on Keplerian orbits about the Sun from mean elements (J2000 ecliptic,
+   with their secular rates). The game frame is Earth-centred and equatorial: the ecliptic is tilted OBLIQ about
+   +x. EPOCH_D is the date at T+0, in days from J2000: 25 April 1986, a Mars transfer window (Mars about 43 deg
+   ahead of Earth), with the Sun where the earlier fixed sun direction had it. */
+const GM_SUN = 1.32712440018e20, AU = 1.495978707e11, R_SUN = 6.957e8;
+const GM_MARS = 4.282837e13, R_MARS = 3.3895e6, MARS_SOI = 5.77e8, EARTH_SOI = 9.25e8;
+const OBLIQ = 23.4393*Math.PI/180, EPOCH_D = -4997.8;
+const D2R = Math.PI/180;
+const ELEM = {   // a (AU), e, i, mean longitude L, longitude of perihelion w, node N (deg); L and w rates per Julian century
+  earth: { a: 1.00000261, e: 0.01671123, i: -0.00001531, L: 100.46457166, w: 102.93768193, N: 0, Ld: 35999.37244981, wd: 0.32327364 },
+  mars:  { a: 1.52371034, e: 0.09339410, i: 1.84969142, L: -4.55343205, w: -23.94362959, N: 49.55953891, Ld: 19140.30268499, wd: 0.44441088 },
+};
+// Heliocentric position in the game frame (m) at sim time t
+function helioPos(k, t) {
+  const E0 = ELEM[k], T = (EPOCH_D + t/86400)/36525;
+  const L = (E0.L + E0.Ld*T)*D2R, w = (E0.w + E0.wd*T)*D2R, N = E0.N*D2R, inc = E0.i*D2R, e = E0.e, a = E0.a*AU;
+  const M = L - w; let E = M + e*Math.sin(M);
+  for (let i = 0; i < 6; i++) E -= (E - e*Math.sin(E) - M)/(1 - e*Math.cos(E));
+  const xp = a*(Math.cos(E) - e), yp = a*Math.sqrt(1 - e*e)*Math.sin(E), om = w - N;
+  const co = Math.cos(om), so = Math.sin(om), cN = Math.cos(N), sN = Math.sin(N), ci = Math.cos(inc), si = Math.sin(inc);
+  const x1 = co*xp - so*yp, y1 = so*xp + co*yp;
+  const xe = cN*x1 - sN*ci*y1, ye = sN*x1 + cN*ci*y1, ze = si*y1;                    // ecliptic
+  return [xe, ye*Math.cos(OBLIQ) - ze*Math.sin(OBLIQ), ye*Math.sin(OBLIQ) + ze*Math.cos(OBLIQ)];   // equatorial
+}
+// Earth-centred positions of the Sun and Mars, cached per time (RK4 asks for the same few times over and over)
+const ephCache = new Map();
+function eph(t) {
+  let v = ephCache.get(t);
+  if (v) return v;
+  const E = helioPos('earth', t), Mh = helioPos('mars', t);
+  v = { sun: [-E[0], -E[1], -E[2]], mars: [Mh[0] - E[0], Mh[1] - E[1], Mh[2] - E[2]] };
+  if (ephCache.size > 64) ephCache.clear();
+  ephCache.set(t, v);
+  return v;
+}
+const sunPos = t => eph(t).sun, marsPos = t => eph(t).mars;
+const dVel = f => t => { const a = f(t - 30), b = f(t + 30); return [(b[0] - a[0])/60, (b[1] - a[1])/60, (b[2] - a[2])/60]; };
+const sunVel = dVel(sunPos), marsVel = dVel(marsPos);
+const marsDist = o => { const m = marsPos(simT); return Math.hypot(o.x-m[0], o.y-m[1], o.z-m[2]); };
+// The Sun's direction follows the calendar (it moves about 1 deg a day; set every physics step)
+function updateSunDir() { const sp = sunPos(simT); SUN_DIR.set(sp[0], sp[1], sp[2]).normalize(); }
+// Body centre (Earth-centred frame) and velocity by name, at time t
+const bodyC = (name, t) => name === 'MOON' ? moonPos(t) : name === 'MARS' ? marsPos(t) : name === 'SUN' ? sunPos(t) : [0, 0, 0];
+const bodyV = (name, t) => name === 'MOON' ? moonVel(t) : name === 'MARS' ? marsVel(t) : name === 'SUN' ? sunVel(t) : [0, 0, 0];
+const BODY = { EARTH: { R: R_E, GM: GM_E }, MOON: { R: R_MOON, GM: GM_M }, MARS: { R: R_MARS, GM: GM_MARS }, SUN: { R: R_SUN, GM: GM_SUN } };
+// Which body dominates at a state: the Moon or Mars inside their spheres of influence, Earth inside its own, else the Sun
+function primaryName(s0, t) {
+  const m = moonPos(t);
+  if (Math.hypot(s0.x-m[0], s0.y-m[1], s0.z-m[2]) < MOON_SOI) return 'MOON';
+  const r = Math.hypot(s0.x, s0.y, s0.z);
+  if (r < EARTH_SOI) return 'EARTH';
+  const mp = marsPos(t);
+  if (Math.hypot(s0.x-mp[0], s0.y-mp[1], s0.z-mp[2]) < MARS_SOI) return 'MARS';
+  return 'SUN';
+}
+const bodyAt = (name, t) => ({ name, R: BODY[name].R, GM: BODY[name].GM, c: bodyC(name, t), v: bodyV(name, t),
+  other: name === 'EARTH' ? 'MOON' : name === 'MOON' ? 'EARTH' : name === 'MARS' ? 'EARTH' : 'MARS' });
+// Integration step suited to the gravity around a state: a small fraction of the shortest dynamical time
+// (sqrt(d^3/GM)) to Earth, the Moon, Mars and the Sun
+function dynStep(s0, t, frac = 0.004) {
+  const m = moonPos(t), mp = marsPos(t), sp = sunPos(t);
+  const dt = (d, GM) => Math.sqrt(d*d*d/GM);
+  return frac*Math.min(dt(Math.hypot(s0.x, s0.y, s0.z), GM_E), dt(Math.hypot(s0.x-m[0], s0.y-m[1], s0.z-m[2]), GM_M),
+    dt(Math.hypot(s0.x-mp[0], s0.y-mp[1], s0.z-mp[2]), GM_MARS), dt(Math.hypot(s0.x-sp[0], s0.y-sp[1], s0.z-sp[2]), GM_SUN));
+}
 const moonDist = o => { const m = moonPos(simT); return Math.hypot(o.x-m[0], o.y-m[1], o.z-m[2]); };
 const inMoonSOI = () => moonDist(ship) < MOON_SOI;
 // The body the ship is orbiting: the Moon inside its sphere of influence, otherwise Earth. Positions and
 // velocities relative to it are what the orbit page, navball and map show.
-function primary() {
-  if (inMoonSOI()) return { name: 'MOON', other: 'EARTH', R: R_MOON, GM: GM_M, c: moonPos(simT), v: moonVel(simT) };
-  return { name: 'EARTH', other: 'MOON', R: R_E, GM: GM_E, c: [0, 0, 0], v: [0, 0, 0] };
+function primary() { return bodyAt(primaryName(ship, simT), simT); }
+// Line of sight past a sphere (centre c, radius R)
+function losClearBody(a, b, c, R) {
+  const ax = a.x-c[0], ay = a.y-c[1], az = a.z-c[2], dx = b.x-a.x, dy = b.y-a.y, dz = b.z-a.z, dd = dx*dx + dy*dy + dz*dz;
+  const u = dd > 0 ? clamp(-(ax*dx + ay*dy + az*dz)/dd, 0, 1) : 0;
+  return Math.hypot(ax + u*dx, ay + u*dy, az + u*dz) > R;
 }
 // Line of sight between two points that also clears the Moon
 function losClearMoon(a, b) {
+  if (!losClearBody(a, b, marsPos(simT), R_MARS)) return false;   // and Mars
   const m = moonPos(simT);
   const ax = a.x-m[0], ay = a.y-m[1], az = a.z-m[2], dx = b.x-a.x, dy = b.y-a.y, dz = b.z-a.z, dd = dx*dx + dy*dy + dz*dz;
   const u = dd > 0 ? clamp(-(ax*dx + ay*dy + az*dz)/dd, 0, 1) : 0;
@@ -1596,13 +1668,15 @@ function gravAcc(x, y, z, t) {
   const r2 = x*x + y*y + z*z, r = Math.sqrt(r2);
   const fE = -GM_E/(r2*r);
   let ax = fE*x, ay = fE*y, az = fE*z;
-  const [mx, my, mz] = moonPos(t);
-  const dx = mx-x, dy = my-y, dz = mz-z;
-  const d2 = dx*dx + dy*dy + dz*dz, d = Math.sqrt(d2);
-  const fM = GM_M/(d2*d);
-  const rm2 = mx*mx + my*my + mz*mz, rm = Math.sqrt(rm2);
-  const fInd = GM_M/(rm2*rm);
-  ax += fM*dx - fInd*mx; ay += fM*dy - fInd*my; az += fM*dz - fInd*mz;
+  // Third bodies (Moon, Sun, Mars): direct pull minus their pull on Earth (the frame accelerates with Earth)
+  const third = (c, GM) => {
+    const dx = c[0]-x, dy = c[1]-y, dz = c[2]-z, d2 = dx*dx + dy*dy + dz*dz, d = Math.sqrt(d2), f = GM/(d2*d);
+    const rc2 = c[0]*c[0] + c[1]*c[1] + c[2]*c[2], rc = Math.sqrt(rc2), fi = GM/(rc2*rc);
+    ax += f*dx - fi*c[0]; ay += f*dy - fi*c[1]; az += f*dz - fi*c[2];
+  };
+  third(moonPos(t), GM_M);
+  const E = eph(t);
+  third(E.sun, GM_SUN); third(E.mars, GM_MARS);
   return [ax, ay, az];
 }
 // RK4 in place. ex/ey/ez: extra constant acceleration (thrust) over the step.
@@ -1641,8 +1715,10 @@ function orbitInfo() {
   const energy = vm2/2 - GM/rm;
   const a = energy < 0 ? -GM/(2*energy) : Infinity;
   const period = energy < 0 ? 2*Math.PI*Math.sqrt(a*a*a/GM) : Infinity;
-  return { r, v, h, ev, e, energy, a, rm, period, body };
+  return { r, v, h, ev, e, energy, a, rm, period, body, rv: r.dot(v) };
 }
+// Long distances: k km, then millions of km
+const fmtFar = d => d >= 1e9 ? `${(d/1e9).toFixed(1)} M km` : `${(d/1e6).toFixed(0)} k km`;
 
 function fireRail() {
   const mass = shipMass();
@@ -1894,6 +1970,7 @@ function fireMissile() {
 let shipQStep = null;                                // attitude at the start of the current physics step
 function physicsStep(h) {
   shipQStep = shipQ.clone();
+  updateSunDir();
   const c = controlState();
 
   /* --- attitude: RCS torque, rate damping, body-frame integration --- */
@@ -2299,7 +2376,7 @@ function physicsStep(h) {
   for (const f of flashes) { f.age += h; if (f.vx !== undefined && f.t0 !== simT) { f.x += f.vx*h; f.y += f.vy*h; f.z += f.vz*h; } }
   flashes = flashes.filter(f => f.age < f.dur);
   if (curTarget >= targets.length) curTarget = 0;
-  projectiles = projectiles.filter(p => !p.dead && p.age < (p.limit ? p.limit + 1 : 300) && Math.hypot(p.x, p.y, p.z) < 3e8);   // aimed slugs live until their miss is called
+  projectiles = projectiles.filter(p => !p.dead && p.age < (p.limit ? p.limit + 1 : 300) && Math.hypot(p.x - ship.x, p.y - ship.y, p.z - ship.z) < 3e8);   // aimed slugs live until their miss is called
 
   /* --- power --- */
   const loadE = POWER.avionics + (laserFiring ? WEAPON.laserElec : 0) + lpdLoadE + wheelLoadE;
@@ -2320,6 +2397,7 @@ function physicsStep(h) {
 
   /* --- crash into Earth --- */
   if (moonDist(ship) < R_MOON) shipDestroyed('LUNAR SURFACE IMPACT');
+  if (marsDist(ship) < R_MARS) shipDestroyed('MARS SURFACE IMPACT');
   if (Math.hypot(ship.x, ship.y, ship.z) < R_E) {
     shipDestroyed('SURFACE IMPACT · ORBIT DECAYED');
   }
@@ -2743,11 +2821,12 @@ const mfdBtnLabels = ['PG+', 'PG-', 'RNG', 'TGT', 'PWR'];
 const MAP_BTNS = ['VIEW', 'ZM+', 'ZM-', 'ROT', 'TILT'];
 let mapView = 'ORBIT', mapYaw = 0.6, mapTiltIdx = 1;
 const MAP_TILTS = [20, 45, 70, 90].map(d => d*Math.PI/180);
-const MAP_ZOOM = { ORBIT: [8000e3, 14000e3, 30000e3, 420000e3], LOCAL: [10e3, 50e3, 200e3, 1000e3, 4000e3] };   // half-height of the view
-const mapZoom = { ORBIT: 0, LOCAL: 1 };
+const MAP_ZOOM = { ORBIT: [8000e3, 14000e3, 30000e3, 420000e3], LOCAL: [10e3, 50e3, 200e3, 1000e3, 4000e3],
+  SOLAR: [0.02*AU, 0.15*AU, 0.6*AU, 1.2*AU, 2*AU] };   // half-height of the view
+const mapZoom = { ORBIT: 0, LOCAL: 1, SOLAR: 4 };
 function mapSoftkey(m, k) {
   switch (k) {
-    case 0: mapView = mapView === 'ORBIT' ? 'LOCAL' : 'ORBIT'; break;
+    case 0: mapView = { ORBIT: 'LOCAL', LOCAL: 'SOLAR', SOLAR: 'ORBIT' }[mapView]; break;
     case 1: mapZoom[mapView] = Math.max(0, mapZoom[mapView] - 1); break;
     case 2: mapZoom[mapView] = Math.min(MAP_ZOOM[mapView].length - 1, mapZoom[mapView] + 1); break;
     case 3: mapYaw += Math.PI/6; break;
@@ -3015,6 +3094,7 @@ function dvRemaining() {
 function fmtDist(m) { return m >= 1e3 ? (m/1e3).toFixed(m >= 1e5 ? 0 : 1) + ' km' : m.toFixed(0) + ' m'; }
 function fmtTime(s) {
   const h = Math.floor(s/3600), m = Math.floor(s%3600/60), sec = Math.floor(s%60);
+  if (h >= 48) return `${Math.floor(h/24)}d ${String(h%24).padStart(2,'0')}:${String(m).padStart(2,'0')}`;   // long flights: days
   return `${h}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`;
 }
 function toBodyQ() { return shipQ.clone().invert(); }
@@ -3235,25 +3315,26 @@ function drawOrbit(g, W, H, idx) {
     g.fillStyle = PH; g.beginPath(); g.arc(cx + sX*k, cy - sY*k, 5, 0, Math.PI*2); g.fill();
     txt(g, cx, cy+R-6, o.body.name, AMB, '20px monospace', 'center');
   } else {
-    txt(g, cx, cy, 'OPEN ORBIT · ESCAPE', RED, '22px monospace', 'center');
+    txt(g, cx, cy - 14, 'OPEN ORBIT', RED, '22px monospace', 'center');
+    txt(g, cx, cy + 14, o.rv < 0 ? 'INBOUND' : 'ESCAPING', AMB, '20px monospace', 'center');
   }
   const RX = 360; let y = 84;
   const line = (s, col = PH) => { txt(g, RX, y, s, col, '24px monospace'); y += 31; };
-  line(`ALT ${(alt/1e3).toFixed(1)} km`);
+  // Around the Sun distances are in AU and times in days
+  const sun = o.body.name === 'SUN', dist = v => sun ? `${(v/AU).toFixed(3)} AU` : `${(v/1e3).toFixed(1)} km`;
+  line(sun ? `R ${dist(o.rm)}` : `ALT ${dist(alt)}`);
+  const rp = o.h.lengthSq()/o.body.GM/(1 + o.e);      // periapsis radius, closed or open
+  line(`PE ${sun ? dist(rp) : dist(rp - BR)}`, rp < BR ? RED : PH);   // red: the path hits the surface
   if (o.e < 1) {
-    const rp = o.a*(1 - o.e), ra = o.a*(1 + o.e);
-    line(`PE ${((rp-BR)/1e3).toFixed(1)} km`, rp < BR ? RED : PH);   // red: the orbit hits the surface
-    line(`AP ${((ra-BR)/1e3).toFixed(1)} km`);
-    line(`PERIOD ${(o.period/60).toFixed(1)} min`);
-  } else {
-    line('PE/AP  --', RED);
-  }
+    const ra = o.a*(1 + o.e);
+    line(`AP ${sun ? dist(ra) : dist(ra - BR)}`);
+    line(`PERIOD ${o.period > 3*86400 ? (o.period/86400).toFixed(1) + ' d' : (o.period/60).toFixed(1) + ' min'}`);
+  } else line(`V∞ ${(Math.sqrt(2*o.energy)/1e3).toFixed(2)} km/s`, AMB);
   line(`ECC ${o.e.toFixed(4)}`);
   line(`SPD ${(o.v.length()/1e3).toFixed(3)} km/s`);
   y += 10;
-  const mp = moonPos(simT);
   if (o.body.name === 'MOON') line(`EXIT SOI ${((MOON_SOI - moonDist(ship))/1e3).toFixed(0)} km`);
-  else line(`MOON ${(Math.hypot(mp[0]-ship.x, mp[1]-ship.y, mp[2]-ship.z)/1e3/1e3).toFixed(0)} k km`);
+  else { const oc = bodyC(o.body.other, simT); line(`${o.body.other} ${fmtFar(Math.hypot(oc[0]-ship.x, oc[1]-ship.y, oc[2]-ship.z))}`); }
   line(`T+ ${fmtTime(simT)}`);
   line(`WARP x${WARPS[warpIdx]}`);
 }
@@ -3378,8 +3459,68 @@ function mapMarker(g, x, y, t, stale, sel) {
   }
   return col;
 }
+/* Solar system view: top-down on the ecliptic. The Sun at the centre (the ship at the closest zoom), the orbits of
+   Earth and Mars, the ship and its predicted path over the next 400 days with the closest approach to Mars. */
+let solarPred = null;
+function getSolarPred() {
+  const now = performance.now();
+  if (!solarPred || now - solarPred.real > 2000 || Math.abs(simT - solarPred.at) > 30*86400) {
+    const pts = [], hor = 400*86400; let s1 = { ...ship }, t = simT, ca = { d: Infinity, t: 0 };
+    while (t < simT + hor) {
+      pts.push({ t, x: s1.x, y: s1.y, z: s1.z });
+      const mp = marsPos(t), d = Math.hypot(s1.x - mp[0], s1.y - mp[1], s1.z - mp[2]);
+      if (d < ca.d) ca = { d, t };
+      if (d < R_MARS || Math.hypot(s1.x, s1.y, s1.z) < R_E) break;
+      const stp = Math.hypot(s1.x, s1.y, s1.z) < 3e9 ? 6*3600 : d < 3e9 ? 3*3600 : 86400;
+      s1 = integrateTo(s1, t, t + stp, 60); t += stp;
+    }
+    solarPred = { real: now, at: simT, pts, ca };
+  }
+  return solarPred;
+}
+function drawSolar(g, W, H, idx) {
+  const ext = MAP_ZOOM.SOLAR[mapZoom.SOLAR];
+  mfdHeader(g, W, `MAP SOLAR ±${(ext/AU).toFixed(2)} AU`, idx);
+  const cx = W/2, cy = 246, k = 190/ext, ce = Math.cos(OBLIQ), se = Math.sin(OBLIQ);
+  const sp0 = sunPos(simT), centreShip = ext < 0.1*AU;
+  const c0 = centreShip ? [ship.x - sp0[0], ship.y - sp0[1], ship.z - sp0[2]] : [0, 0, 0];
+  // heliocentric game-frame vector -> screen (ecliptic x, y)
+  const P = (x, y, z) => { x -= c0[0]; y -= c0[1]; z -= c0[2]; return { X: cx + x*k, Y: cy - (y*ce + z*se)*k }; };
+  const helio = (pt, t) => { const sp = sunPos(t); return P(pt[0] - sp[0], pt[1] - sp[1], pt[2] - sp[2]); };
+  g.save(); g.beginPath(); g.rect(4, 44, W - 8, 396); g.clip();
+  const sunQ = P(0, 0, 0);
+  g.fillStyle = '#ffd23a'; g.beginPath(); g.arc(sunQ.X, sunQ.Y, 6, 0, Math.PI*2); g.fill();
+  for (const [k2, per, col, name] of [['earth', 365.25, 'rgba(125,255,154,0.45)', 'EARTH'], ['mars', 687, 'rgba(255,176,32,0.5)', 'MARS']]) {
+    g.strokeStyle = col; g.lineWidth = 1.2; g.beginPath();
+    for (let i = 0; i <= 120; i++) { const q = P(...helioPos(k2, simT + i/120*per*86400)); i ? g.lineTo(q.X, q.Y) : g.moveTo(q.X, q.Y); }
+    g.stroke();
+    const q = P(...helioPos(k2, simT));
+    g.fillStyle = k2 === 'mars' ? AMB : PH; g.beginPath(); g.arc(q.X, q.Y, 5, 0, Math.PI*2); g.fill();
+    txt(g, q.X + 8, q.Y - 8, name, k2 === 'mars' ? AMB : PH, '17px monospace');
+  }
+  const SP = getSolarPred();
+  g.strokeStyle = 'rgba(125,255,154,0.8)'; g.lineWidth = 1.5; g.setLineDash([3, 3]); g.beginPath();
+  SP.pts.forEach((pt, i) => { const q = helio([pt.x, pt.y, pt.z], pt.t); i ? g.lineTo(q.X, q.Y) : g.moveTo(q.X, q.Y); });
+  g.stroke(); g.setLineDash([]);
+  const sq = helio([ship.x, ship.y, ship.z], simT);
+  g.fillStyle = '#fff'; g.beginPath(); g.arc(sq.X, sq.Y, 4, 0, Math.PI*2); g.fill();
+  // Closest approach to Mars along the predicted path: where the ship and Mars will be then
+  if (SP.ca.d < Infinity && SP.ca.t > simT) {
+    const ci = SP.pts.reduce((b2, q2) => Math.abs(q2.t - SP.ca.t) < Math.abs(b2.t - SP.ca.t) ? q2 : b2);
+    const qa = helio([ci.x, ci.y, ci.z], ci.t), qm = P(...helioPos('mars', SP.ca.t));
+    g.strokeStyle = AMB; g.beginPath(); g.arc(qm.X, qm.Y, 7, 0, Math.PI*2); g.stroke();
+    g.fillStyle = '#3fe0ff'; g.fillRect(qa.X - 3, qa.Y - 3, 6, 6);
+  }
+  g.restore();
+  const sh = [ship.x - sp0[0], ship.y - sp0[1], ship.z - sp0[2]];
+  txt(g, 14, 432, `SUN ${(Math.hypot(...sh)/AU).toFixed(3)} AU · MARS ${fmtFar(marsDist(ship))}` +
+    (SP.ca.d < Infinity && SP.ca.t > simT ? ` · CA ${fmtFar(SP.ca.d)} IN ${((SP.ca.t - simT)/86400).toFixed(1)} D` : ''), AMB, '17px monospace');
+}
 function drawMap(g, W, H, idx) {
   mapBody = primary();
+  // Around the Sun the orbital view is the solar system view
+  const view = mapView === 'ORBIT' && mapBody.name === 'SUN' ? 'SOLAR' : mapView;
+  if (view === 'SOLAR') { drawSolar(g, W, H, idx); return; }
   // Orbital zoom levels scale with the body's size, so the Moon fills the view like Earth does
   const ext = MAP_ZOOM[mapView][mapZoom[mapView]]*(mapView === 'ORBIT' ? mapBody.R/R_E : 1);
   mfdHeader(g, W, `MAP ${mapView === 'ORBIT' ? 'ORBITAL' : 'LOCAL'} ±${fmtDist(ext)}`, idx);
@@ -3437,7 +3578,7 @@ function drawMap(g, W, H, idx) {
       g.strokeStyle = col; g.lineWidth = w; g.setLineDash(dash);
       let prev = null;
       for (const pt of pts) {
-        const c0 = B.name === 'MOON' ? moonPos(pt.t) : [0, 0, 0];
+        const c0 = bodyC(B.name, pt.t);
         const q = Prel(pt.x - c0[0], pt.y - c0[1], pt.z - c0[2]), vis = !earthHides(q);
         if (prev && vis && prev.vis) { g.beginPath(); g.moveTo(prev.X, prev.Y); g.lineTo(q.X, q.Y); g.stroke(); }
         prev = { ...q, vis };
@@ -3448,12 +3589,12 @@ function drawMap(g, W, H, idx) {
     const PP = getPlan();
     if (PP) {
       drawPred(PP.path.pts, '#3fe0ff', 2, [7, 4]);
-      const n0 = PP.path.pts[0], c0 = B.name === 'MOON' ? moonPos(n0.t) : [0, 0, 0], qn = Prel(n0.x - c0[0], n0.y - c0[1], n0.z - c0[2]);
+      const n0 = PP.path.pts[0], c0 = bodyC(B.name, n0.t), qn = Prel(n0.x - c0[0], n0.y - c0[1], n0.z - c0[2]);
       g.fillStyle = '#3fe0ff'; g.beginPath(); g.moveTo(qn.X, qn.Y - 7); g.lineTo(qn.X + 7, qn.Y); g.lineTo(qn.X, qn.Y + 7); g.lineTo(qn.X - 7, qn.Y); g.closePath(); g.fill();
       txt(g, qn.X + 10, qn.Y + 5, 'NODE', '#3fe0ff', 'bold 16px monospace');
       if (PP.path.ca.d < Infinity && PP.tgtName) {           // closest approach to the target on the new path
         const ci = PP.path.pts.reduce((b2, q2) => Math.abs(q2.t - PP.path.ca.t) < Math.abs(b2.t - PP.path.ca.t) ? q2 : b2);
-        const cc = B.name === 'MOON' ? moonPos(ci.t) : [0, 0, 0], qc = Prel(ci.x - cc[0], ci.y - cc[1], ci.z - cc[2]);
+        const cc = bodyC(B.name, ci.t), qc = Prel(ci.x - cc[0], ci.y - cc[1], ci.z - cc[2]);
         g.strokeStyle = '#ff3fd0'; g.lineWidth = 2; g.beginPath(); g.arc(qc.X, qc.Y, 6, 0, Math.PI*2); g.stroke();
         txt(g, qc.X + 9, qc.Y - 6, `CA ${fmtDist(PP.path.ca.d)}`, '#ff3fd0', '15px monospace');
       }
@@ -3485,16 +3626,17 @@ function drawMap(g, W, H, idx) {
     g.beginPath(); g.moveTo(qs.X - 11, qs.Y); g.lineTo(qs.X + 11, qs.Y); g.moveTo(qs.X, qs.Y - 11); g.lineTo(qs.X, qs.Y + 11); g.stroke();
     txt(g, qs.X + 9, qs.Y + 20, 'OWN', PH, 'bold 17px monospace');
     // The other body (Moon seen from Earth, or Earth from the Moon): drawn when in view, else a marker at the edge
-    const op = B.name === 'EARTH' ? moonPos(simT) : [0, 0, 0], oR = B.name === 'EARTH' ? R_MOON : R_E;
-    const qm = P(op[0], op[1], op[2]), oName = B.name === 'EARTH' ? 'MOON' : 'EARTH';
+    const oName = B.other, op = bodyC(oName, simT), oR = BODY[oName].R;
+    const qm = P(op[0], op[1], op[2]);
     const mx = qm.X - cx, my = qm.Y - cy, ml = Math.hypot(mx, my);
     if (ml < 185 && ml > 0) { g.strokeStyle = AMB; g.beginPath(); g.arc(qm.X, qm.Y, Math.max(3, oR*k), 0, Math.PI*2); g.stroke(); txt(g, qm.X + 8, qm.Y, oName, AMB, '16px monospace'); }
     else if (ml > 0) txt(g, cx + mx/ml*300, cy + my/ml*170, `${oName} ›`, AMB, '16px monospace', 'center');
-    txt(g, 14, 432, B.name === 'MOON' ? `MOON-CENTRED · SOI EXIT ${((MOON_SOI - moonDist(ship))/1e3).toFixed(0)} km` : '', AMB, '17px monospace');
+    txt(g, 14, 432, B.name === 'MOON' ? `MOON-CENTRED · SOI EXIT ${((MOON_SOI - moonDist(ship))/1e3).toFixed(0)} km`
+      : B.name === 'MARS' ? `MARS-CENTRED · SOI EXIT ${((MARS_SOI - marsDist(ship))/1e3).toFixed(0)} km` : '', AMB, '17px monospace');
   } else {
     // Local frame at the ship: x along-track, y orbit normal, z radial up
-    const Rh = new THREE.Vector3(ship.x, ship.y, ship.z).normalize();
-    const Nn = new THREE.Vector3().crossVectors(new THREE.Vector3(ship.x, ship.y, ship.z), new THREE.Vector3(ship.vx, ship.vy, ship.vz)).normalize();
+    const Rh = new THREE.Vector3(ship.x - mapBody.c[0], ship.y - mapBody.c[1], ship.z - mapBody.c[2]).normalize();
+    const Nn = new THREE.Vector3().crossVectors(Rh, new THREE.Vector3(ship.vx - mapBody.v[0], ship.vy - mapBody.v[1], ship.vz - mapBody.v[2])).normalize();
     const Al = new THREE.Vector3().crossVectors(Nn, Rh);
     const loc = (x, y, z) => { const d = new THREE.Vector3(x - ship.x, y - ship.y, z - ship.z); return [d.dot(Al), d.dot(Nn), d.dot(Rh)]; };
     const locV = (vx, vy, vz) => { const d = new THREE.Vector3(vx - ship.vx, vy - ship.vy, vz - ship.vz); return [d.dot(Al), d.dot(Nn), d.dot(Rh)]; };
@@ -3996,7 +4138,21 @@ const MOON_ALB = (() => {
   for (let k = 0; k < A.length; k++) A[k] = clamp(A[k], 0.2, 1);
   return A;
 })();
-const bodyCache = { moon: { cv: null, key: null }, earth: { cv: null, key: null }, moonF: { cv: null, key: null, tf: 0 }, earthF: { cv: null, key: null, tf: 0 } };
+const bodyCache = { moon: { cv: null, key: null }, earth: { cv: null, key: null }, mars: { cv: null, key: null },
+  moonF: { cv: null, key: null, tf: 0 }, earthF: { cv: null, key: null, tf: 0 }, marsF: { cv: null, key: null, tf: 0 } };
+// Mars: ochre disc with the large dark albedo regions (smooth harmonics in Mars-fixed longitude, turning with its
+// 24.6 h day; pole roughly along the ecliptic pole) and white polar caps. IR: a warm, uniform disc lit by the Sun.
+const MARS_ROT = 2*Math.PI/88642.66;
+function marsShade(nx, ny, nz, z, ir) {
+  const lam = Math.max(0, nx*SUN_DIR.x + ny*SUN_DIR.y + nz*SUN_DIR.z);
+  if (ir) { const v = 110 + 80*lam; return [v, v, v]; }
+  const ze = -ny*Math.sin(OBLIQ) + nz*Math.cos(OBLIQ), ye = ny*Math.cos(OBLIQ) + nz*Math.sin(OBLIQ);
+  const lat = Math.asin(clamp(ze, -1, 1)), lon = Math.atan2(ye, nx) - MARS_ROT*simT;
+  const dark = clamp(0.5 + 0.35*Math.sin(2*lon + 0.7)*Math.cos(1.6*lat) + 0.25*Math.sin(5*lon - 1.1 + 3*lat) + 0.15*Math.cos(9*lon + 2*lat), 0, 1);
+  const cap = Math.abs(lat) > 1.25 ? 1 : 0, lit = Math.min(1, lam*1.1 + 0.02), limb = 1 - 0.25*Math.pow(1 - z, 2);
+  const a = 1 - 0.45*dark;
+  return cap ? [235*lit, 232*lit, 225*lit] : [205*a*lit*limb, 112*a*lit*limb, 66*a*lit*limb];
+}
 const hash3 = (i, j, k, s2) => {
   let h = Math.imul(i, 374761393) ^ Math.imul(j, 668265263) ^ Math.imul(k, 1440662683) ^ Math.imul(s2, 1274126177);
   h = Math.imul(h ^ (h >>> 13), 1274126177); h ^= h >>> 16; return (h >>> 0)/4294967296;
@@ -4072,7 +4228,7 @@ function bodyFrame(kind, B, vq, fov, F, ir) {
       const mu = Math.max(0.12, -(nx*dx + ny*dy + nz*dz));   // grazing views stretch each pixel over more ground
       const v = moonShade(nx, ny, nz, octs, ir, t*2*fov/F.R/mu); d[o] = v; d[o + 1] = v; d[o + 2] = v*1.02;
     }
-    else { const mu = -(nx*dx + ny*dy + nz*dz), [r, gg, bb] = earthShade(nx, ny, nz, mu, ir); d[o] = r; d[o + 1] = gg; d[o + 2] = bb; }
+    else { const mu = -(nx*dx + ny*dy + nz*dz), [r, gg, bb] = (kind === 'mars' ? marsShade : earthShade)(nx, ny, nz, mu, ir); d[o] = r; d[o + 1] = gg; d[o + 2] = bb; }
     d[o + 3] = 255;
   }
   g.putImageData(img, 0, 0);
@@ -4081,7 +4237,7 @@ function bodyFrame(kind, B, vq, fov, F, ir) {
 // kind 'moon' | 'earth'; vq: the scope's world-to-view rotation; ir: thermal view
 function bodyImage(kind, vq, ir) {
   const C = bodyCache[kind], S = 200;
-  const key = [vq.x, vq.y, vq.z, vq.w].map(v => v.toFixed(3)).join() + (ir ? 'i' : 'v') + (kind === 'moon' ? Math.round(simT/60) : '');
+  const key = [vq.x, vq.y, vq.z, vq.w].map(v => v.toFixed(3)).join() + (ir ? 'i' : 'v') + (kind !== 'earth' ? Math.round(simT/60) : '') + [SUN_DIR.x, SUN_DIR.y].map(v => v.toFixed(2)).join();
   if (C.cv && C.key === key) return C.cv;
   if (!C.cv) { C.cv = document.createElement('canvas'); C.cv.width = C.cv.height = S; }
   C.key = key;
@@ -4099,7 +4255,7 @@ function bodyImage(kind, vq, ir) {
     n.set(0, 0, 0).addScaledVector(ax, x).addScaledVector(ay, y).addScaledVector(az, z);   // surface normal, world
     let R, G, B;
     if (kind === 'moon') { R = G = moonShade(n.x, n.y, n.z, octs, ir); B = R*1.02; }
-    else [R, G, B] = earthShade(n.x, n.y, n.z, z, ir);
+    else [R, G, B] = (kind === 'mars' ? marsShade : earthShade)(n.x, n.y, n.z, z, ir);
     d[o] = R; d[o + 1] = G; d[o + 2] = B; d[o + 3] = 255*clamp((1 - Math.sqrt(r2))*S/2, 0, 1);   // soft edge
   }
   g.putImageData(img, 0, 0);
@@ -4512,15 +4668,17 @@ function drawScope(g, W, H, idx) {
   // Earth and the Moon as shaded discs, the farther one first. The angle mapping is extended past the field of
   // view so a disc whose centre is outside the frame still shows its limb.
   const mp = moonPos(simT);
+  const mrp = marsPos(simT);
   const bodies = [{ kind: 'moon', v: new THREE.Vector3(mp[0]-ship.x, mp[1]-ship.y, mp[2]-ship.z), r: R_MOON },
-                  { kind: 'earth', v: new THREE.Vector3(-ship.x, -ship.y, -ship.z), r: R_E }].sort((a, b) => b.v.length() - a.v.length());
+                  { kind: 'earth', v: new THREE.Vector3(-ship.x, -ship.y, -ship.z), r: R_E },
+                  { kind: 'mars', v: new THREE.Vector3(mrp[0]-ship.x, mrp[1]-ship.y, mrp[2]-ship.z), r: R_MARS }].sort((a, b) => b.v.length() - a.v.length());
   for (const B of bodies) {
     const d = B.v.length(), ar = Math.asin(Math.min(1, B.r/d)), vv = B.v.clone().applyQuaternion(bq).normalize();
     const off = Math.acos(clamp(-vv.z, -1, 1));
     if (off > ar + SCOPE_FOV*1.5) continue;          // nowhere near the frame
     const az = Math.atan2(vv.x, -vv.z), el = Math.atan2(vv.y, -vv.z);   // the same mapping as proj()
     const px = cx + az/SCOPE_FOV*R, py = cy - el/SCOPE_FOV*R, pr = ar/SCOPE_FOV*R;
-    if (pr < 1.5) { g.fillStyle = irOn ? '#ddd' : (B.kind === 'moon' ? '#c9c9c9' : '#7fa8e0'); g.fillRect(px - 1, py - 1, 2, 2); continue; }
+    if (pr < 1.5) { g.fillStyle = irOn ? '#ddd' : ({ moon: '#c9c9c9', earth: '#7fa8e0', mars: '#d9845a' })[B.kind]; g.fillRect(px - 1, py - 1, 2, 2); continue; }
     if (pr > 140) g.drawImage(bodyFrame(B.kind, B, bq, SCOPE_FOV, { FX, FY, FW, FH, cx, cy, R }, irOn), FX, FY, FW, FH);
     else g.drawImage(bodyImage(B.kind, bq, irOn), px - pr, py - pr, 2*pr, 2*pr);
   }
@@ -5384,7 +5542,10 @@ function onAction(id) {
       break;
     case 'jettison': jettisonPods(); break;
     case 'toggleIR': irOn = !irOn; sfx.click(); mfds.forEach(m => drawMFD(m)); break;
-    case 'warpUp': warpIdx = Math.min(warpIdx+1, WARPS.length-1); break;
+    case 'warpUp': {
+      if (warpIdx >= WARP_FULL) { const why = coastBlock(); if (why) { log(`NO COAST WARP · ${why}`); break; } }
+      warpIdx = Math.min(warpIdx+1, WARPS.length-1); break;
+    }
     case 'warpDown': warpIdx = Math.max(warpIdx-1, 0); break;
     case 'pause': paused = !paused; break;
     case 'aux1': case 'aux2': case 'aux3': auxOn[id] = !auxOn[id]; sfx.click(); break;
@@ -6733,10 +6894,89 @@ window.addEventListener('keydown', e => {
   if (e.code === 'Escape') { toggleManual(); e.preventDefault(); e.stopImmediatePropagation(); }
 }, true);
 
+/* ================= COAST WARP =================
+   Above x1000 nothing but gravity acts: the ship is integrated with a step that follows the local gravity, and
+   every other object (targets, relay satellites) moves on its Kepler orbit about the body it orbits, which is
+   exact for a two-body orbit and costs the same for one second or one month. Coasting is refused while
+   anything needs the full simulation; each frame is limited to COAST_STEPS ship steps (near a planet that
+   limits the warp actually reached). */
+const COAST_STEPS = 1500;
+// Universal-variable Kepler propagation of a state relative to a body (mu) over dt
+function keplerProp(r0, v0, dt, mu) {
+  const R0 = Math.hypot(...r0), V2 = v0[0]**2 + v0[1]**2 + v0[2]**2, sm = Math.sqrt(mu);
+  const alpha = 2/R0 - V2/mu, rv = (r0[0]*v0[0] + r0[1]*v0[1] + r0[2]*v0[2])/sm;
+  if (alpha > 1e-12) { const P = 2*Math.PI/Math.sqrt(mu*alpha**3); dt = dt % P; }   // whole orbits change nothing
+  const C2 = z => z > 1e-6 ? (1 - Math.cos(Math.sqrt(z)))/z : z < -1e-6 ? (Math.cosh(Math.sqrt(-z)) - 1)/(-z) : 0.5 - z/24;
+  const C3 = z => z > 1e-6 ? (Math.sqrt(z) - Math.sin(Math.sqrt(z)))/Math.sqrt(z)**3 : z < -1e-6 ? (Math.sinh(Math.sqrt(-z)) - Math.sqrt(-z))/Math.sqrt(-z)**3 : 1/6 - z/120;
+  let chi = alpha > 1e-12 ? sm*dt*alpha : Math.sign(dt)*Math.sqrt(1/Math.max(1e-30, -alpha || 1e-30))*Math.log(1 + Math.abs(dt)*Math.max(1e-30, -alpha)*sm);
+  if (!isFinite(chi) || chi === 0) chi = sm*dt/R0;
+  let r = R0, c2 = 0.5, c3 = 1/6, psi = 0;
+  for (let i = 0; i < 60; i++) {
+    psi = chi*chi*alpha; c2 = C2(psi); c3 = C3(psi);
+    r = chi*chi*c2 + rv*chi*(1 - psi*c3) + R0*(1 - psi*c2);
+    const dchi = (sm*dt - chi**3*c3 - rv*chi*chi*c2 - R0*chi*(1 - psi*c3))/r;
+    chi += dchi;
+    if (Math.abs(dchi) < 1e-9*Math.max(1, Math.abs(chi))) break;
+  }
+  const f = 1 - chi*chi/R0*c2, g = dt - chi**3/sm*c3, gd = 1 - chi*chi/r*c2, fd = sm/(r*R0)*chi*(psi*c3 - 1);
+  return [[0, 1, 2].map(i => f*r0[i] + g*v0[i]), [0, 1, 2].map(i => fd*r0[i] + gd*v0[i])];
+}
+// Move an object along its orbit about the body it is in, from time t0 by dt
+function keplerAdvance(o, t0, dt) {
+  const name = primaryName(o, t0), mu = BODY[name].GM, c0 = bodyC(name, t0), w0 = bodyV(name, t0);
+  const [r1, v1] = keplerProp([o.x - c0[0], o.y - c0[1], o.z - c0[2]], [o.vx - w0[0], o.vy - w0[1], o.vz - w0[2]], dt, mu);
+  const c1 = bodyC(name, t0 + dt), w1 = bodyV(name, t0 + dt);
+  o.x = c1[0] + r1[0]; o.y = c1[1] + r1[1]; o.z = c1[2] + r1[2]; o.vx = w1[0] + v1[0]; o.vy = w1[1] + v1[1]; o.vz = w1[2] + v1[2];
+}
+// Why the coast warp cannot be used now (null when it can)
+function coastBlock() {
+  if (torpedoes.some(t => !t.dead) || ordnance.length || projectiles.length) return 'WEAPONS IN FLIGHT';
+  if (thrustFrac > 0 || (plan && plan.frozen)) return 'BURN IN PROGRESS';
+  if (plan && plan.t - simT < 1200) return 'MANEUVER NODE';
+  if (dock.state === 'CAPTURE') return 'DOCKING';
+  if (typeof boosterBurning === 'function' && boosterBurning()) return 'STAGE BURNING';
+  if (targets.some(t => t.hostile && !t.gone && isSeen(t) && rangeTo(t) < 2000e3)) return 'HOSTILES WITHIN 2000 KM';
+  return null;
+}
+let coastNote = 0;
+function coastRun(T) {
+  const p0 = primaryName(ship, simT), tStart = simT;
+  let left = T, n = 0, changed = null;
+  while (left > 1e-6 && n < COAST_STEPS) {
+    const h = Math.min(left, Math.max(0.25, dynStep(ship, simT)));
+    ship.px = ship.x; ship.py = ship.y; ship.pz = ship.z;
+    rk4(ship, h, 0, 0, 0); simT += h; left -= h; n++;
+    if (n % 20 === 0 && primaryName(ship, simT) !== p0) { changed = primaryName(ship, simT); break; }
+    if (Math.hypot(ship.x, ship.y, ship.z) < R_E + 100e3 || marsDist(ship) < R_MARS + 100e3 || moonDist(ship) < R_MOON + 20e3) { changed = 'LOW'; break; }
+  }
+  if (!changed && primaryName(ship, simT) !== p0) changed = primaryName(ship, simT);
+  const dt = simT - tStart;
+  for (const t of targets) if (!t.gone) keplerAdvance(t, tStart, dt);
+  for (const sat of sats) keplerAdvance(sat, tStart, dt);
+  omega.set(0, 0, 0); updateSunDir();
+  // Power and heat settle over a long coast: battery charges at the idle surplus, hull temperature relaxes
+  battery = clamp(battery + (reactorOut() - POWER.avionics)*dt, 0, battCapEff());
+  const qin = POWER.avionics + POWER.reactorWaste*damage.reactor, Teq = Math.pow(qin/(THERM.eps*THERM.sigma*Math.max(1, radAreaEff())) + THERM.tSpace**4, 0.25);
+  hullT = Teq + (hullT - Teq)*Math.exp(-dt/(THERM.capacity*Teq/(4*Math.max(1, qin))));
+  contactStep(dt); datalinkStep(0); missionStep(dt);
+  pending = pending.filter(m => { if (m.at <= simT) { log(`[GND] ${m.text}`); return false; } return true; });
+  if (changed) {
+    warpIdx = WARP_FULL;
+    log(changed === 'LOW' ? 'LOW ALTITUDE · WARP x1000' : `ENTERING ${changed === 'SUN' ? 'INTERPLANETARY SPACE' : changed + ' SPHERE OF INFLUENCE'} · WARP x1000`);
+  } else if (n >= COAST_STEPS && performance.now() - coastNote > 8000) {
+    coastNote = performance.now(); log(`WARP LIMITED BY GRAVITY · x${Math.round(dt/(T/WARPS[warpIdx]))}`);
+  }
+}
+
 /* ================= MAIN LOOP ================= */
 function step(dt) {
   const c = controlState();
   if (anyFlightInput(c) || leadHold) warpIdx = 0;   // no time warp while flying or holding a lead
+  if (warpIdx > WARP_FULL) {
+    const why = coastBlock();
+    if (!why) { coastRun(dt*WARPS[warpIdx]); return; }
+    warpIdx = WARP_FULL; log(`WARP x1000 · ${why}`);
+  }
   const simTime = dt * WARPS[warpIdx];
   const n = Math.max(1, Math.ceil(simTime / PHYS_DT));
   const h = simTime / n;
