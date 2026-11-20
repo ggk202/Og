@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OG — Cockpit prototype v0.13.0</title>
+<title>OG — Cockpit prototype v0.13.1</title>
 <style>
   html, body { margin:0; height:100%; background:#000; overflow:hidden;
     font-family: ui-monospace, Menlo, Consolas, monospace; color:#cfd8c0; }
@@ -93,7 +93,7 @@
 </head>
 <body>
 <canvas id="gl"></canvas>
-<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.13.0</span></div>
+<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.13.1</span></div>
 <div id="hangar"><div class="load" id="hangarLoad">LOADING SHIP</div>
   <div class="hint">DRAG TO ORBIT · WHEEL TO ZOOM · CLICK A HARDPOINT TO CHOOSE ITS MODULE</div>
   <div class="panel"><h2>HANGAR</h2><div class="sub" id="hullName"></div><div id="hullSel"></div><div class="sub">LOADOUT · SELECT A HARDPOINT, THEN A MODULE</div>
@@ -273,7 +273,7 @@ const NEW_HULLS = {
     ship: { hullDry: 210000, mainProp0: 60000, rcsProp0: 4000, rcsThrust: 8000, rcsIsp: 250, mainThrust: 1500000, mainIsp: 3200 },
     power: { reactor: 1.5e6, reactorWaste: 1.0e6, avionics: 120e3, battCap: 200e6 }, therm: { capacity: 5e6, radArea: 300, radStowedArea: 300 },
     turn: 0.35, inertiaBox: [8.8, 9.4, 75], sys: { scope: [-35, -31], capacitors: [-25, -14], reactor: [0, 14], radiators: [22, 28], main: [30, 37.5] }, plume: 3,
-    dockZ: 37.0, hitHull: 0.04, dials: { dv: 10000, load: 2000, heat: 1500 } },   // stern docking ring (body z) for the BS-90 booster collar
+    dockZ: 31.2, hitHull: 0.04, dials: { dv: 10000, load: 2000, heat: 1500 } },   // stern docking ring (body z, the hull's HP_Aft_Booster_Dock) for the BS-90 collar
   cm32: { name: 'CM-32 MISSILE CRUISER', short: 'CM-32', file: 'cm32_missile_cruiser_bare.glb', length: 60,
     ship: { hullDry: 120000, mainProp0: 70000, rcsProp0: 2500, rcsThrust: 5000, rcsIsp: 250, mainThrust: 200000, mainIsp: 3200 },
     power: { reactor: 0.8e6, reactorWaste: 0.6e6, avionics: 100e3, battCap: 80e6 }, therm: { capacity: 3e6, radArea: 250, radStowedArea: 250 },
