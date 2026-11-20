@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OG — Cockpit prototype v0.11.0</title>
+<title>OG — Cockpit prototype v0.11.1</title>
 <style>
   html, body { margin:0; height:100%; background:#000; overflow:hidden;
     font-family: ui-monospace, Menlo, Consolas, monospace; color:#cfd8c0; }
@@ -93,7 +93,7 @@
 </head>
 <body>
 <canvas id="gl"></canvas>
-<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.11.0</span></div>
+<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.11.1</span></div>
 <div id="hangar"><div class="load" id="hangarLoad">LOADING SHIP</div>
   <div class="hint">DRAG TO ORBIT · WHEEL TO ZOOM · CLICK A HARDPOINT TO CHOOSE ITS MODULE</div>
   <div class="panel"><h2>HANGAR</h2><div class="sub" id="hullName"></div><div id="hullSel"></div><div class="sub">LOADOUT · SELECT A HARDPOINT, THEN A MODULE</div>
@@ -1148,8 +1148,6 @@ function resetTargets() {
   flashes = [];
   torpedoes = []; tracers = []; eTracers = []; frags = []; fireballs = []; spray = []; scopeHold = null; hullHits = 0;
 }
-resetTargets();
-
 /* ---------- BS-90 booster stage and docking ----------
    The booster's collar (its file origin, axis out of the collar = file -Z) takes the DD-84's stern docking ring
    (HULL.dockZ): the destroyer backs in, its drive bells inside the hot-staging truss. Capture needs the capture
@@ -1248,6 +1246,7 @@ function stageSep() {
   if (mission && MISSIONS[mission.id].onSep) MISSIONS[mission.id].onSep(b.prop);
   log('STAGE SEPARATION · BOOSTER CLEAR AFT');
 }
+resetTargets();                                      // after the booster definitions: a saved DD-84 hull places one at load
 
 /* ---------- Lambert's problem (universal variables, short way, prograde) ----------
    Velocities at r1 and r2 for a transfer of duration tof about a body mu. */
