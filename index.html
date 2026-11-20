@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OG — Cockpit prototype v0.7.0</title>
+<title>OG — Cockpit prototype v0.8.0</title>
 <style>
   html, body { margin:0; height:100%; background:#000; overflow:hidden;
     font-family: ui-monospace, Menlo, Consolas, monospace; color:#cfd8c0; }
@@ -93,7 +93,7 @@
 </head>
 <body>
 <canvas id="gl"></canvas>
-<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.7.0</span></div>
+<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.8.0</span></div>
 <div id="hangar"><div class="load" id="hangarLoad">LOADING SHIP</div>
   <div class="hint">DRAG TO ORBIT · WHEEL TO ZOOM · CLICK A HARDPOINT TO CHOOSE ITS MODULE</div>
   <div class="panel"><h2>HANGAR</h2><div class="sub" id="hullName"></div><div id="hullSel"></div><div class="sub">LOADOUT · SELECT A HARDPOINT, THEN A MODULE</div>
@@ -141,7 +141,9 @@ const SHIP = { hullDry: 4070, mainProp0: 1067.6, rcsProp0: 360,
 // acceleration of the earlier model (6.5 deg/s^2).
 let RCS_K = 51602, RCS_ARM = [10.5, 10.5, 1.9];
 const RCS_ROLL = 0.08;
-const rcsTorqueAxis = i => RCS_K*(i === 2 ? RCS_ROLL : 1);
+// A docked booster stage adds its own RCS quads (BOOSTER.rcsTorque, N m) to the stack's turning torque
+const rcsTorqueAxis = i => RCS_K*(i === 2 ? RCS_ROLL : 1)
+  + (typeof dock !== 'undefined' && dock.state === 'DOCKED' ? BOOSTER.rcsTorque*(i === 2 ? 0.01 : 1) : 0);   // its quads sit close to the axis for roll
 // Reaction wheels: the fallback once the RCS tanks are dry. They turn the ship (no translation) with WHEEL.torque of
 // the RCS torque, and draw up to WHEEL.power from the battery in proportion to the torque they apply; no power,
 // no torque. (Wheel momentum saturation is not modelled: the RCS that would dump it is empty anyway.)
@@ -270,15 +272,18 @@ const NEW_HULLS = {
   dd84: { name: 'DD-84 DESTROYER', short: 'DD-84', file: 'dd84_destroyer_bare.glb', length: 80,
     ship: { hullDry: 210000, mainProp0: 60000, rcsProp0: 4000, rcsThrust: 8000, rcsIsp: 250, mainThrust: 300000, mainIsp: 3200 },
     power: { reactor: 1.5e6, reactorWaste: 1.0e6, avionics: 120e3, battCap: 200e6 }, therm: { capacity: 5e6, radArea: 300, radStowedArea: 300 },
-    turn: 0.35, inertiaBox: [8.8, 9.4, 75], sys: { scope: [-35, -31], capacitors: [-25, -14], reactor: [0, 14], radiators: [22, 28], main: [30, 37.5] }, plume: 3 },
+    turn: 0.35, inertiaBox: [8.8, 9.4, 75], sys: { scope: [-35, -31], capacitors: [-25, -14], reactor: [0, 14], radiators: [22, 28], main: [30, 37.5] }, plume: 3,
+    dockZ: 37.0, hitHull: 0.04, dials: { dv: 10000, load: 2000, heat: 1500 } },   // stern docking ring (body z) for the BS-90 booster collar
   cm32: { name: 'CM-32 MISSILE CRUISER', short: 'CM-32', file: 'cm32_missile_cruiser_bare.glb', length: 60,
     ship: { hullDry: 120000, mainProp0: 70000, rcsProp0: 2500, rcsThrust: 5000, rcsIsp: 250, mainThrust: 200000, mainIsp: 3200 },
     power: { reactor: 0.8e6, reactorWaste: 0.6e6, avionics: 100e3, battCap: 80e6 }, therm: { capacity: 3e6, radArea: 250, radStowedArea: 250 },
-    turn: 0.5, inertiaBox: [9, 9, 60], sys: { scope: [-29, -25], capacitors: [-21, -13], reactor: [4, 14], radiators: [16, 21], main: [23, 29.5] }, plume: 2.5 },
+    turn: 0.5, inertiaBox: [9, 9, 60], sys: { scope: [-29, -25], capacitors: [-21, -13], reactor: [4, 14], radiators: [16, 21], main: [23, 29.5] }, plume: 2.5,
+    hitHull: 0.06, dials: { dv: 8000, load: 1500, heat: 1000 } },
   cs17: { name: 'CS-17 STEALTH CRUISER', short: 'CS-17', file: 'cs17_stealth_cruiser_bare.glb', length: 82,
     ship: { hullDry: 160000, mainProp0: 45000, rcsProp0: 3000, rcsThrust: 6000, rcsIsp: 250, mainThrust: 200000, mainIsp: 3200 },
     power: { reactor: 0.9e6, reactorWaste: 0.7e6, avionics: 100e3, battCap: 100e6 }, therm: { capacity: 4e6, radArea: 200, radStowedArea: 200 },
-    turn: 0.45, inertiaBox: [20, 9, 82], sys: { scope: [-34, -30], capacitors: [-22, -12], reactor: [4, 18], radiators: [22, 30], main: [34, 43] }, plume: 2 },
+    turn: 0.45, inertiaBox: [20, 9, 82], sys: { scope: [-34, -30], capacitors: [-22, -12], reactor: [4, 18], radiators: [22, 30], main: [34, 43] }, plume: 2,
+    hitHull: 0.07, dials: { dv: 8000, load: 1500, heat: 1000 } },
 };
 // Default module per slot type (LPD slots carry laser point defence)
 const DEFAULT_FOR_TYPE = { utility_pod_mount: 'mod_aux_capacitor_pod', heavy_turret: 'mod_bow_heavy_laser', bow_optical_mount: 'mod_bow_primary_telescope',
@@ -515,7 +520,7 @@ const rcsK = () => 0.2 + 0.8*damage.rcs;
 // Returns true when the hit destroyed the ship (the caller stops processing this step)
 function applyTorpedoHit(tp) {
   hullHits++;
-  hullInt = Math.max(0, hullInt - HIT_HULL);
+  hullInt = Math.max(0, hullInt - (HULL.hitHull ?? HIT_HULL));   // larger hulls take a smaller share per hit
   hitShakeUntil = performance.now()/1000 + 0.6;
   // Side the torpedo came from, in body axes, from the start-of-step positions
   const from = new THREE.Vector3(tp.px - ship.px, tp.py - ship.py, tp.pz - ship.pz).applyQuaternion(toBodyQ());
@@ -567,6 +572,7 @@ function restartAfterDeath() {
   telem.qout = 0; lastRailShotT = lastLaunchT = -1e9;   // no heat or weapon signature carried over from the last run
   mainProp = SHIP.mainProp0; rcsProp = SHIP.rcsProp0; podProp = tankProp0Total(); podsOn = tankCount() > 0;
   leadHold = false; leadPrev = null; hullHits = 0;
+  dock = { state: 'FREE', capArmed: false, lights: true, t: 0, sepArmT: -1e9, prop: 0, g: null };
   for (const t of targets) if (t.hostile) t.fireT = 10;
   const el = document.getElementById('death');
   el.style.display = 'none'; el.classList.remove('show');
@@ -697,7 +703,7 @@ const PHYS_DT = 0.25;
 const WARPS = [1, 10, 100, 1000];
 const RANGES = [2000, 10000, 50000, 250000, 1000000];
 const PREVENT = new Set(['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','PageUp','PageDown','Period','Comma']);
-const MFD_PAGES = ['TACTICAL', 'ORBIT', 'POWER / THERMAL', 'WEAPONS', 'PROPULSION', 'COMMS', 'SHIP', 'SCOPE', 'DAMAGE', 'CONTROLS'];
+const MFD_PAGES = ['TACTICAL', 'ORBIT', 'POWER / THERMAL', 'WEAPONS', 'PROPULSION', 'COMMS', 'SHIP', 'SCOPE', 'DAMAGE', 'CONTROLS', 'DOCK'];
 const MFD_W = 0.6, MFD_H = 0.367, MFD_TEX_W = 768, MFD_TEX_H = 470;
 const PH = '#7dff9a', AMB = '#ffb020', RED = '#ff5040', DIM = 'rgba(125,255,154,0.35)';
 
@@ -763,7 +769,7 @@ const shipQ = SHIP_Q0.clone();
 const omega = new THREE.Vector3();
 let mainProp = SHIP.mainProp0, rcsProp = SHIP.rcsProp0;
 let podProp = tankProp0Total(), podsOn = tankCount() > 0, masterMode = 'OFF', masterGuardOpen = false;   // master arm: OFF / ON / TNG   // fuel pods (feed the main drive first)
-function shipMass() { return dryMass() + mainProp + rcsProp + (podsOn ? tankDryTotal() + podProp : 0); }
+function shipMass() { return dryMass() + mainProp + rcsProp + (podsOn ? tankDryTotal() + podProp : 0) + stackMass(); }
 // Moments of inertia [pitch, yaw, roll] about the model origin (centre of mass offsets are ignored):
 // the hull with its internal propellant as a 3.6 x 3.8 x 23.7 m box, the radiator fins (300 kg, 9.8 m aft,
 // 11.6 m tall), and each fitted module as a point mass at its centre (com). A spinal gun, far forward, dominates.
@@ -771,6 +777,11 @@ function shipI() {
   const mh = SHIP.hullDry + mainProp + rcsProp, [bw, bh, bl] = HULL.inertiaBox;
   const I = [mh*(bh*bh + bl*bl)/12, mh*(bw*bw + bl*bl)/12, mh*(bw*bw + bh*bh)/12];
   if (HULL.fins) { I[0] += 300*(5.8*5.8/3 + 9.8*9.8); I[1] += 300*9.8*9.8; I[2] += 300*5.8*5.8/3; }
+  const mb = stackMass();
+  if (mb > 0) {                                      // docked booster: a rod behind the stern ring
+    const zc = HULL.dockZ + BOOSTER.center, L = BOOSTER.len, r = 5;
+    I[0] += mb*(L*L/12 + zc*zc); I[1] += mb*(L*L/12 + zc*zc); I[2] += mb*r*r/2;
+  }
   const p0 = tankProp0Total();
   for (const slot of Object.keys(HARDPOINTS)) {
     const m = modAt(slot);
@@ -787,7 +798,7 @@ const turnAccel = () => shipI().map((v, i) => rcsTorqueAxis(i)/v*180/Math.PI);
 // Delta-v the pods' remaining propellant gives (burned first, with the pods still attached)
 function podDv() {
   if (!podsOn) return 0;
-  const m = dryMass() + mainProp + rcsProp + tankDryTotal();
+  const m = dryMass() + mainProp + rcsProp + tankDryTotal() + stackMass();
   return SHIP.mainIsp*G0*Math.log((m + podProp)/m);
 }
 let battery = POWER.battCap, hullT = THERM.tStart;
@@ -1124,6 +1135,7 @@ function resetTargets() {
     mkTarget('SURVEY MERIDIAN-2',  LEO_R + 800e3, 0.45,  3, 60,  'NEUTRAL', 0.9),       // ~3500 km
     { ...mkTarget('DESTROYER KORSAKOV', LEO_R + 20e3,  1.1,   9, 400, 'HOSTILE'), laser: true },            // behind Earth's limb
   ];
+  if (!missionPlan && HULL.dockZ) targets.splice(0, 0, sandboxBooster());   // docking practice
   curTarget = 0;
   assignTrackNumbers();
   resetSats();
@@ -1134,6 +1146,95 @@ function resetTargets() {
   torpedoes = []; tracers = []; eTracers = []; frags = []; fireballs = []; spray = []; scopeHold = null; hullHits = 0;
 }
 resetTargets();
+
+/* ---------- BS-90 booster stage and docking ----------
+   The booster's collar (its file origin, axis out of the collar = file -Z) takes the DD-84's stern docking ring
+   (HULL.dockZ): the destroyer backs in, its drive bells inside the hot-staging truss. Capture needs the capture
+   latches armed and, at contact, a closing rate, lateral offset and axis misalignment inside DOCK_LIM; soft capture
+   pulls in and goes to hard dock after DOCK_HARD_T s. Docked, the booster rides with the ship (its mass and inertia
+   added) until STAGE SEP, when its retro motors push it clear aft. bq: the booster's attitude (file axes). */
+const BOOSTER = { name: 'BS-90 BOOSTER', file: 'mod_bs90_heavy_booster.glb', len: 69.5, center: 34.1, radius: 10.7,
+  dry: 90000, prop0: 1500000, sepV: 1.0, rcsTorque: 1.8e7 };
+const DOCK_LIM = { v: 0.15, lat: 0.3, ang: 3 }, DOCK_HARD_T = 4, DOCK_GAP = 150;
+const Q_X_TO_NEGZ = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI/2);   // model +x (forward) -> file -Z
+let dock = { state: 'FREE', capArmed: false, lights: true, t: 0, sepArmT: -1e9, prop: 0, g: null };
+function mkBooster(st, bq, prop = BOOSTER.prop0) {
+  return { name: BOOSTER.name, radius: BOOSTER.radius, integrity: 800, maxInt: 800, gone: false, side: 'NEUTRAL', sig: 30,
+    booster: true, bq: bq.clone(), q: bq.clone().multiply(Q_X_TO_NEGZ), len: BOOSTER.len, prop, ...st };
+}
+// Sandbox with a docking hull: the booster waits DOCK_GAP m aft of the stern ring, collar facing the ship
+function sandboxBooster() {
+  const d = HULL.dockZ + DOCK_GAP + BOOSTER.center;
+  return mkBooster(orbitState(LEO_R, -d/LEO_R), SHIP_Q0);
+}
+const boosterTarget = () => targets.find(t => t.booster && !t.gone);
+const stackMass = () => dock.state === 'DOCKED' ? BOOSTER.dry + dock.prop : 0;
+// Port-to-port geometry. s: distance of the ship's ring in front of the collar along the collar axis; lat: offset
+// across it; closing: approach rate; ang: angle between the two axes (deg); body: the collar seen from the ship
+function dockGeom(b) {
+  const a = new THREE.Vector3(0, 0, -1).applyQuaternion(b.bq);
+  const bp = new THREE.Vector3(b.x, b.y, b.z).addScaledVector(a, BOOSTER.center);
+  const sp = new THREE.Vector3(0, 0, HULL.dockZ).applyQuaternion(shipQ).add(new THREE.Vector3(ship.x, ship.y, ship.z));
+  const d = sp.clone().sub(bp), s = d.dot(a), latV = d.clone().addScaledVector(a, -s);
+  const vrel = new THREE.Vector3(ship.vx - b.vx, ship.vy - b.vy, ship.vz - b.vz);
+  const toBody = shipQ.clone().invert();
+  const bpB = bp.clone().sub(new THREE.Vector3(ship.x, ship.y, ship.z)).applyQuaternion(toBody);   // collar in body axes
+  const offB = bp.clone().sub(sp).applyQuaternion(toBody);                                         // ring -> collar, body axes
+  const vB = vrel.clone().applyQuaternion(toBody);
+  const axB = new THREE.Vector3(0, 0, 1).applyQuaternion(b.bq).applyQuaternion(toBody);             // collar axis, body (1 = aligned)
+  return { s, lat: latV.length(), closing: -vrel.dot(a), ang: Math.acos(clamp(axB.z, -1, 1))*180/Math.PI,
+    bpB, offB, vB, axB, a, vrel };
+}
+function dockStep(h) {
+  if (!HULL.dockZ || dock.state === 'DOCKED') return;
+  const b = boosterTarget();
+  if (!b) { dock.g = null; return; }
+  const G = dock.g = dockGeom(b);
+  if (dock.state === 'CAPTURE') {                    // latches drawing the ship in: velocities matched, then hard dock
+    ship.vx = b.vx; ship.vy = b.vy; ship.vz = b.vz; omega.multiplyScalar(0.8);
+    dock.t += h;
+    if (dock.t >= DOCK_HARD_T) hardDock(b);
+    return;
+  }
+  if (G.s > 0.05 || G.s < -4 || G.lat > 3 || G.closing <= 0) return;   // no contact (or already moving apart)
+  const ok = dock.capArmed && G.closing <= DOCK_LIM.v && G.lat <= DOCK_LIM.lat && G.ang <= DOCK_LIM.ang;
+  if (ok) {
+    dock.state = 'CAPTURE'; dock.t = 0;
+    ship.vx = b.vx; ship.vy = b.vy; ship.vz = b.vz;
+    log(`CONTACT ${G.closing.toFixed(2)} M/S · SOFT CAPTURE · LATCHES CLOSING`); sfx.click();
+    return;
+  }
+  // Rebound: the axial closing rate reverses at 30 %; the ring is pushed back clear of the collar
+  const why = !dock.capArmed ? 'CAPTURE NOT ARMED' : G.closing > DOCK_LIM.v ? `TOO FAST ${G.closing.toFixed(2)} M/S`
+    : G.lat > DOCK_LIM.lat ? `OFFSET ${G.lat.toFixed(2)} M` : `MISALIGNED ${G.ang.toFixed(1)}°`;
+  const dv = 1.3*G.closing;
+  ship.vx += G.a.x*dv; ship.vy += G.a.y*dv; ship.vz += G.a.z*dv;
+  ship.x += G.a.x*(0.06 - G.s); ship.y += G.a.y*(0.06 - G.s); ship.z += G.a.z*(0.06 - G.s);
+  log(`CONTACT · NO CAPTURE · ${why}`); hullHitShake();
+  if (G.closing > 0.6) {                             // a hard hit damages the drive bells against the truss
+    hullInt = Math.max(0.05, hullInt - 0.04*G.closing); damage.main = Math.max(0, damage.main - 0.25*G.closing);
+    log(`HARD CONTACT · MAIN DRIVE ${Math.round(damage.main*100)}%`);
+  }
+}
+function hullHitShake() { hitShakeUntil = performance.now()/1000 + 0.4; }
+function hardDock(b) {
+  dock.state = 'DOCKED'; dock.prop = b.prop ?? BOOSTER.prop0;
+  const i = targets.indexOf(b), cur = targets[curTarget];
+  targets.splice(i, 1); curTarget = Math.max(0, targets.indexOf(cur));
+  log(`HARD DOCK · STACK ${((shipMass())/1e3).toFixed(0)} T`);
+}
+function stageSep() {
+  if (dock.state !== 'DOCKED') { log(dock.state === 'CAPTURE' ? 'SEP INHIBIT · CAPTURE IN PROGRESS' : 'NO STAGE ATTACHED'); return; }
+  const now = performance.now()/1000;
+  if (now - dock.sepArmT > 3) { dock.sepArmT = now; log('STAGE SEP ARMED · PRESS SEP AGAIN'); return; }
+  dock.sepArmT = -1e9;
+  const aft = new THREE.Vector3(0, 0, 1).applyQuaternion(shipQ), d = HULL.dockZ + BOOSTER.center + 0.5;
+  const b = mkBooster({ x: ship.x + aft.x*d, y: ship.y + aft.y*d, z: ship.z + aft.z*d,
+    vx: ship.vx + aft.x*BOOSTER.sepV, vy: ship.vy + aft.y*BOOSTER.sepV, vz: ship.vz + aft.z*BOOSTER.sepV }, shipQ, dock.prop);
+  b.trk = String(1000 + Math.floor(Math.random()*9000));
+  targets.push(b); dock.state = 'FREE'; dock.capArmed = false;
+  log('STAGE SEPARATION · BOOSTER CLEAR AFT');
+}
 
 /* ================= MISSIONS ================= */
 // RK4 with explicit time (gravity only), forwards or backwards: used to plan arrivals
@@ -1928,7 +2029,7 @@ function physicsStep(h) {
     // Barrel cooling, every step; an overheated mount comes back once it has cooled to PDC_HEAT_RESUME
     m.heat = Math.max(0, m.heat - PDC_COOL*h);
     if (m.hot && m.heat <= PDC_HEAT_RESUME) { m.hot = false; log(`${m.name} COOLED · READY`); }
-    if (m.cd > 0 || masterMode === 'OFF' || battery < PDC_ENERGY || damage[m.sys] <= 0 || m.hot || m.rounds <= 0) continue;
+    if (m.cd > 0 || masterMode === 'OFF' || battery < PDC_ENERGY || damage[m.sys] <= 0 || m.hot || m.rounds <= 0 || pdHold[m.sys]) continue;
     const nW = new THREE.Vector3(...m.dir).applyQuaternion(shipQ);
     const mP = new THREE.Vector3(...m.pos).applyQuaternion(shipQ).add(new THREE.Vector3(ship.x, ship.y, ship.z));
     // Nearest torpedo inside range and the mount's arc
@@ -1974,6 +2075,7 @@ function physicsStep(h) {
     const a = enemyAI(t, h) || [0, 0, 0];
     rk4(t, h, a[0], a[1], a[2]);
   }
+  dockStep(h);
   enemyPD(h);
   contactStep(h);
   datalinkStep(h);
@@ -2078,7 +2180,7 @@ function physicsStep(h) {
   lpdFiring = false; lpdLoadE = 0;
   for (const m of LPD_MOUNTS) {
     m.target = null;
-    if (masterMode === 'OFF' || (damage[m.sys] ?? 1) <= 0 || battery <= 0 || brownout || hullT >= THERM.tMax) continue;
+    if (masterMode === 'OFF' || (damage[m.sys] ?? 1) <= 0 || battery <= 0 || brownout || hullT >= THERM.tMax || pdHold[m.sys]) continue;
     const nW = new THREE.Vector3(...m.dir).applyQuaternion(shipQ);
     let best = null, bestR = Infinity;
     for (const tp of torpedoes) {
@@ -2335,9 +2437,13 @@ const M = {
   bezel:  new THREE.MeshStandardMaterial({ color: 0x2a2c2e, roughness: 0.5, metalness: 0.6 }),
   btn:    new THREE.MeshStandardMaterial({ color: 0x222426, roughness: 0.6, metalness: 0.2 }),
 };
+// Panel parts go into the cockpit, or into a hull's own panel group while one is being built (ckParent)
+let ckParent = null;
+const ckAdd = o => (ckParent || cockpit).add(o);
+const CKV = Object.fromEntries(Object.keys(HULLS).map(id => { const g = new THREE.Group(); g.name = 'panel_' + id; cockpit.add(g); return [id, g]; }));
 function add(geo, mat, x, y, z, rx = 0, ry = 0, rz = 0) {
   const m = new THREE.Mesh(geo, mat); m.position.set(x, y, z); m.rotation.set(rx, ry, rz);
-  cockpit.add(m); return m;
+  ckAdd(m); return m;
 }
 const box = (w, h, d) => new THREE.BoxGeometry(w, h, d);
 
@@ -2354,10 +2460,11 @@ for (let i = 0; i < 10; i++) {
   add(box(0.04, 1.4, 0.04), M.dark, -1.42, -0.08, -0.2 - i*0.25);
   add(box(0.04, 1.4, 0.04), M.dark,  1.42, -0.08, -0.2 - i*0.25);
 }
-const cableGeo = new THREE.CylinderGeometry(0.018, 0.018, 2.6, 10);
-add(cableGeo, M.rubber, -1.36, 0.45, -1.3, Math.PI/2, 0, 0);
-add(cableGeo, M.rubber,  1.36, -0.40, -1.3, Math.PI/2, 0, 0);
-add(cableGeo, M.rubber,  1.36, 0.25, -1.1, Math.PI/2, 0, 0);
+// (they start behind the panel: geometry reaching the camera plane clips badly on some renderers)
+const cableGeo = new THREE.CylinderGeometry(0.018, 0.018, 1.6, 10);
+add(cableGeo, M.rubber, -1.36, 0.45, -1.8, Math.PI/2, 0, 0);
+add(cableGeo, M.rubber,  1.36, -0.40, -1.8, Math.PI/2, 0, 0);
+add(cableGeo, M.rubber,  1.36, 0.25, -1.8, Math.PI/2, 0, 0);
 
 // Main instrument panel
 add(box(2.4, 1.31, 0.06), M.panel, 0, -0.055, -0.92);   // top at the ceiling (0.6), bottom at -0.71
@@ -2381,9 +2488,10 @@ function placard(lines, x, y, z, ry) {
   });
   const m = new THREE.Mesh(new THREE.PlaneGeometry(0.2, 0.075),
     new THREE.MeshStandardMaterial({ map: T.tex, roughness: 0.6, metalness: 0.1 }));
-  m.position.set(x, y, z); m.rotation.y = ry; cockpit.add(m);
+  m.position.set(x, y, z); m.rotation.y = ry; ckAdd(m);
 }
 // Placard in the empty panel band between the lower MFD buttons and the switch row (in view)
+ckParent = CKV.og1;                                   // the OG-1's own band: placard, stencils and jewels
 placard(['MAX ACCEL', '9 G'], 0, -0.43, PANEL_Z + 0.004, 0);
 
 // Flavour: stencilled markings and indicator jewels in the free band beside the placard (decorative only)
@@ -2395,7 +2503,7 @@ function decal(lines, x, y, w, color = 'rgba(214,208,180,0.85)') {
   });
   const m = new THREE.Mesh(new THREE.PlaneGeometry(w, w*ch/cw),
     new THREE.MeshStandardMaterial({ map: T.tex, transparent: true, depthWrite: false, roughness: 0.9, metalness: 0.1 }));
-  m.position.set(x, y, PANEL_Z + 0.004); cockpit.add(m);
+  m.position.set(x, y, PANEL_Z + 0.004); ckAdd(m);
 }
 decal(['MIL-SPEC MK II', 'ASSY 3 · REV C'], -0.42, -0.42, 0.2);
 decal(['HOT SURFACE', 'DO NOT TOUCH'], 0.56, -0.42, 0.16);
@@ -2405,6 +2513,7 @@ const jewelCols = [0xff3322, 0x33ff66, 0xffaa22];
     new THREE.MeshStandardMaterial({ color: jewelCols[i % 3], emissive: jewelCols[i % 3], emissiveIntensity: i % 2 ? 0.8 : 0.1, roughness: 0.2 }),
     x, -0.42, PANEL_Z + 0.007);
 });
+ckParent = null;
 
 // Canvas texture helper
 function canvasTex(w, h, draw) {
@@ -2422,7 +2531,7 @@ function labelMesh(text, w, h, x, y, z, color = '#e6dfc4') {
   const t = new THREE.CanvasTexture(cv); t.colorSpace = THREE.SRGBColorSpace;
   const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h),
     new THREE.MeshBasicMaterial({ map: t, transparent: true, toneMapped: false }));
-  m.position.set(x, y, z); cockpit.add(m);
+  m.position.set(x, y, z); ckAdd(m);
 }
 
 // Analogue gauges (outer edges of the panel)
@@ -2489,6 +2598,104 @@ lampDefs.forEach((d, i) => {
   labelMesh(d.label, 0.3, 0.03, lampX[i], 0.57, PANEL_Z + 0.003, '#d9d2b8');
 });
 
+/* ---------- Hull panels: the band between the lower MFD keys and the switch row is each hull's own ----------
+   (the OG-1's is the placard and stencils above). DD-84: a point-defence board (one key per mount: AUTO / HOLD,
+   lamp: green ready, flickering firing, amber hold, red offline) and the docking controls for the booster. */
+const clickables = [];                                // everything on the panel that takes a click
+const VAR_LAMPS = [];
+function varLamp(x, y, color, get, r = 0.008) {
+  const mat = new THREE.MeshStandardMaterial({ color: new THREE.Color(color).multiplyScalar(0.25), emissive: color, emissiveIntensity: 0 });
+  add(new THREE.SphereGeometry(r, 14, 10), mat, x, y, PANEL_Z + 0.006);
+  VAR_LAMPS.push({ mat, get, hull: ckParent });
+  return mat;
+}
+const pdHold = {};                                     // point-defence mounts held (no fire), by hardpoint
+// Buttons every hull has (manual, lamp test, MFD page reset, pod jettison, scope IR, lead hold with its lamp),
+// placed by the hull's band layout L: { KEY: [x, y] }
+const leadLampMat = new THREE.MeshStandardMaterial({ color: '#2a1600', emissive: '#ffb000', emissiveIntensity: 0, roughness: 0.4 });
+function utilityBand(L) {
+  makeButton(...L.BOOK, 'BOOK', () => { sfx.click(); toggleManual(); });
+  makeButton(...L.TEST, 'TEST', () => { lampTestT = 3; sfx.click(); });
+  makeButton(...L.RESET, 'RESET', () => { mfds.forEach((m, i) => { m.page = mfdDefs[i].page; m.on = true; drawMFD(m); }); sfx.click(); });
+  makeButton(...L.JETT, 'JETT', () => jettisonPods());
+  makeButton(...L.IR, 'IR', () => onAction('toggleIR'));
+  makeButton(...L.LEAD, 'LEAD', () => onAction('leadHold'));
+  add(new THREE.SphereGeometry(0.008, 16, 12), leadLampMat, ...L.leadLamp, PANEL_Z + 0.012);
+}
+const BAND_OG1 = { BOOK: [-0.74, -0.43], TEST: [-0.26, -0.43], RESET: [0.26, -0.43], JETT: [0.34, -0.43], IR: [0.42, -0.43], LEAD: [0.50, -0.43], leadLamp: [0.50, -0.39] };
+ckParent = CKV.og1; utilityBand(BAND_OG1); ckParent = null;
+const BAND_Y = -0.428;
+function defaultAccelG(H) {
+  let m = H.ship.hullDry + H.ship.mainProp0 + H.ship.rcsProp0;
+  for (const id of Object.values(H.defaultLoadout)) { const md = MODULE_CATALOG[id]; if (md) m += md.mass + (md.prop || 0); }
+  return H.ship.mainThrust/m/G0;
+}
+// Labels drawn on a small plate (stencilled lettering)
+function bandLabel(text, x, y, w = 0.07) { labelMesh(text, w, 0.016, x, y, PANEL_Z + 0.003, '#d9d2b8'); }
+for (const H of Object.values(HULLS)) {
+  if (H.id === 'og1') continue;
+  ckParent = CKV[H.id];
+  placard(['MAX ACCEL', `${defaultAccelG(H).toFixed(2)} G`], 0, -0.43, PANEL_Z + 0.004, 0);
+  if (H.id !== 'dd84') utilityBand(BAND_OG1);
+  if (H.id === 'dd84') {
+    // Right of the placard: utility keys on the upper row, docking keys below, status lamps beside them
+    const RA = -0.395, RB = -0.452, xs = [0.155, 0.24, 0.325, 0.41, 0.495, 0.58];
+    utilityBand({ TEST: [xs[0], RA], BOOK: [xs[1], RA], RESET: [xs[2], RA], JETT: [xs[3], RA], IR: [xs[4], RA], LEAD: [xs[5], RA], leadLamp: [0.48, RB] });
+    bandLabel('LEAD', 0.48, -0.478, 0.05);
+    // Point-defence board: the eight PD mounts (CIWS and LPD hardpoints), in hull order
+    const pdSlots = Object.keys(H.hardpoints).filter(k => /^HP_(CIWS|LPD)_/.test(k));
+    bandLabel('POINT DEFENCE · AUTO / HOLD', -0.495, -0.47, 0.42);
+    pdSlots.forEach((slot, i) => {
+      const x = -0.79 + i*0.085, ab = slot.replace(/^HP_(CIWS|LPD)_/, '').replace(/[a-z]/g, '');
+      makeButton(x, BAND_Y, `${slot.includes('CIWS') ? 'C' : 'L'}-${ab}`, () => {
+        pdHold[slot] = !pdHold[slot]; log(`${slotLabel(slot)} · ${pdHold[slot] ? 'HOLD FIRE' : 'AUTO'}`); sfx.click();
+      });
+      varLamp(x, -0.386, 0x66ff88, () => {
+        const m = [...PDC_MOUNTS, ...LPD_MOUNTS].find(q => q.sys === slot);
+        if (!m) return 0;
+        if ((damage[slot] ?? 1) <= 0) return [0xff3322, 2.5];
+        if (pdHold[slot]) return [0xffaa22, 2.0];
+        const firing = (m.lastFire !== undefined && simT - m.lastFire < 0.3) || !!m.target;
+        return firing ? [0x66ff88, Math.random() < 0.5 ? 2.8 : 0.6] : m.rounds <= 0 ? [0xff3322, 1.0] : [0x66ff88, 0.9];
+      });
+    });
+    // Docking: camera to the lower right MFD, floodlights, capture latches, stage separation (press twice)
+    makeButton(xs[0], RB, 'CAM', () => { toggleDockCam(); sfx.click(); });
+    makeButton(xs[1], RB, 'LITE', () => { dock.lights = !dock.lights; sfx.click(); log(`DOCKING LIGHTS ${dock.lights ? 'ON' : 'OFF'}`); });
+    makeButton(xs[2], RB, 'CAPT', () => { dock.capArmed = !dock.capArmed; sfx.click(); log(`CAPTURE LATCHES ${dock.capArmed ? 'ARMED' : 'SAFE'}`); });
+    makeButton(xs[3], RB, 'SEP', () => { sfx.click(); stageSep(); });
+    // Status lamps: floodlights, latches armed, ring in contact range (within 2 m), soft capture, hard dock
+    // (DOCK blinks red while separation is armed)
+    const sepArmed = () => performance.now()/1000 - dock.sepArmT < 3;
+    [['LITE', 0xfff4d0, () => dock.lights ? 1.5 : 0], ['ARM', 0xffaa22, () => dock.capArmed ? 2.2 : 0],
+     ['CONT', 0x66ff88, () => dock.state === 'FREE' && dock.g && dock.g.s < 2 && dock.g.s > -1 && dock.g.lat < 3 ? 2.5 : 0],
+     ['CAPT', 0xffaa22, () => dock.state === 'CAPTURE' ? 2.5 : 0],
+     ['DOCK', 0x66ff88, () => sepArmed() ? (Math.floor(performance.now()/200) % 2 ? 2.5 : 0.2) : dock.state === 'DOCKED' ? 2.5 : 0]].forEach(([lab, col, on], i) => {
+      const x = 0.54 + i*0.06;
+      varLamp(x, RB, col, () => { const v = on(); return v ? [lab === 'DOCK' && sepArmed() ? 0xff3322 : col, v] : 0; }, 0.01);
+      bandLabel(lab, x, -0.478, 0.05);
+    });
+  }
+  ckParent = null;
+}
+// Show the selected hull's panel band and set its gauge ranges
+function applyCockpitVariant() {
+  for (const [id, g] of Object.entries(CKV)) g.visible = id === HULL.id;
+  const dm = HULL.dials || {};
+  for (const d of dials) if (d.max0 === undefined) d.max0 = d.max;
+  for (const d of dials) d.max = dm[d.id] ?? d.max0;
+}
+applyCockpitVariant();
+function updateVarLamps() {
+  for (const l of VAR_LAMPS) {
+    if (!l.hull.visible) continue;
+    const v = lampTestT > 0 ? [null, 2.5] : l.get();
+    if (!v) { l.mat.emissiveIntensity = 0; continue; }
+    if (v[0] !== null) l.mat.emissive.setHex(v[0]);
+    l.mat.emissiveIntensity = v[1];
+  }
+}
+
 /* ---------- Four MFDs in a 2x2 grid, with softkeys under each ---------- */
 // Raised metal bezel around a screen: four frame bars, so the rim catches light
 function bezelFrame(x, y, w, h, z) {
@@ -2498,7 +2705,6 @@ function bezelFrame(x, y, w, h, z) {
   add(box(t, h, d), M.metal, x - w/2 + t/2, y, z);
   add(box(t, h, d), M.metal, x + w/2 - t/2, y, z);
 }
-const clickables = [];
 // Round push button (same press travel as makeButton), used for the torpedo warning mute
 function makeRoundButton(x, y, onPress) {
   add(new THREE.CylinderGeometry(0.0165, 0.0165, 0.006, 32).rotateX(Math.PI/2), M.dark, x, y, PANEL_Z + 0.003);
@@ -2506,7 +2712,7 @@ function makeRoundButton(x, y, onPress) {
   const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.013, 0.013, 0.016, 32).rotateX(Math.PI/2), M.btn);
   cap.position.z = 0.008;
   cap.userData = { onPress, pivot, pressT: 0 };
-  pivot.add(cap); cockpit.add(pivot); clickables.push(cap);
+  pivot.add(cap); ckAdd(pivot); clickables.push(cap);
   return cap;
 }
 function makeButton(x, y, label, onPress) {
@@ -2515,7 +2721,7 @@ function makeButton(x, y, label, onPress) {
   const cap = new THREE.Mesh(box(0.06, 0.034, 0.016), M.btn);
   cap.position.z = 0.008;
   cap.userData = { onPress, pivot, pressT: 0 };
-  pivot.add(cap); cockpit.add(pivot); clickables.push(cap);
+  pivot.add(cap); ckAdd(pivot); clickables.push(cap);
   const T = canvasTex(128, 64, (g, w, h) => {
     g.fillStyle = '#d9d2b8'; g.font = 'bold 30px monospace';
     g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(label, w/2, h/2);
@@ -2562,10 +2768,19 @@ const mfds = mfdDefs.map((d, i) => {
     makeButton(d.x + mfdBtnX[k]*d.w/0.6, by, lbl, () => d.map ? mapSoftkey(m, k) : mfdSoftkey(m, k)));
   return m;
 });
+// The DOCK page exists only on hulls with a docking ring; CAM puts it on the lower right MFD and back
+const DOCK_MFD = 4;
+let dockPrevPage = 3;
+function toggleDockCam() {
+  const m = mfds[DOCK_MFD], di = MFD_PAGES.indexOf('DOCK');
+  if (m.page === di) m.page = dockPrevPage; else { dockPrevPage = m.page; m.page = di; }
+  m.on = true; drawMFD(m);
+}
+const pageOk = i => MFD_PAGES[i] !== 'DOCK' || !!HULL.dockZ;
 function mfdSoftkey(m, k) {
   switch (k) {
-    case 0: m.page = (m.page + 1) % MFD_PAGES.length; break;
-    case 1: m.page = (m.page + MFD_PAGES.length - 1) % MFD_PAGES.length; break;
+    case 0: do m.page = (m.page + 1) % MFD_PAGES.length; while (!pageOk(m.page)); break;
+    case 1: do m.page = (m.page + MFD_PAGES.length - 1) % MFD_PAGES.length; while (!pageOk(m.page)); break;
     case 2: if (MFD_PAGES[m.page] === 'SCOPE') scopeZoom = (scopeZoom + 1) % SCOPE_ZOOMS.length;
             else rangeIdx = (rangeIdx + 1) % RANGES.length; break;
     case 3: cycleTarget(); break;
@@ -2751,13 +2966,7 @@ for (const s of switchDefs) {
 
 // Utility buttons beside the placard: lamp test, MFD page reset, fuel pod jettison, scope IR toggle,
 // lead hold toggle (lit while engaged)
-makeButton(0.34, -0.43, 'JETT', () => jettisonPods());
-makeButton(0.42, -0.43, 'IR', () => onAction('toggleIR'));
-makeButton(0.50, -0.43, 'LEAD', () => onAction('leadHold'));
-const leadLampMat = new THREE.MeshStandardMaterial({ color: '#2a1600', emissive: '#ffb000', emissiveIntensity: 0, roughness: 0.4 });
-add(new THREE.SphereGeometry(0.008, 16, 12), leadLampMat, 0.50, -0.39, PANEL_Z + 0.012);
-makeButton(-0.74, -0.43, 'BOOK', () => { sfx.click(); toggleManual(); });
-makeButton(-0.26, -0.43, 'TEST', () => { lampTestT = 3; sfx.click(); });
+// (BOOK, TEST, RESET, JETT, IR and LEAD are part of each hull's panel band: see utilityBand)
 // Torpedo warning: a blinking red lamp with a round mute button underneath
 const torpLampMat = new THREE.MeshStandardMaterial({ color: '#3a0000', emissive: '#ff2a2a', emissiveIntensity: 0, roughness: 0.4 });
 add(new THREE.SphereGeometry(0.016, 16, 12), torpLampMat, 0.66, -0.30, PANEL_Z + 0.012);
@@ -2767,10 +2976,6 @@ makeRoundButton(0.66, -0.36, () => {
   log(torpMute ? 'TORP WARN MUTED' : 'TORP WARN UNMUTED');
 });
 labelMesh('MUTE', 0.2, 0.03, 0.66, -0.405, PANEL_Z + 0.003, '#d9d2b8');
-makeButton(0.26, -0.43, 'RESET', () => {
-  mfds.forEach((m, i) => { m.page = mfdDefs[i].page; m.on = true; drawMFD(m); });
-  sfx.click();
-});
 
 // Keypad below the navball: digits, CLR and ENT. ENT transmits the entry (logged to COMMS) and clears it.
 // Digits are kept in a buffer so the same keypad can enter values for weapons and modules later.
@@ -2804,7 +3009,7 @@ keypadKeys.forEach((row, r) => row.forEach((k, c) => makeButton(-0.08 + c*0.08, 
 /* ================= DISPLAY HELPERS ================= */
 // Total delta-v left, staged: the pods' propellant first, then the internal tanks once the pods are dropped
 function dvRemaining() {
-  const mInt = dryMass() + rcsProp;
+  const mInt = dryMass() + rcsProp + stackMass();   // own drive's delta-v, carrying a docked stage if there is one
   return podDv() + SHIP.mainIsp*G0*Math.log((mInt + mainProp)/mInt);
 }
 function fmtDist(m) { return m >= 1e3 ? (m/1e3).toFixed(m >= 1e5 ? 0 : 1) + ' km' : m.toFixed(0) + ' m'; }
@@ -3492,6 +3697,111 @@ const pointInPoly = (x, y, poly) => {
   }
   return inside;
 };
+/* ---------- DOCK page: the stern docking camera (DD-84) ----------
+   A small second renderer draws the view aft from the docking ring: the booster (its own model), the Earth at its
+   true angular size, a few stars, sunlight (none in Earth's shadow) and the docking floodlights. The picture goes
+   onto the MFD as monochrome video, with the docking cues over it. Scene axes = ship body axes. */
+const DOCKCAM = { R: null, scene: null, cam: null, obj: null, earth: null, stars: null, sun: null, flood: null, loading: false, failed: false };
+const DOCKCAM_W = 512, DOCKCAM_H = 286;
+function dockCamInit() {
+  const D = DOCKCAM, cv = document.createElement('canvas'); cv.width = DOCKCAM_W; cv.height = DOCKCAM_H;
+  try { D.R = new THREE.WebGLRenderer({ canvas: cv, antialias: true, preserveDrawingBuffer: true }); }
+  catch (e) { D.failed = true; return; }
+  D.R.setSize(DOCKCAM_W, DOCKCAM_H, false); D.R.outputColorSpace = THREE.SRGBColorSpace; D.R.toneMapping = THREE.ACESFilmicToneMapping;
+  D.scene = new THREE.Scene(); D.scene.background = new THREE.Color(0x000000);
+  D.scene.environment = new THREE.PMREMGenerator(D.R).fromScene(new RoomEnvironment(), 0.04).texture;
+  D.scene.environmentIntensity = 0.25;
+  D.cam = new THREE.PerspectiveCamera(46, DOCKCAM_W/DOCKCAM_H, 0.3, 8000);
+  D.sun = new THREE.DirectionalLight(0xffffff, 3.2); D.scene.add(D.sun, D.sun.target);
+  D.flood = new THREE.SpotLight(0xfff4e0, 60, 400, 0.45, 0.6, 1.2); D.scene.add(D.flood, D.flood.target);
+  D.scene.add(new THREE.AmbientLight(0x404858, 0.08));
+  D.earth = new THREE.Mesh(new THREE.SphereGeometry(1, 48, 32), new THREE.MeshStandardMaterial({ color: 0x5f86b0, roughness: 0.9, metalness: 0 }));
+  D.scene.add(D.earth);
+  const sp = [];
+  for (let i = 0; i < 700; i++) { const v = rndUnit().multiplyScalar(7000); sp.push(v.x, v.y, v.z); }
+  const sg = new THREE.BufferGeometry(); sg.setAttribute('position', new THREE.Float32BufferAttribute(sp, 3));
+  D.stars = new THREE.Points(sg, new THREE.PointsMaterial({ color: 0xffffff, size: 1.2, sizeAttenuation: false }));
+  D.scene.add(D.stars);
+}
+function dockCamRender() {
+  const D = DOCKCAM;
+  if (!D.R && !D.failed) dockCamInit();
+  if (D.failed) return false;
+  if (!D.obj && !D.loading) {
+    D.loading = true;
+    loadModel(BOOSTER.file).then(tpl => { D.obj = tpl.clone(true); D.scene.add(D.obj); }).catch(() => { D.loading = false; });
+  }
+  const toBody = shipQ.clone().invert(), z0 = HULL.dockZ;
+  D.cam.position.set(0, 0, z0 + 0.3); D.cam.up.set(0, 1, 0); D.cam.lookAt(0, 0, z0 + 10);
+  // World directions into body axes: stars, sun, Earth (its centre placed 4000 m out at the true angular size)
+  D.stars.quaternion.copy(toBody);
+  const sun = SUN_DIR.clone().applyQuaternion(toBody);
+  const sd = ship.x*SUN_DIR.x + ship.y*SUN_DIR.y + ship.z*SUN_DIR.z;
+  const eclipsed = sd < 0 && Math.hypot(ship.x - SUN_DIR.x*sd, ship.y - SUN_DIR.y*sd, ship.z - SUN_DIR.z*sd) < R_E;
+  D.sun.position.copy(sun).multiplyScalar(500); D.sun.target.position.set(0, 0, 0); D.sun.intensity = eclipsed ? 0 : 3.2;
+  const rE = Math.hypot(ship.x, ship.y, ship.z), eDir = new THREE.Vector3(-ship.x, -ship.y, -ship.z).normalize().applyQuaternion(toBody);
+  D.earth.position.copy(eDir).multiplyScalar(4000); D.earth.scale.setScalar(4000*R_E/rE);
+  D.flood.visible = dock.lights; D.flood.position.set(0, 0, z0 + 0.3); D.flood.target.position.set(0, 0, z0 + 50);
+  if (D.obj) {
+    const b = boosterTarget();
+    D.obj.visible = dock.state === 'DOCKED' || !!b;
+    if (dock.state === 'DOCKED') { D.obj.position.set(0, 0, z0); D.obj.quaternion.identity(); }
+    else if (b) {
+      const G = dock.g || dockGeom(b);
+      D.obj.position.copy(G.bpB); D.obj.quaternion.copy(toBody).multiply(b.bq);
+    }
+  }
+  D.R.render(D.scene, D.cam);
+  return true;
+}
+function drawDock(g, W, H, idx) {
+  mfdHeader(g, W, 'DOCK CAM · AFT', idx);
+  if (!HULL.dockZ) { txt(g, W/2, H/2, 'NO DOCKING RING', DIM, '26px monospace', 'center'); return; }
+  const y0 = 42, vh = H - y0 - 70;
+  const ok = dockCamRender();
+  if (ok) {
+    // Monochrome video: grey, contrast, then the phosphor tint; slight roll noise
+    g.save(); g.filter = 'grayscale(1) contrast(1.35) brightness(1.15)';
+    g.drawImage(DOCKCAM.R.domElement, 0, y0, W, vh); g.restore();
+    g.save(); g.globalCompositeOperation = 'multiply'; g.fillStyle = '#9dffb4'; g.fillRect(0, y0, W, vh); g.restore();
+    g.fillStyle = 'rgba(125,255,154,0.05)'; const ny = y0 + ((performance.now()/9) % vh); g.fillRect(0, ny, W, 6);
+  } else txt(g, W/2, y0 + vh/2, 'CAMERA FAULT', AMB, '26px monospace', 'center');
+  if (DOCKCAM.loading && !DOCKCAM.obj) txt(g, W/2, y0 + 30, 'CAMERA WARMING UP', DIM, '18px monospace', 'center');
+  // Boresight cross and the capture box (0.3 m at the collar, drawn at the collar's range)
+  const cx = W/2, cy = y0 + vh/2;
+  g.strokeStyle = 'rgba(125,255,154,0.8)'; g.lineWidth = 1.5;
+  g.beginPath(); g.moveTo(cx - 40, cy); g.lineTo(cx - 10, cy); g.moveTo(cx + 10, cy); g.lineTo(cx + 40, cy);
+  g.moveTo(cx, cy - 40); g.lineTo(cx, cy - 10); g.moveTo(cx, cy + 10); g.lineTo(cx, cy + 40); g.stroke();
+  const st = dock.state, b = boosterTarget(), G = dock.g;
+  const lim = (v, l) => v <= l ? PH : v <= 2*l ? AMB : RED;
+  if (st === 'DOCKED') {
+    txt(g, W/2, H - 40, `HARD DOCK · STACK ${(shipMass()/1e3).toFixed(0)} T · STAGE PROP ${(dock.prop/BOOSTER.prop0*100).toFixed(0)}%`, PH, '20px monospace', 'center');
+    txt(g, W/2, H - 14, 'SEP TWICE TO SEPARATE', DIM, '16px monospace', 'center');
+    return;
+  }
+  if (!b || !G) { txt(g, W/2, H - 30, 'NO DOCKING TARGET', DIM, '20px monospace', 'center'); return; }
+  // Collar centre and axis cue projected through the camera (the axis cue is the point 20 m beyond the collar)
+  const proj = v => { const p = v.clone().project(DOCKCAM.cam); return p.z < 1 ? [cx + p.x*W/2, cy - p.y*vh/2] : null; };
+  if (DOCKCAM.cam && G.bpB.z > HULL.dockZ + 0.3) {
+    const c = proj(G.bpB), far = proj(G.bpB.clone().addScaledVector(G.axB, 20));
+    if (c) {
+      g.strokeStyle = AMB; g.lineWidth = 2; g.beginPath(); g.arc(c[0], c[1], 9, 0, Math.PI*2); g.stroke();
+      if (far) { g.setLineDash([4, 4]); g.beginPath(); g.moveTo(c[0], c[1]); g.lineTo(far[0], far[1]); g.stroke(); g.setLineDash([]);
+        g.fillStyle = AMB; g.fillRect(far[0] - 3, far[1] - 3, 6, 6); }
+    }
+  }
+  // Cues: range along the collar axis, closing rate, offset of the collar from the ring (body axes: + right, + up),
+  // misalignment; green inside the capture limits
+  const rng = Math.max(0, G.s), off = G.offB, lat = Math.hypot(off.x, off.y);
+  const rate = G.closing, rateCol = rng > 30 ? (rate < 1.5 ? PH : AMB) : lim(rate, DOCK_LIM.v);
+  txt(g, 20, H - 44, `RNG ${rng < 100 ? rng.toFixed(2) : rng.toFixed(0)} M`, PH, '20px monospace');
+  txt(g, 20, H - 16, `RATE ${rate >= 0 ? '+' : ''}${rate.toFixed(2)} M/S`, rateCol, '20px monospace');
+  txt(g, 270, H - 44, `X ${off.x >= 0 ? 'R' : 'L'} ${Math.abs(off.x).toFixed(2)}  Y ${off.y >= 0 ? 'U' : 'D'} ${Math.abs(off.y).toFixed(2)} M`, lim(lat, DOCK_LIM.lat), '20px monospace');
+  txt(g, 270, H - 16, `DRIFT X ${(-G.vB.x).toFixed(2)} Y ${(-G.vB.y).toFixed(2)} M/S`, lim(Math.hypot(G.vB.x, G.vB.y), 0.05), '20px monospace');
+  txt(g, W - 20, H - 44, `ANG ${G.ang.toFixed(1)}°`, lim(G.ang, DOCK_LIM.ang), '20px monospace', 'right');
+  const stTxt = st === 'CAPTURE' ? `SOFT CAPTURE ${Math.max(0, DOCK_HARD_T - dock.t).toFixed(0)}` : dock.capArmed ? 'CAPT ARMED' : 'CAPT SAFE';
+  txt(g, W - 20, H - 16, stTxt, st === 'CAPTURE' ? AMB : dock.capArmed ? PH : AMB, '20px monospace', 'right');
+}
 // Layout of the ship view for the current hull: scale, outline, system boxes and markers (body z, y in metres)
 function shipView(W) {
   if (HULL.id === 'og1') return { k: 26, ox: W/2 + 1.2*26, zc: 0, hull: SHIP_SIL.hull, rads: SHIP_SIL.radiators, uh: 0.95, arcR: 52, march: 14,
@@ -3861,12 +4171,17 @@ return Object.fromEntries(Object.entries({
   satellite:[box([0, 0, 0], [0.2, 0.2, 0.2]), box([0, 0, 0.32], [0.12, 0.01, 0.36], RAD), box([0, 0, -0.32], [0.12, 0.01, 0.36], RAD),
              cyl(0.1, 0.2, 0.02, 0.09)],
   debris:   [box([0, 0, 0], [0.6, 0.25, 0.4]), box([0.25, 0.12, 0.1], [0.3, 0.3, 0.15], 0.8), cyl(-0.5, -0.15, 0.08, 0.13, -0.05, 0.05, 0.7)],
+  // BS-90 booster: core with four radial tanks, truss and collar forward (+x), nine bells aft
+  booster:  [cyl(-0.38, 0.3, 0.065, 0.065), cyl(-0.34, 0.24, 0.048, 0.048, 0.105, 0), cyl(-0.34, 0.24, 0.048, 0.048, -0.105, 0),
+             cyl(-0.34, 0.24, 0.048, 0.048, 0, 0.105), cyl(-0.34, 0.24, 0.048, 0.048, 0, -0.105), cyl(0.3, 0.47, 0.06, 0.075, 0, 0, 0.7),
+             cyl(0.47, 0.5, 0.08, 0.08), cyl(-0.5, -0.38, 0.03, 0.08, 0, 0, BELL)],
   ordnance: [cyl(-0.4, 0.35, 0.05, 0.05, 0, 0, 1, 8), cyl(0.35, 0.5, 0.05, 0, 0, 0, 1, 8),
              box([-0.42, 0, 0.09], [0.12, 0.01, 0.08], RAD), box([-0.42, 0, -0.09], [0.12, 0.01, 0.08], RAD),
              box([-0.42, 0.09, 0], [0.12, 0.08, 0.01], RAD), box([-0.42, -0.09, 0], [0.12, 0.08, 0.01], RAD)],
 }).map(([k, v]) => [k, buildModel(v)]));
 })();
 function silClass(t) {
+  if (t.booster) return 'booster';
   const n = t.name;
   if (/DEPOT|STATION/.test(n)) return 'station';
   if (/HAULER/.test(n)) return 'hauler';
@@ -4627,6 +4942,7 @@ function drawMFD(m) {
       case 'SCOPE': drawScope(g, W, H, m.i); break;
       case 'DAMAGE': drawDamage(g, W, H, m.i); break;
       case 'CONTROLS': drawControls(g, W, H, m.i); break;
+      case 'DOCK': drawDock(g, W, H, m.i); break;
     }
   }
   // CRT glass: edge vignette and a soft diagonal reflection
@@ -4661,7 +4977,8 @@ function updateDisplays() {
   // Torpedo lamp blinks at 2 Hz while a torpedo is inbound
   const torpBlink = Math.floor(performance.now()/250) % 2 === 0;
   torpLampMat.emissiveIntensity = ((torpWarn && torpBlink) || lampTestT > 0) ? 2.5 : 0;
-  for (const m of mfds) drawMFD(m);
+  updateVarLamps();
+  for (const m of mfds) { if (!pageOk(m.page)) m.page = MFD_PAGES[m.page] === 'DOCK' ? 3 : m.page; drawMFD(m); }
 }
 
 function updateNavball() {
@@ -5109,7 +5426,8 @@ window.addEventListener('pointerdown', e => {
   // Panel buttons take the click; anything else is a weapon trigger
   ndc.set(e.clientX/window.innerWidth*2 - 1, -(e.clientY/window.innerHeight)*2 + 1);
   raycaster.setFromCamera(ndc, camera);
-  const hit = raycaster.intersectObjects([...clickables, ...switchHits], false)[0];
+  const shown = o => { for (let p = o; p; p = p.parent) if (!p.visible) return false; return true; };   // hidden hull panels
+  const hit = raycaster.intersectObjects([...clickables, ...switchHits].filter(shown), false)[0];
   if (hit) { hit.object.userData.onPress(); hit.object.userData.pressT = 0.12; return; }
   held.add(code);
   onEdge(code);
@@ -5451,6 +5769,7 @@ function setHull(id) {
   Object.assign(POWER, OG1_POWER, HULL.power); Object.assign(THERM, OG1_THERM, HULL.therm);
   loadout = loadLoadout();
   applyModuleStats(); resetDamage(); resetPdcMounts(); applyLoadoutToShip(); battery = battCapEff();
+  applyCockpitVariant();
   if (hangar.ship) hangar.scene.remove(hangar.ship);
   hangar.ship = null; hangar.slotObj = {}; hangar.markers = {}; hangar.loaded = false; hangar.hullPromise = null;
   hangar.sel = hangar.hover = null; hangar.dist = 1.5*HULL.length;
