@@ -332,7 +332,8 @@ const TORP_ACCEL = 40, TORP_BURN = 30, TORP_KILL_R = 1.5, TORP_HULL_R = 20, HOST
 let torpedoes = [], tracers = [], hullHits = 0;
 let eTracers = [];                                   // enemy point-defence rounds (they hunt player ordnance)
 let frags = [], fireballs = [];                      // debris fragments and fireballs from kills
-let spray = [];                                      // fine shrapnel from railgun hits (visual only, a few seconds)
+let spray = [];
+let scopeHold = null;                                // after a railgun kill the scope stays on the impact point for 2 s                                      // fine shrapnel from railgun hits (visual only, a few seconds)
 const FRAG_MAX = 160;
 // Enemy ships: thrust (m/s^2) and delta-v budget for manoeuvring; point defence against player ordnance
 const AI_DEF = { acc: 4, dv: 1500 };
@@ -967,7 +968,7 @@ function resetTargets() {
   for (const t of targets) if (t.intel) t.track = Object.assign(Object.create(t), { x: t.x, y: t.y, z: t.z, vx: t.vx, vy: t.vy, vz: t.vz }, { tRep: simT, sat: 'INTEL', intel: true });
   if (missionPlan) curTarget = Math.max(0, targets.findIndex(t => t.objective));
   flashes = [];
-  torpedoes = []; tracers = []; eTracers = []; frags = []; fireballs = []; spray = []; hullHits = 0;
+  torpedoes = []; tracers = []; eTracers = []; frags = []; fireballs = []; spray = []; scopeHold = null; hullHits = 0;
 }
 resetTargets();
 
@@ -1833,7 +1834,7 @@ function physicsStep(h) {
           recordHit(t, 'rail', [t.x + r0[0] + ax*k, t.y + r0[1] + ay*k, t.z + r0[2] + az*k], v3arr(new THREE.Vector3(p.vx-t.vx, p.vy-t.vy, p.vz-t.vz).normalize()));
         }
         // Hit flash on every hit, practice rounds included
-        flashes.push({ x: t.x, y: t.y, z: t.z, age: 0, dur: 0.3, peak: 0.7, kind: 'hit' });
+        flashes.push({ x: t.x, y: t.y, z: t.z, vx: t.vx, vy: t.vy, vz: t.vz, t0: simT, age: 0, dur: 0.3, peak: 0.7, kind: 'hit' });
         p.dead = true;
         log(`RAIL HIT ${t.name}  KE ${(ke/1e6).toFixed(2)} MJ`);
         sfx.hullThump();
@@ -1882,7 +1883,7 @@ function physicsStep(h) {
       best.lpdDone = true;
       if (masterMode === 'ON') { best.dead = true; log(`${m.name} · TORPEDO BURNED`); scoreAdd('TORPEDOES DESTROYED', SCORE.torpedoKill); }
       else log(`${m.name} · PRACTICE BURN`);
-      flashes.push({ x: best.x, y: best.y, z: best.z, age: 0, dur: 0.5, peak: 0.7, kind: 'hit' });
+      flashes.push({ x: best.x, y: best.y, z: best.z, vx: best.vx, vy: best.vy, vz: best.vz, t0: simT, age: 0, dur: 0.5, peak: 0.7, kind: 'hit' });
     }
   }
 
@@ -1894,7 +1895,7 @@ function physicsStep(h) {
       if (segDist(tr, tp) < TORP_KILL_R) {
         tr.dead = true;
         if (masterMode === 'ON') tp.dead = true;
-        flashes.push({ x: tp.x, y: tp.y, z: tp.z, age: 0, dur: 0.4, peak: 0.6, kind: 'hit' });
+        flashes.push({ x: tp.x, y: tp.y, z: tp.z, vx: tp.vx, vy: tp.vy, vz: tp.vz, t0: simT, age: 0, dur: 0.4, peak: 0.6, kind: 'hit' });
         log(masterMode === 'ON' ? 'PDC KILL  TORPEDO' : 'PDC PRACTICE HIT');
         if (masterMode === 'ON') scoreAdd('TORPEDOES DESTROYED', SCORE.torpedoKill);
         break;
@@ -1910,7 +1911,7 @@ function physicsStep(h) {
         tr.dead = true;
         if (Math.random() > EPD.pKill) continue;      // struck, but the weapon flies on
         o.dead = true;
-        flashes.push({ x: o.x, y: o.y, z: o.z, age: 0, dur: 0.4, peak: 0.6, kind: 'hit' });
+        flashes.push({ x: o.x, y: o.y, z: o.z, vx: o.vx, vy: o.vy, vz: o.vz, t0: simT, age: 0, dur: 0.4, peak: 0.6, kind: 'hit' });
         log(`${ORD[o.kind].name} DESTROYED BY POINT DEFENCE · ${tr.owner.name}`);
         break;
       }
@@ -1923,7 +1924,7 @@ function physicsStep(h) {
     const T = ORD[o.kind], tg = o.target;
     if (tg && !tg.gone && !tg.dead && segDist(o, tg) < T.killR + (tg.radius || 0)) {
       o.dead = true;
-      flashes.push({ x: o.x, y: o.y, z: o.z, age: 0, dur: 0.8, peak: 0.9, kind: 'hit' });
+      flashes.push({ x: o.x, y: o.y, z: o.z, vx: o.vx, vy: o.vy, vz: o.vz, t0: simT, age: 0, dur: 0.8, peak: 0.9, kind: 'hit' });
       if (o.kind === 'interceptor') {
         if (masterMode === 'ON') tg.dead = true;
         log(masterMode === 'ON' ? 'INTERCEPT · TORPEDO KILLED' : 'INTERCEPT · PRACTICE');
@@ -1950,7 +1951,7 @@ function physicsStep(h) {
     if (tp.dead) continue;
     if (segDist(tp, ship) < TORP_HULL_R) {          // swept over the step: torpedoes move up to ~250 m per step
       tp.dead = true;
-      flashes.push({ x: tp.x, y: tp.y, z: tp.z, age: 0, dur: 0.6, peak: 0.8, kind: 'hit' });
+      flashes.push({ x: tp.x, y: tp.y, z: tp.z, vx: tp.vx, vy: tp.vy, vz: tp.vz, t0: simT, age: 0, dur: 0.6, peak: 0.8, kind: 'hit' });
       sfx.torpHit();
       if (applyTorpedoHit(tp)) break;               // ship lost: state was reset
     }
@@ -1965,8 +1966,9 @@ function physicsStep(h) {
       t.gone = true; groundMsg(`${t.name} CONFIRMED DESTROYED`);
       if (mission && t.score) { scoreAdd(t.side === 'NEUTRAL' ? 'NEUTRALS DESTROYED' : `${t.name}`, t.score); if (t.side === 'NEUTRAL') mission.neutrals++; }
       // Reactor explosion: a bright, longer flash at the ship's last position
-      flashes.push({ x: t.x, y: t.y, z: t.z, age: 0, dur: 4.0, peak: 1.0, kind: 'kill' });
+      flashes.push({ x: t.x, y: t.y, z: t.z, vx: t.vx, vy: t.vy, vz: t.vz, t0: simT, age: 0, dur: 4.0, peak: 1.0, kind: 'kill' });
       const secs = breakUp(t);
+      if (scopeHold && scopeHold.t0 === simT) flashes[flashes.length - 1].kind = 'killR';   // the scope follows the hold, not this flash
       if (secs.length && targets[curTarget] === t) selectAfter = secs.reduce((a, b) => b.radius > a.radius ? b : a);   // keep the lock on the largest section
       newWrecks.push(...secs);
     }
@@ -1980,7 +1982,7 @@ function physicsStep(h) {
   }
   debrisStep(h);
   missionStep(h);
-  for (const f of flashes) f.age += h;
+  for (const f of flashes) { f.age += h; if (f.vx !== undefined && f.t0 !== simT) { f.x += f.vx*h; f.y += f.vy*h; f.z += f.vz*h; } }
   flashes = flashes.filter(f => f.age < f.dur);
   if (curTarget >= targets.length) curTarget = 0;
   projectiles = projectiles.filter(p => !p.dead && p.age < 300 && Math.hypot(p.x, p.y, p.z) < 3e8);
@@ -3740,6 +3742,14 @@ function breakUp(t) {
                                    : (station ? ['SECTION A', 'SECTION B'] : ['BOW', 'STERN']);
   const short = t.name.split(' ').pop();
   const q0 = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(F.f, F.up, F.rt));
+  // Railgun: the slug's push turns the halves in opposite senses about the axis across the hull and the shot
+  let railAxis = null;
+  if (kind === 'rail') {
+    railAxis = new THREE.Vector3().crossVectors(F.f, shotW);
+    if (railAxis.lengthSq() < 1e-6) railAxis = F.up.clone();
+    railAxis.normalize();
+    scopeHold = { x: hit.pos[0], y: hit.pos[1], z: hit.pos[2], vx: t.vx, vy: t.vy, vz: t.vz, until: simT + 2, t0: simT };
+  }
   const out = parts.map((faces, i) => {
     let c = [0, 0, 0], nv = 0;
     for (const fc of faces) for (const q of fc.pts) { c[0] += q[0]; c[1] += q[1]; c[2] += q[2]; nv++; }
@@ -3757,7 +3767,8 @@ function breakUp(t) {
       holes.push({ p: cc, n: fc.n, t: simT, dur: 20, size: 0, big: true });
     }
     return { name: `WRECK ${short} ${names[i]}`, wreck: true, model: fs, len: L, q: q0.clone(),
-             spin: rndUnit().multiplyScalar(spec.spin[0] + Math.random()*(spec.spin[1] - spec.spin[0])),
+             spin: railAxis ? railAxis.clone().multiplyScalar((i === 0 ? 1 : -1)*(0.06 + 0.06*Math.random())).addScaledVector(rndUnit(), 0.01)
+                            : rndUnit().multiplyScalar(spec.spin[0] + Math.random()*(spec.spin[1] - spec.spin[0])),
              tKill: simT, glowT: spec.glowT, scorch: spec.scorch, holes, radius: Math.max(1.5, rmax*L),
              integrity: 40, maxInt: 40, gone: false, side: 'UNKNOWN', sig: 1.5,
              x: t.x + off.x, y: t.y + off.y, z: t.z + off.z, vx: vel.x, vy: vel.y, vz: vel.z };
@@ -3815,9 +3826,29 @@ function debrisStep(h) {
   for (const sp of spray) if (sp.t0 !== simT) { sp.x += sp.vx*h; sp.y += sp.vy*h; sp.z += sp.vz*h; }
   fireballs = fireballs.filter(fb => simT - fb.t0 < fb.dur);
   spray = spray.filter(sp => simT - sp.t0 < SPRAY_LIFE);
+  if (scopeHold) { if (scopeHold.t0 !== simT) { scopeHold.x += scopeHold.vx*h; scopeHold.y += scopeHold.vy*h; scopeHold.z += scopeHold.vz*h; }
+    if (simT > scopeHold.until) scopeHold = null; }
 }
 const SCOPE_AZ_MAX = 60 * Math.PI/180, SCOPE_EL_MAX = 45 * Math.PI/180, SCOPE_SLEW = 25 * Math.PI/180;
 // Scope view rotation: the gimbal turns the boresight, so the view is taken in the gimbal's frame
+// Telescope gimbal: slews toward the locked target at a limited rate, and stows to the nose when unlocked.
+// After a railgun kill it holds on the impact point for 2 s, then slews to the section the lock moved to;
+// other kills: it stays on the explosion while it lasts.
+function updateScopeGimbal(sdt) {
+  const tg = targets[curTarget];
+  const kill = flashes.filter(f => f.kind === 'kill').pop();
+  const aimAt = scopeHold || kill || tgtKnown(tg);   // far targets: the datalink estimate
+  let azT = 0, elT = 0;
+  if (aimAt) {
+    const vb = new THREE.Vector3(aimAt.x-ship.x, aimAt.y-ship.y, aimAt.z-ship.z).applyQuaternion(toBodyQ());
+    azT = Math.atan2(vb.x, -vb.z); elT = Math.atan2(vb.y, -vb.z);
+  }
+  azT = clamp(azT, -SCOPE_AZ_MAX, SCOPE_AZ_MAX); elT = clamp(elT, -SCOPE_EL_MAX, SCOPE_EL_MAX);
+  const rate = SCOPE_SLEW*sdt;
+  scopeAz += clamp(azT - scopeAz, -rate, rate);
+  scopeEl += clamp(elT - scopeEl, -rate, rate);
+  scopeShakeAz = 0; scopeShakeEl = 0;              // no shake on kills
+}
 function scopeGimbalQ() {
   return new THREE.Quaternion().setFromEuler(new THREE.Euler(scopeEl + scopeShakeEl, -(scopeAz + scopeShakeAz), 0, 'YXZ'));
 }
@@ -4338,24 +4369,7 @@ function animateCockpit(dt) {
     drawDial(d.g, d, d.min + d.p*span);
     d.tex.needsUpdate = true;
   }
-  // Telescope gimbal: slews toward the locked target at a limited rate, and stows to the nose when unlocked
-  {
-    // An explosion in progress takes priority, so the scope stays on it after its target is removed
-    // (curTarget then points at a different target); otherwise the locked target
-    const tg = targets[curTarget];
-    const kill = flashes.filter(f => f.kind === 'kill').pop();
-    const aimAt = kill || tgtKnown(tg);           // far targets: the datalink estimate
-    let azT = 0, elT = 0;
-    if (aimAt) {
-      const vb = new THREE.Vector3(aimAt.x-ship.x, aimAt.y-ship.y, aimAt.z-ship.z).applyQuaternion(toBodyQ());
-      azT = Math.atan2(vb.x, -vb.z); elT = Math.atan2(vb.y, -vb.z);
-    }
-    azT = clamp(azT, -SCOPE_AZ_MAX, SCOPE_AZ_MAX); elT = clamp(elT, -SCOPE_EL_MAX, SCOPE_EL_MAX);
-    const rate = SCOPE_SLEW*sdt;
-    scopeAz += clamp(azT - scopeAz, -rate, rate);
-    scopeEl += clamp(elT - scopeEl, -rate, rate);
-    scopeShakeAz = 0; scopeShakeEl = 0;              // no shake on kills
-  }
+  updateScopeGimbal(sdt);
   // Laser gimbal: slaved to the locked target within a few degrees of the nose, stowed when unlocked
   {
     const tg = tgtLocal(targets[curTarget]);
