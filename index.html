@@ -129,13 +129,19 @@ const LEO_R = R_E + 400e3;
 // Propellant: internal tanks give 5000 m/s; the two drop tanks (pods) add 2500 m/s, for 7500 m/s in total with
 // the full loadout, when the pods are burned first and dropped once dry. Tank capacity and structure mass are in
 // the module catalog. hullDry is the hull without any modules; the fitted modules add their mass.
-const SHIP = { hullDry: 4250, mainProp0: 1067.6, rcsProp0: 180,
+// rcsProp0 doubled to 360 kg; hullDry trimmed by the same 180 kg so the wet mass, and the drive's delta-v, are unchanged
+const SHIP = { hullDry: 4070, mainProp0: 1067.6, rcsProp0: 360,
   rcsThrust: 250, rcsIsp: 250, mainThrust: 20000, mainIsp: 3200 };
 // RCS torque per axis [pitch, yaw, roll]. Pitch and yaw thrusters act on a ~10.5 m arm; roll on ~1.9 m with fewer
 // thrusters, scaled so the ship rolls about 1.5x faster than it pitches. RCS_K keeps the full-loadout pitch
 // acceleration of the earlier model (6.5 deg/s^2).
 const RCS_K = 51602, RCS_ROLL = 0.08, RCS_ARM = [10.5, 10.5, 1.9];
 const rcsTorqueAxis = i => RCS_K*(i === 2 ? RCS_ROLL : 1);
+// Reaction wheels: the fallback once the RCS tanks are dry. They turn the ship (no translation) with WHEEL.torque of
+// the RCS torque, and draw up to WHEEL.power from the battery in proportion to the torque they apply; no power,
+// no torque. (Wheel momentum saturation is not modelled: the RCS that would dump it is empty anyway.)
+const WHEEL = { torque: 0.15, power: 30e3 };
+let wheelLoadE = 0, wheelsOn = false;
 
 /* ---------- Loadout: hardpoints on the hull, and a catalog of modules that fit them ----------
    To add a module: add a catalog entry (and its .glb in models/). `fits` lists the hardpoint types it mounts
@@ -1590,9 +1596,22 @@ function physicsStep(h) {
     else if (rcsStab) tau[i] = clamp(-Inow[i]*w[i]/1.5, -tq, tq);
   }
   let tauMag = Math.hypot(tau[0], tau[1], tau[2]);
-  if (rcsProp <= 0) { tau[0] = tau[1] = tau[2] = 0; tauMag = 0; }
+  wheelLoadE = 0;
+  if (rcsProp <= 0) {
+    // RCS dry: the reaction wheels take over at a fraction of the torque, if the battery can feed them
+    if (!wheelsOn) { wheelsOn = true; log('RCS PROPELLANT EXHAUSTED · REACTION WHEELS'); }
+    const ok = !(brownout || battery <= 0);
+    let use = 0;
+    for (let i = 0; i < 3; i++) {
+      const tw = rcsTorqueAxis(i)*WHEEL.torque;
+      tau[i] = ok ? clamp(tau[i], -tw, tw) : 0;
+      use += Math.abs(tau[i])/tw/3;
+    }
+    wheelLoadE = WHEEL.power*use;
+    tauMag = 0;                                      // no thruster puffs
+  } else wheelsOn = false;
   // Propellant: each axis is a thruster couple on its arm, so force = torque / (2 * arm)
-  const rcsF = tau.reduce((a, t, i) => a + Math.abs(t)/(2*RCS_ARM[i]), 0);
+  const rcsF = rcsProp > 0 ? tau.reduce((a, t, i) => a + Math.abs(t)/(2*RCS_ARM[i]), 0) : 0;
   rcsProp = Math.max(0, rcsProp - rcsF/(SHIP.rcsIsp*G0)*h);
   for (let i = 0; i < 3; i++) w[i] += tau[i]/Inow[i]*h;
   omega.set(w[0], w[1], w[2]);
@@ -1945,7 +1964,7 @@ function physicsStep(h) {
   projectiles = projectiles.filter(p => !p.dead && p.age < 300 && Math.hypot(p.x, p.y, p.z) < 3e8);
 
   /* --- power --- */
-  const loadE = POWER.avionics + (laserFiring ? WEAPON.laserElec : 0) + lpdLoadE;
+  const loadE = POWER.avionics + (laserFiring ? WEAPON.laserElec : 0) + lpdLoadE + wheelLoadE;
   battery += (reactorOut() - loadE)*h;
   brownout = battery <= 0 && loadE > reactorOut();
   battery = clamp(battery, 0, battCapEff());           // damaged capacitors hold less
@@ -3154,7 +3173,8 @@ function drawPropulsion(g, W, H, idx) {
   let y = 110;
   const row = (frac, label, val, col) => { bar(g, x, y, w, 22, frac, label, val, col); y += 52; };
   row(mainProp/SHIP.mainProp0, 'MAIN PROPELLANT', `${mainProp.toFixed(0)} kg`);
-  row(rcsProp/SHIP.rcsProp0, 'RCS PROPELLANT', `${rcsProp.toFixed(1)} kg`);
+  if (rcsProp > 0) row(rcsProp/SHIP.rcsProp0, 'RCS PROPELLANT', `${rcsProp.toFixed(1)} kg`);
+  else row(wheelLoadE/WHEEL.power, 'RCS DRY · REACTION WHEELS', brownout || battery <= 0 ? 'NO POWER' : `${(wheelLoadE/1e3).toFixed(1)} kW`, AMB);
   row(thrustFrac, 'MAIN THRUST', damage.main <= 0 ? 'OFFLINE' : thrustFrac ? `${(SHIP.mainThrust*thrustFrac/1e3).toFixed(1)} kN` : 'OFF', damage.main < 1 ? AMB : PH);
   const mass = shipMass();
   txt(g, x, y, `DELTA-V ${dvRemaining().toFixed(0)} m/s    MASS ${mass.toFixed(0)} kg`, PH, '25px monospace');
@@ -3167,8 +3187,8 @@ function drawPropulsion(g, W, H, idx) {
   txt(g, x, y, podsOn ? `PODS ${tankCount()}x  ${podProp.toFixed(0)} kg  ${podDv().toFixed(0)} m/s` : tankCount() ? 'PODS JETTISONED' : 'PODS NOT FITTED',
     podsOn ? PH : DIM, '25px monospace');
   y += 32;
-  const ta = turnAccel();
-  txt(g, x, y, `TURN  P ${ta[0].toFixed(1)}  Y ${ta[1].toFixed(1)}  R ${ta[2].toFixed(1)} °/s²`, PH, '25px monospace');
+  const ta = turnAccel().map(v => rcsProp > 0 ? v : v*WHEEL.torque);   // the wheels turn the ship more slowly
+  txt(g, x, y, `TURN  P ${ta[0].toFixed(1)}  Y ${ta[1].toFixed(1)}  R ${ta[2].toFixed(1)} °/s²${rcsProp > 0 ? '' : ' WHL'}`, rcsProp > 0 ? PH : AMB, '25px monospace');
 }
 
 function drawComms(g, W, H, idx) {
