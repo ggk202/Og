@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OG — Cockpit prototype v0.12.0</title>
+<title>OG — Cockpit prototype v0.13.0</title>
 <style>
   html, body { margin:0; height:100%; background:#000; overflow:hidden;
     font-family: ui-monospace, Menlo, Consolas, monospace; color:#cfd8c0; }
@@ -93,7 +93,7 @@
 </head>
 <body>
 <canvas id="gl"></canvas>
-<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.12.0</span></div>
+<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.13.0</span></div>
 <div id="hangar"><div class="load" id="hangarLoad">LOADING SHIP</div>
   <div class="hint">DRAG TO ORBIT · WHEEL TO ZOOM · CLICK A HARDPOINT TO CHOOSE ITS MODULE</div>
   <div class="panel"><h2>HANGAR</h2><div class="sub" id="hullName"></div><div id="hullSel"></div><div class="sub">LOADOUT · SELECT A HARDPOINT, THEN A MODULE</div>
@@ -462,7 +462,17 @@ function pdcStatus(m) {
 }
 const PDC_RANGE = 5000, PDC_V = 1500, PDC_RATE = 8, PDC_ENERGY = 2e4, PDC_SPREAD = 0.0002, PDC_ARC = 100 * Math.PI/180;   // each mount reaches 10 deg past its horizon, so the two overlap around the hull
 // Hostile torpedoes: accelerate toward the ship for TORP_BURN seconds, then coast
-const TORP_ACCEL = 40, TORP_BURN = 30, TORP_KILL_R = 1.5, TORP_HULL_R = 20, HOSTILE_SALVO_T = 15;
+const TORP_ACCEL = 40, TORP_BURN = 30, TORP_KILL_R = 1.5, TORP_HULL_R = 20, HOSTILE_SALVO_T = 15, FRIENDLY_TORP_DMG = 60;
+// Whom a hostile fires at: the player within its fire range, or a friendly unit (allies, facilities) within it;
+// a preferred kind (t.prefer: 'facility' or 'ally') first, else the nearest. No fire range: the player only.
+function pickVictim(t) {
+  const fr = t.fireRange || Infinity;
+  const cand = [ship, ...targets.filter(f => f.side === 'FRIENDLY' && !f.gone)]
+    .map(o => ({ o, r: Math.hypot(o.x - t.x, o.y - t.y, o.z - t.z) })).filter(c => c.r < fr && losClear(t, c.o) && losClearMoon(t, c.o));
+  if (!cand.length) return null;
+  const pref = t.prefer && cand.filter(c => c.o !== ship && (t.prefer === 'facility' ? c.o.facility : c.o.ally));
+  return ((pref && pref.length ? pref : cand).sort((a, b) => a.r - b.r))[0].o;
+}
 let torpedoes = [], tracers = [], hullHits = 0;
 let eTracers = [];                                   // enemy point-defence rounds (they hunt player ordnance)
 let frags = [], fireballs = [];                      // debris fragments and fireballs from kills
@@ -1734,6 +1744,180 @@ function alertScan(h) {
   }
   if (!mission.alert && mission.attackT !== undefined && simT - mission.attackT > ATTACK_REACT) raiseAlert('DEFENDERS UNDER ATTACK');
 }
+
+/* ================= SATURNIAN ASSAULT (CM-32) =================
+   Titan keeps one face to Saturn: sites on its surface and the storage bay at the Saturn-Titan L1 point (TITAN_L1
+   from Titan's centre toward Saturn) are fixed in that turning frame. The player's CM-32 and three allied carriers
+   orbit Titan at 1500 km; the enemy fleet arrives a few hours later: one group brakes into Titan orbit to strike the
+   factory, the other meets the storage bay. */
+const TITAN_W = 2*Math.PI/(15.945421*86400), TITAN_L1 = 5.243e7;   // (TITAN_P is defined further down)
+function titanFixedState(lonOff, r, t) {
+  const tp = titanPos(t), sp = satPos(t), tv = titanVel(t);
+  const d0 = new THREE.Vector3(sp[0] - tp[0], sp[1] - tp[1], sp[2] - tp[2]).normalize();
+  const d = d0.applyQuaternion(new THREE.Quaternion().setFromAxisAngle(SAT_POLE, lonOff)).multiplyScalar(r);
+  const v = new THREE.Vector3().crossVectors(SAT_POLE, d).multiplyScalar(TITAN_W);
+  return { x: tp[0] + d.x, y: tp[1] + d.y, z: tp[2] + d.z, vx: tv[0] + v.x, vy: tv[1] + v.y, vz: tv[2] + v.z };
+}
+// Circular orbit about Titan in Saturn's equator plane (inclined by inc about the line SAT_X)
+function titanOrbitState(alt, phase, inc, t) {
+  const r = R_TITAN + alt, v = Math.sqrt(GM_TITAN/r), tp = titanPos(t), tv = titanVel(t);
+  const ey = SAT_Y.clone().multiplyScalar(Math.cos(inc)).addScaledVector(SAT_POLE, Math.sin(inc));
+  const p = SAT_X.clone().multiplyScalar(Math.cos(phase)).addScaledVector(ey, Math.sin(phase));
+  const d = SAT_X.clone().multiplyScalar(-Math.sin(phase)).addScaledVector(ey, Math.cos(phase));
+  return { x: tp[0] + p.x*r, y: tp[1] + p.y*r, z: tp[2] + p.z*r, vx: tv[0] + d.x*v, vy: tv[1] + d.y*v, vz: tv[2] + d.z*v };
+}
+/* Allied carriers: keep a loose formation on the player (slot: along-track, cross-track, radial offsets in the
+   player's orbital frame, a damped spring with the carrier's thrust as the limit), pick their own targets within
+   ALLY_RANGE and avoid any target another carrier or the player already engages (the datalinked fleet shares its
+   assignments), and fire missile pairs at it. */
+const ALLY = { acc: 0.5, range: 600e3, salvo: 2, reload: 15, cells: 96, pick: 2 };
+function allyAI(t, h) {
+  t.burning = false;
+  // targeting
+  t.pickT = (t.pickT ?? 0) - h;
+  if (t.pickT <= 0) {
+    t.pickT = ALLY.pick;
+    const taken = new Set(targets.filter(a => a.ally && a !== t && a.engage && !a.engage.gone).map(a => a.engage));
+    if (targets[curTarget] && targets[curTarget].side === 'HOSTILE') taken.add(targets[curTarget]);
+    const cand = targets.filter(e => e.side === 'HOSTILE' && !e.gone && !e.wreck && !e.surface && (isSeen(e) || Math.hypot(e.x - t.x, e.y - t.y, e.z - t.z) < 1500e3))
+      .map(e => ({ e, r: Math.hypot(e.x - t.x, e.y - t.y, e.z - t.z) })).filter(c => c.r < ALLY.range && losClear(t, c.e) && losClearMoon(t, c.e))
+      .sort((a, b) => (taken.has(a.e) - taken.has(b.e)) || a.r - b.r);
+    const pick = cand.length ? cand[0].e : null;
+    if (pick !== t.engage) { t.engage = pick; if (pick) log(`${t.short} ENGAGING ${pick.name}`); }
+  }
+  t.fireCD = Math.max(0, (t.fireCD ?? 3) - h);
+  if (t.engage && !t.engage.gone && t.cells > 0 && t.fireCD <= 0) {
+    t.fireCD = ALLY.reload;
+    for (let k = 0; k < ALLY.salvo && t.cells > 0; k++, t.cells--) {
+      const d = new THREE.Vector3(t.engage.x - t.x, t.engage.y - t.y, t.engage.z - t.z).normalize().add(rndUnit().multiplyScalar(0.4)).normalize();
+      const o = { kind: 'missile', src: t, target: t.engage, age: 0, burn: ORD.missile.burn, dead: false,
+        x: t.x + d.x*20, y: t.y + d.y*20, z: t.z + d.z*20, vx: t.vx + d.x*ORD.missile.launchV, vy: t.vy + d.y*ORD.missile.launchV, vz: t.vz + d.z*ORD.missile.launchV };
+      o.px = o.x; o.py = o.y; o.pz = o.z; ordnance.push(o);
+    }
+    t.lastLaunchT = simT;
+  }
+  // formation
+  const b = primary(), r = new THREE.Vector3(ship.x - b.c[0], ship.y - b.c[1], ship.z - b.c[2]), v = new THREE.Vector3(ship.vx - b.v[0], ship.vy - b.v[1], ship.vz - b.v[2]);
+  const ru = r.clone().normalize(), nu = new THREE.Vector3().crossVectors(r, v).normalize(), au = new THREE.Vector3().crossVectors(nu, ru);
+  const des = new THREE.Vector3(ship.x, ship.y, ship.z).addScaledVector(au, t.slot[0]).addScaledVector(nu, t.slot[1]).addScaledVector(ru, t.slot[2]);
+  const ep = des.sub(new THREE.Vector3(t.x, t.y, t.z)), ev = new THREE.Vector3(ship.vx - t.vx, ship.vy - t.vy, ship.vz - t.vz);
+  if (ep.length() > 3000e3) return null;             // far apart (after a long coast): hold position, no chase across the system
+  const a = ep.multiplyScalar(4e-4).addScaledVector(ev, 0.04);
+  if (a.length() < 0.004) return null;
+  if (a.length() > ALLY.acc) a.setLength(ALLY.acc);
+  t.burning = a.length() > 0.05;
+  return [a.x, a.y, a.z];
+}
+// Point defence of friendly units: each mount kills a torpedo within 5 km with a chance per second
+function friendlyPD(h) {
+  for (const f of targets) {
+    if (f.side !== 'FRIENDLY' || f.gone || !f.pd) continue;
+    let best = null, bestR = 5000;
+    for (const tp of torpedoes) { if (tp.dead) continue; const r = Math.hypot(tp.x - f.x, tp.y - f.y, tp.z - f.z); if (r < bestR) { best = tp; bestR = r; } }
+    if (best && Math.random() < 1 - Math.exp(-0.5*f.pd*h)) {
+      best.dead = true;
+      flashes.push({ x: best.x, y: best.y, z: best.z, vx: best.vx, vy: best.vy, vz: best.vz, t0: simT, age: 0, dur: 0.25, peak: 0.4, kind: 'hit' });
+    }
+  }
+}
+/* Arrival of the attack groups. capture: brake retrograde about Titan (inside 12,000 km) until the orbit is nearly
+   circular. meet: close on an object at the speed that still lets it stop (60 % of full thrust), steering the
+   relative velocity onto the line of sight, and stop beside it. The arrival budget is separate from combat delta-v. */
+function arriveAI(t, h) {
+  t.burning = false;
+  const A = t.arrive, acc = t.ai ? t.ai.acc : 3;
+  let dir = null;
+  if (A.mode === 'capture') {
+    // Brake retrograde around periapsis (within 2500 km of it) until the orbit is nearly circular
+    const b = bodyAt('TITAN', simT), rv = new THREE.Vector3(t.x - b.c[0], t.y - b.c[1], t.z - b.c[2]), r = rv.length();
+    const vv = new THREE.Vector3(t.vx - b.v[0], t.vy - b.v[1], t.vz - b.v[2]);
+    const el = elementsAt(t, b), rp = el.pe + R_TITAN;
+    if (el.e <= 0.15 || vv.length() < 200) { t.arrived = true; if (isSeen(t)) log(`${t.name} IN TITAN ORBIT`); return null; }
+    // from just before periapsis on; a low periapsis is held up with a radial-out component
+    if ((r < rp + 600e3 || rv.dot(vv) > 0) && r < 12000e3) {
+      dir = vv.normalize().negate();
+      if (el.pe < 600e3) dir.addScaledVector(rv.clone().normalize(), 1.0).normalize();
+    }
+  } else {
+    if (A.obj.gone) { t.arrived = true; return null; }   // the objective is gone: fight as usual
+    if (A.via && !A.passed) {                         // coast through the flyby first; head for the objective once outbound
+      const b = bodyAt(A.via, simT), rv = new THREE.Vector3(t.x - b.c[0], t.y - b.c[1], t.z - b.c[2]), vv = new THREE.Vector3(t.vx - b.v[0], t.vy - b.v[1], t.vz - b.v[2]);
+      if (rv.dot(vv) < 0) return null;
+      A.passed = true; if (isSeen(t)) log(`${t.name} PAST TITAN · HEADING FOR ${A.obj.name}`);
+    }
+    const o = A.obj, rel = new THREE.Vector3(o.x - t.x, o.y - t.y, o.z - t.z), d = rel.length(), u = rel.clone().divideScalar(d);
+    const relV = new THREE.Vector3(t.vx - o.vx, t.vy - o.vy, t.vz - o.vz);
+    if (d < A.stand + 20e3 && relV.length() < 15) { t.arrived = true; if (isSeen(t)) log(`${t.name} ON STATION AT ${o.name}`); return null; }
+    const vc = Math.min(A.vmax || 2000, Math.sqrt(2*acc*0.6*Math.max(0, d - A.stand)));
+    const err = u.multiplyScalar(vc).sub(relV);
+    if (err.length() > 8) dir = err.normalize();
+  }
+  if (!dir) return null;
+  t.burning = true; t.aiState = 'ARRIVE';
+  return [dir.x*acc, dir.y*acc, dir.z*acc];
+}
+const SAT = { ETA: 3*3600, ALT: 1500e3, ENEMY_ALT: 1800e3 };
+function planSaturn(t0) {
+  const ship = titanOrbitState(SAT.ALT, 0.4, 0.05, t0);
+  const fwd = new THREE.Vector3(ship.vx, ship.vy, ship.vz).sub(V3(titanVel(t0))).normalize();
+  const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, -1), fwd);
+  return { ship, q, arrive: t0 + SAT.ETA, targets: () => saturnForces(t0) };
+}
+function saturnForces(t0) {
+  const out = [];
+  const friendly = (name, st, radius, integ, extra) => mkTargetAt(name, st, radius, integ, 'FRIENDLY', { orbitKnown: true, ...extra });
+  // Facilities: the factory on Titan (30 deg east of the sub-Saturn point), the bay at L1, delivery craft
+  const fac = friendly('TITAN SHIPYARD', titanFixedState(30*D2R, R_TITAN, t0), 150, 2000,
+    { facility: true, surface: true, cls: 'base', len: 300, score: 0, keep: 4000, pin: tt => titanFixedState(30*D2R, R_TITAN, tt) });
+  const bay = friendly('STORAGE BAY L1', titanFixedState(0, TITAN_L1, t0), 80, 4000,
+    { facility: true, cls: 'station', len: 160, score: 0, keep: 4000, pd: 5, pin: tt => titanFixedState(0, TITAN_L1, tt) });
+  out.push(fac, bay);
+  out.push(friendly('DELIVERY CRAFT DC-1', titanFixedState(0.0004, TITAN_L1, t0), 12, 200,
+    { facility: true, cls: 'tug', len: 30, score: 0, keep: 500, pin: tt => titanFixedState(0.0004, TITAN_L1, tt) }));
+  out.push(friendly('DELIVERY CRAFT DC-2', titanOrbitState(900e3, 2.0, 0.1, t0), 12, 200, { facility: true, cls: 'tug', len: 30, score: 0, keep: 500 }));
+  // Allied carriers in formation slots behind and beside the player
+  [['CM-32 RESOLUTE', 'RESOLUTE', [-8e3, 0, 0]], ['CM-32 VALIANT', 'VALIANT', [-4e3, 6e3, 0]], ['CM-32 STEADFAST', 'STEADFAST', [-4e3, -6e3, 0]]]
+    .forEach(([n, sh, slot]) => {
+      const st = titanOrbitState(SAT.ALT, 0.4 + slot[0]/(R_TITAN + SAT.ALT), 0.05, t0);
+      out.push(friendly(n, st, 15, 2000, { ally: true, short: sh, slot, cls: 'carrier', len: 60, cells: ALLY.cells, pd: 5, score: 0, keep: 1000 }));
+    });
+  // Attack group A: a hyperbolic approach to Titan, periapsis ENEMY_ALT at ETA (spread over 12 min), brakes into orbit
+  const tA = t0 + SAT.ETA, vinf = 2200, rp = R_TITAN + SAT.ENEMY_ALT, vp = Math.sqrt(vinf*vinf + 2*GM_TITAN/rp);
+  const hostile = (name, cls, radius, integ, st, extra) => mkTargetAt(name, st, radius, integ, 'HOSTILE',
+    { hostile: true, req: true, cls, intel: true, sig: 40, ...extra, ai: { acc: extra.acc || 4, dv: 1500 } });
+  const groupA = [['CORVETTE BURYA', 'corvette'], ['CORVETTE GROZA', 'corvette'], ['CORVETTE VIKHR', 'corvette'], ['CORVETTE SHKVAL', 'corvette'],
+    ['CORVETTE TAIFUN', 'corvette'], ['CORVETTE URAGAN', 'corvette'], ['FRIGATE NEUSTRASHIMY', 'capital'], ['FRIGATE BESSTRASHNY', 'capital'],
+    ['CRUISER ADMIRAL GORSHKOV', 'capital']];
+  groupA.forEach(([n, cls], i) => {
+    const ph = 3.2 + 0.03*i, tp = titanPos(tA + i*80), tv = titanVel(tA + i*80);
+    const pr = SAT_X.clone().multiplyScalar(Math.cos(ph)).addScaledVector(SAT_Y, Math.sin(ph)), pv = SAT_X.clone().multiplyScalar(-Math.sin(ph)).addScaledVector(SAT_Y, Math.cos(ph));
+    const off = (i % 3 - 1)*40e3;
+    const peri = { x: tp[0] + pr.x*(rp + off), y: tp[1] + pr.y*(rp + off), z: tp[2] + pr.z*(rp + off) + (i % 2 ? 30e3 : -30e3),
+      vx: tv[0] + pv.x*vp, vy: tv[1] + pv.y*vp, vz: tv[2] + pv.z*vp };
+    const st = integrateTo(peri, tA + i*80, t0, 20);
+    const big = cls === 'capital', cruiser = n.startsWith('CRUISER');
+    out.push(hostile(n, cls, cruiser ? 14 : big ? 9 : 6, cruiser ? 1200 : big ? 450 : 200, st,
+      { score: cruiser ? 2500 : big ? 1000 : 500, salvo: cruiser ? 6 : big ? 4 : 3, salvoT: cruiser ? 18 : 22, fireRange: 900e3, prefer: 'facility',
+        mag: cruiser ? 64 : big ? 32 : 18,
+        pd: cruiser ? 5 : big ? 3 : 2, laser: !cruiser, fireT: 10 + i, len: cruiser ? 90 : undefined, arrive: { mode: 'capture' }, acc: cruiser ? 2.5 : 4 }));
+  });
+  // Attack group B: a Titan flyby (periapsis 3500 km, 20 min after group A), then on to the storage bay (standing
+  // off 60 km), some five hours later; it can be engaged on the flyby and chased
+  const groupB = [['CORVETTE METEL', 'corvette'], ['CORVETTE TUMAN', 'corvette'], ['FRIGATE NEPOKOLEBIMY', 'capital'], ['FRIGATE STOIKY', 'capital'],
+    ['CRUISER SLAVA', 'capital']];
+  const tB = tA + 1200, rpB = R_TITAN + 3500e3, vpB = Math.sqrt(1800*1800 + 2*GM_TITAN/rpB);
+  groupB.forEach(([n, cls], i) => {
+    const ph = 0.6 + 0.02*i, tp = titanPos(tB + i*60), tv = titanVel(tB + i*60);
+    const pr = SAT_X.clone().multiplyScalar(Math.cos(ph)).addScaledVector(SAT_Y, Math.sin(ph)), pv = SAT_X.clone().multiplyScalar(-Math.sin(ph)).addScaledVector(SAT_Y, Math.cos(ph));
+    const peri = { x: tp[0] + pr.x*rpB, y: tp[1] + pr.y*rpB, z: tp[2] + pr.z*rpB + (i - 2)*25e3, vx: tv[0] + pv.x*vpB, vy: tv[1] + pv.y*vpB, vz: tv[2] + pv.z*vpB };
+    const st = integrateTo(peri, tB + i*60, t0, 20);
+    const big = cls === 'capital', cruiser = n.startsWith('CRUISER');
+    out.push(hostile(n, cls, cruiser ? 14 : big ? 9 : 6, cruiser ? 1200 : big ? 450 : 200, st,
+      { score: cruiser ? 2500 : big ? 1000 : 500, salvo: cruiser ? 6 : big ? 4 : 3, salvoT: cruiser ? 18 : 22, fireRange: 150e3, prefer: 'facility', mag: cruiser ? 64 : big ? 32 : 18,
+        pd: cruiser ? 5 : big ? 3 : 2, laser: !cruiser, fireT: 10 + i, len: cruiser ? 90 : undefined, arrive: { mode: 'meet', obj: bay, stand: 60e3, vmax: 3000, via: 'TITAN' }, acc: cruiser ? 2.5 : 4 }));
+  });
+  return out;
+}
 const MISSIONS = {
   m1: { id: 'm1', name: 'OPERATION LANTERN', title: 'HELIUM-3 DEPOT STRIKE', plan: planMission1,
     // Briefing transmission: [text, typing speed in chars/s, pause after in s]; 'ANIM' is the transfer diagram
@@ -1848,6 +2032,55 @@ const MISSIONS = {
     },
     perfect: () => hullHits === 0 && !anyDamage() && !mission.rebounds,
   },
+  sat: { id: 'sat', name: 'SATURNIAN ASSAULT', title: 'DEFENCE OF TITAN', plan: planSaturn, hull: 'cm32', max: 34000,
+    scoring: 'SCORE: +500 per corvette, +1000 per frigate, +2500 per cruiser; on success +4000 each for the shipyard and the ' +
+      'storage bay intact, +500 per delivery craft and +1000 per allied carrier still alive, up to +2000 for missiles left. ' +
+      '−450 per hull hit. The mission fails if both the shipyard and the storage bay are lost. S: no friendly losses, no hull hits.',
+    orders: [
+      ['// LASER LINK ESTABLISHED - FLEET COMMAND, CHEYENNE · 72 MIN LIGHT DELAY //', 38, 1.4],
+      ['ORDERS RECEIVED. STAND BY FOR FILE TRANSMISSION.', 32, 1.6],
+      ['', 0, 0.2],
+      ['FILE 0617-SA // CLASSIFIED // TASK GROUP COMMANDER EYES ONLY', 160, 0.12],
+      ['SATURNIAN ASSAULT', 160, 0.12],
+      ['SITUATION ....... LARGE GROUP OF DRIVE SIGNATURES ON INTERCEPT', 170, 0.08],
+      ['                  COURSE FOR TITAN. ETA 3 HOURS.', 170, 0.08],
+      ['DEFEND .......... TITAN SHIPYARD (SURFACE), STORAGE BAY AT L1,', 170, 0.08],
+      ['                  DELIVERY CRAFT', 170, 0.08],
+      ['TASK GROUP ...... YOUR CM-32 AND CARRIERS RESOLUTE, VALIANT,', 170, 0.08],
+      ['                  STEADFAST, DATALINKED', 170, 0.25],
+      ['1. DESTROY THE ATTACK FLEET.', 170, 0.06],
+      ['2. THE CARRIERS PICK THEIR OWN TARGETS AND AVOID YOURS.', 170, 0.06],
+      ['3. ONE ENEMY GROUP IS EXPECTED AT THE STORAGE BAY, 52,000 KM', 170, 0.06],
+      ['   TOWARD SATURN. THE CARRIERS FOLLOW YOU.', 170, 0.2],
+      ['WARNING: A HEAVY UNIT IS REPORTED WITH THE FLEET.', 120, 0.4],
+      ['// END OF TRANSMISSION //', 60, 0],
+    ],
+    brief: [
+      'An enemy fleet is three hours out on an intercept course for Titan. Your CM-32 and three',
+      'allied missile carriers orbit Titan at 1500 km. Defend the shipyard on Titan, the storage',
+      'bay held at the Saturn-Titan L1 point (52,000 km toward Saturn) and the delivery craft.',
+      'One enemy group brakes into Titan orbit to bombard the shipyard; another heads for the',
+      'storage bay. The carriers keep formation on you, choose their own targets and avoid the',
+      "ones already engaged by you or each other. Titan's atmosphere starts 150 km up: stay out.",
+    ],
+    start() {
+      log('SATURNIAN ASSAULT · DEFENCE OF TITAN');
+      log(`ENEMY FLEET ETA ${fmtTime(SAT.ETA)} · ${targets.filter(t => t.req).length} DRIVE SIGNATURES`);
+      log('CARRIERS RESOLUTE · VALIANT · STEADFAST IN FORMATION');
+    },
+    step(h) {
+      const fac = targets.filter(t => t.facility && (t.name === 'TITAN SHIPYARD' || t.name === 'STORAGE BAY L1'));
+      if (!fac.length && !mission.ended) { endMission('ABANDONED', 'SHIPYARD AND STORAGE BAY LOST'); return; }
+      if (!targets.some(t => t.req && !t.gone)) endMission('SUCCESS');
+    },
+    bonus(result) {
+      if (result !== 'SUCCESS') return;
+      for (const t of targets) if (t.side === 'FRIENDLY' && !t.gone && t.keep) scoreAdd(`INTACT: ${t.name}`, t.keep);
+      const am = ammoState(), af = am.length ? am.reduce((x, [c, m]) => x + (m ? c/m : 1), 0)/am.length : 1;
+      scoreAdd('MISSILES LEFT', Math.round(2000*af));
+    },
+    perfect: () => hullHits === 0 && targets.filter(t => t.side === 'FRIENDLY').length === 7,
+  },
 };
 
 /* ================= MANEUVER PLANNER =================
@@ -1884,6 +2117,7 @@ function samplePath(s0, t0, horizon, step, tgt) {
     if (dm < R_MOON) { impact = { body: 'MOON', t }; break; }
     if (Math.hypot(s1.x, s1.y, s1.z) < R_E) { impact = { body: 'EARTH', t }; break; }
     const mp = marsPos(t); if (Math.hypot(s1.x - mp[0], s1.y - mp[1], s1.z - mp[2]) < R_MARS) { impact = { body: 'MARS', t }; break; }
+    const tq = titanPos(t); if (Math.hypot(s1.x - tq[0], s1.y - tq[1], s1.z - tq[2]) < R_TITAN + TITAN_ATM) { impact = { body: 'TITAN', t }; break; }
     if (wasInMoon && !soiExit && dm > MOON_SOI) soiExit = t;
     s1 = integrateTo(s1, t, t + step, 10); if (ts) ts = integrateTo(ts, t, t + step, 10); t += step;
   }
@@ -2079,7 +2313,12 @@ function resetShip() {
   omega.set(0,0,0);
 }
 
-function log(text) { msgs.push({ t: simT, text }); if (msgs.length > 14) msgs.shift(); }
+// Repeats of the same message (numbers aside) within 5 s fold into one line with a count
+function log(text) {
+  const base = text.replace(/[\d.:]+/g, '#'), last = msgs[msgs.length - 1];
+  if (last && last.base === base && simT - last.t < 5) { last.n++; last.t = simT; last.text = `${text} ×${last.n}`; return; }
+  msgs.push({ t: simT, text, base, n: 1 }); if (msgs.length > 14) msgs.shift();
+}
 function groundMsg(text) {
   const delay = Math.hypot(ship.x, ship.y, ship.z) / C;   // light-time to Earth (over 20 minutes from Mars at times)
   pending.push({ at: simT + delay, text });
@@ -2110,7 +2349,16 @@ const D2R = Math.PI/180;
 const ELEM = {   // a (AU), e, i, mean longitude L, longitude of perihelion w, node N (deg); L and w rates per Julian century
   earth: { a: 1.00000261, e: 0.01671123, i: -0.00001531, L: 100.46457166, w: 102.93768193, N: 0, Ld: 35999.37244981, wd: 0.32327364 },
   mars:  { a: 1.52371034, e: 0.09339410, i: 1.84969142, L: -4.55343205, w: -23.94362959, N: 49.55953891, Ld: 19140.30268499, wd: 0.44441088 },
+  saturn:{ a: 9.53667594, e: 0.05386179, i: 2.48599187, L: 49.95424423, w: 92.59887831, N: 113.66242448, Ld: 1222.49362201, wd: -0.41897216 },
 };
+/* Saturn and Titan. Titan: a circular orbit of TITAN_A in Saturn's equator (pole: RA 40.589, Dec 83.537 deg), period
+   TITAN_P; it keeps one face to Saturn. Spheres of influence: Laplace radii. */
+const GM_SAT = 3.7931187e16, R_SAT = 58232e3, SAT_SOI = 5.45e10;
+const GM_TITAN = 8.9781e12, R_TITAN = 2574.7e3, TITAN_SOI = 4.33e7, TITAN_A = 1.22187e9, TITAN_P = 15.945421*86400, TITAN_ATM = 150e3;
+const SAT_POLE = (() => { const ra = 40.589*Math.PI/180, de = 83.537*Math.PI/180; return new THREE.Vector3(Math.cos(de)*Math.cos(ra), Math.cos(de)*Math.sin(ra), Math.sin(de)); })();
+const SAT_X = new THREE.Vector3().crossVectors(SAT_POLE, new THREE.Vector3(0, 0, 1)).normalize(), SAT_Y = new THREE.Vector3().crossVectors(SAT_POLE, SAT_X);
+const titanAng = t => 1.1 + 2*Math.PI*t/TITAN_P;
+const titanRel = t => { const a = titanAng(t); return [TITAN_A*(Math.cos(a)*SAT_X.x + Math.sin(a)*SAT_Y.x), TITAN_A*(Math.cos(a)*SAT_X.y + Math.sin(a)*SAT_Y.y), TITAN_A*(Math.cos(a)*SAT_X.z + Math.sin(a)*SAT_Y.z)]; };
 // Heliocentric position in the game frame (m) at sim time t
 function helioPos(k, t) {
   const E0 = ELEM[k], T = (EPOCH_D + t/86400)/36525;
@@ -2128,22 +2376,28 @@ const ephCache = new Map();
 function eph(t) {
   let v = ephCache.get(t);
   if (v) return v;
-  const E = helioPos('earth', t), Mh = helioPos('mars', t);
-  v = { sun: [-E[0], -E[1], -E[2]], mars: [Mh[0] - E[0], Mh[1] - E[1], Mh[2] - E[2]] };
+  const E = helioPos('earth', t), Mh = helioPos('mars', t), Sh = helioPos('saturn', t), tr = titanRel(t);
+  const sat = [Sh[0] - E[0], Sh[1] - E[1], Sh[2] - E[2]];
+  v = { sun: [-E[0], -E[1], -E[2]], mars: [Mh[0] - E[0], Mh[1] - E[1], Mh[2] - E[2]], sat, titan: [sat[0] + tr[0], sat[1] + tr[1], sat[2] + tr[2]] };
   if (ephCache.size > 64) ephCache.clear();
   ephCache.set(t, v);
   return v;
 }
-const sunPos = t => eph(t).sun, marsPos = t => eph(t).mars;
+const sunPos = t => eph(t).sun, marsPos = t => eph(t).mars, satPos = t => eph(t).sat, titanPos = t => eph(t).titan;
 const dVel = f => t => { const a = f(t - 30), b = f(t + 30); return [(b[0] - a[0])/60, (b[1] - a[1])/60, (b[2] - a[2])/60]; };
-const sunVel = dVel(sunPos), marsVel = dVel(marsPos);
+const sunVel = dVel(sunPos), marsVel = dVel(marsPos), satVel = dVel(satPos), titanVel = dVel(titanPos);
+const titanDist = o => { const m = titanPos(simT); return Math.hypot(o.x-m[0], o.y-m[1], o.z-m[2]); };
+const satDist = o => { const m = satPos(simT); return Math.hypot(o.x-m[0], o.y-m[1], o.z-m[2]); };
 const marsDist = o => { const m = marsPos(simT); return Math.hypot(o.x-m[0], o.y-m[1], o.z-m[2]); };
-// The Sun's direction follows the calendar (it moves about 1 deg a day; set every physics step)
-function updateSunDir() { const sp = sunPos(simT); SUN_DIR.set(sp[0], sp[1], sp[2]).normalize(); }
+// The Sun's direction from the ship (it follows the calendar, about 1 deg a day, and differs at Saturn)
+function updateSunDir() { const sp = sunPos(simT); SUN_DIR.set(sp[0] - ship.x, sp[1] - ship.y, sp[2] - ship.z).normalize(); }
 // Body centre (Earth-centred frame) and velocity by name, at time t
-const bodyC = (name, t) => name === 'MOON' ? moonPos(t) : name === 'MARS' ? marsPos(t) : name === 'SUN' ? sunPos(t) : [0, 0, 0];
-const bodyV = (name, t) => name === 'MOON' ? moonVel(t) : name === 'MARS' ? marsVel(t) : name === 'SUN' ? sunVel(t) : [0, 0, 0];
-const BODY = { EARTH: { R: R_E, GM: GM_E }, MOON: { R: R_MOON, GM: GM_M }, MARS: { R: R_MARS, GM: GM_MARS }, SUN: { R: R_SUN, GM: GM_SUN } };
+const BODY_POS = { MOON: moonPos, MARS: marsPos, SUN: sunPos, SATURN: satPos, TITAN: titanPos };
+const BODY_VEL = { MOON: moonVel, MARS: marsVel, SUN: sunVel, SATURN: satVel, TITAN: titanVel };
+const bodyC = (name, t) => BODY_POS[name] ? BODY_POS[name](t) : [0, 0, 0];
+const bodyV = (name, t) => BODY_VEL[name] ? BODY_VEL[name](t) : [0, 0, 0];
+const BODY = { EARTH: { R: R_E, GM: GM_E }, MOON: { R: R_MOON, GM: GM_M }, MARS: { R: R_MARS, GM: GM_MARS }, SUN: { R: R_SUN, GM: GM_SUN },
+  SATURN: { R: R_SAT, GM: GM_SAT }, TITAN: { R: R_TITAN, GM: GM_TITAN } };
 // Which body dominates at a state: the Moon or Mars inside their spheres of influence, Earth inside its own, else the Sun
 function primaryName(s0, t) {
   const m = moonPos(t);
@@ -2152,17 +2406,22 @@ function primaryName(s0, t) {
   if (r < EARTH_SOI) return 'EARTH';
   const mp = marsPos(t);
   if (Math.hypot(s0.x-mp[0], s0.y-mp[1], s0.z-mp[2]) < MARS_SOI) return 'MARS';
+  const tp = titanPos(t);
+  if (Math.hypot(s0.x-tp[0], s0.y-tp[1], s0.z-tp[2]) < TITAN_SOI) return 'TITAN';
+  const sp = satPos(t);
+  if (Math.hypot(s0.x-sp[0], s0.y-sp[1], s0.z-sp[2]) < SAT_SOI) return 'SATURN';
   return 'SUN';
 }
 const bodyAt = (name, t) => ({ name, R: BODY[name].R, GM: BODY[name].GM, c: bodyC(name, t), v: bodyV(name, t),
-  other: name === 'EARTH' ? 'MOON' : name === 'MOON' ? 'EARTH' : name === 'MARS' ? 'EARTH' : 'MARS' });
+  other: ({ EARTH: 'MOON', MOON: 'EARTH', MARS: 'EARTH', TITAN: 'SATURN', SATURN: 'TITAN' })[name] || 'MARS' });
 // Integration step suited to the gravity around a state: a small fraction of the shortest dynamical time
 // (sqrt(d^3/GM)) to Earth, the Moon, Mars and the Sun
 function dynStep(s0, t, frac = 0.004) {
-  const m = moonPos(t), mp = marsPos(t), sp = sunPos(t);
+  const m = moonPos(t), mp = marsPos(t), sp = sunPos(t), E = eph(t), st = E.sat, ti = E.titan;
   const dt = (d, GM) => Math.sqrt(d*d*d/GM);
   return frac*Math.min(dt(Math.hypot(s0.x, s0.y, s0.z), GM_E), dt(Math.hypot(s0.x-m[0], s0.y-m[1], s0.z-m[2]), GM_M),
-    dt(Math.hypot(s0.x-mp[0], s0.y-mp[1], s0.z-mp[2]), GM_MARS), dt(Math.hypot(s0.x-sp[0], s0.y-sp[1], s0.z-sp[2]), GM_SUN));
+    dt(Math.hypot(s0.x-mp[0], s0.y-mp[1], s0.z-mp[2]), GM_MARS), dt(Math.hypot(s0.x-sp[0], s0.y-sp[1], s0.z-sp[2]), GM_SUN),
+    dt(Math.hypot(s0.x-st[0], s0.y-st[1], s0.z-st[2]), GM_SAT), dt(Math.hypot(s0.x-ti[0], s0.y-ti[1], s0.z-ti[2]), GM_TITAN));
 }
 const moonDist = o => { const m = moonPos(simT); return Math.hypot(o.x-m[0], o.y-m[1], o.z-m[2]); };
 const inMoonSOI = () => moonDist(ship) < MOON_SOI;
@@ -2177,7 +2436,9 @@ function losClearBody(a, b, c, R) {
 }
 // Line of sight between two points that also clears the Moon
 function losClearMoon(a, b) {
-  if (!losClearBody(a, b, marsPos(simT), R_MARS)) return false;   // and Mars
+  if (!losClearBody(a, b, marsPos(simT), R_MARS)) return false;   // and Mars, Titan (with its haze) and Saturn
+  if (!losClearBody(a, b, titanPos(simT), R_TITAN + TITAN_ATM)) return false;
+  if (!losClearBody(a, b, satPos(simT), R_SAT)) return false;
   const m = moonPos(simT);
   const ax = a.x-m[0], ay = a.y-m[1], az = a.z-m[2], dx = b.x-a.x, dy = b.y-a.y, dz = b.z-a.z, dd = dx*dx + dy*dy + dz*dz;
   const u = dd > 0 ? clamp(-(ax*dx + ay*dy + az*dz)/dd, 0, 1) : 0;
@@ -2203,7 +2464,7 @@ function gravAcc(x, y, z, t) {
   };
   third(moonPos(t), GM_M);
   const E = eph(t);
-  third(E.sun, GM_SUN); third(E.mars, GM_MARS);
+  third(E.sun, GM_SUN); third(E.mars, GM_MARS); third(E.sat, GM_SAT); third(E.titan, GM_TITAN);
   return [ax, ay, az];
 }
 // RK4 in place. ex/ey/ez: extra constant acceleration (thrust) over the step.
@@ -2606,16 +2867,20 @@ function physicsStep(h) {
   for (const t of targets) {
     if (!t.hostile || t.gone) continue;
     if (t.needsAlert && !(mission && mission.alert)) continue;   // mission defenders hold fire until alerted
-    if (t.fireRange && rangeTo(t) > t.fireRange) continue;
+    // Victim: the player, or (where there are friendly units) the friendly it prefers in range, else the nearest
+    const vic = pickVictim(t);
+    if (!vic) continue;
     t.fireT -= h;
     if (t.fireT > 0) continue;
     t.fireT = t.salvoT || HOSTILE_SALVO_T;
-    const nT = t.salvo || 4;
+    const nT = Math.min(t.salvo || 4, t.mag ?? Infinity);   // ships with a magazine (t.mag) stop when it runs dry
+    if (nT <= 0) continue;
+    if (t.mag !== undefined) { t.mag -= nT; if (!t.mag && isSeen(t)) log(`${t.name} · TUBES SILENT`); }
     for (let k = 0; k < nT; k++) {
-      const dir = new THREE.Vector3(ship.x-t.x, ship.y-t.y, ship.z-t.z).normalize()
+      const dir = new THREE.Vector3(vic.x-t.x, vic.y-t.y, vic.z-t.z).normalize()
         .add(new THREE.Vector3(Math.random()-0.5, Math.random()-0.5, Math.random()-0.5).multiplyScalar(0.3)).normalize();
       torpedoes.push({ x: t.x+dir.x*5, y: t.y+dir.y*5, z: t.z+dir.z*5,
-        vx: t.vx+dir.x*200, vy: t.vy+dir.y*200, vz: t.vz+dir.z*200, age: 0, burn: TORP_BURN, dead: false });
+        vx: t.vx+dir.x*200, vy: t.vy+dir.y*200, vz: t.vz+dir.z*200, age: 0, burn: TORP_BURN, dead: false, tgt: vic === ship ? null : vic });
     }
     log(`HOSTILE LAUNCH  ${nT} TORPEDOES · ${t.name}`); t.lastLaunchT = simT;
   }
@@ -2711,10 +2976,14 @@ function physicsStep(h) {
   for (const t of targets) {
     t.px = t.x; t.py = t.y; t.pz = t.z; t.s0 = { x: t.x, y: t.y, z: t.z, vx: t.vx, vy: t.vy, vz: t.vz };
     if (t.pin) { Object.assign(t, t.pin(simT + h)); continue; }   // surface sites, elevator parts
-    const a = enemyAI(t, h) || [0, 0, 0];
+    if (!t.crashed && (titanDist(t) < R_TITAN + TITAN_ATM || marsDist(t) < R_MARS || Math.hypot(t.x, t.y, t.z) < R_E)) {
+      t.crashed = true; t.integrity = 0; t.lastHit = null; if (isSeen(t)) log(`${t.name} · ATMOSPHERE ENTRY · LOST`);
+    }
+    const a = (t.ally ? allyAI(t, h) : t.arrive && !t.arrived ? arriveAI(t, h) : enemyAI(t, h)) || [0, 0, 0];
     rk4(t, h, a[0], a[1], a[2]);
   }
   elevatorStep(h);
+  friendlyPD(h);
   dockStep(h);
   enemyPD(h);
   contactStep(h);
@@ -2754,10 +3023,11 @@ function physicsStep(h) {
     tp.px = tp.x; tp.py = tp.y; tp.pz = tp.z;
     // Decoyed by ECM: the guidance homes on the decoy cloud instead of the ship
     const [ax, ay, az] = tp.seduced ? computeTorpedoGuidance(tp, tp.seduced, h, { maxAccel: TORP_ACCEL, gravFn: gravAcc, t: simT }) :
-      computeTorpedoGuidance(tp, shipStart, h, { maxAccel: TORP_ACCEL, gravFn: gravAcc, t: simT, targetAccel: shipThrustA });
+      tp.tgt ? computeTorpedoGuidance(tp, tp.tgt.s0 || tp.tgt, h, { maxAccel: TORP_ACCEL, gravFn: gravAcc, t: simT })
+             : computeTorpedoGuidance(tp, shipStart, h, { maxAccel: TORP_ACCEL, gravFn: gravAcc, t: simT, targetAccel: shipThrustA });
     tp.cmd = [ax, ay, az];                           // kept for the thruster plume on the telescope
     rk4(tp, h, ax, ay, az); tp.age += h;
-    if (missCheck(tp, tp.seduced || ship, h)) { tp.dead = true; tp.missed = true; log(`HOSTILE TORPEDO MISSED · SELF-DESTRUCT · CLOSEST ${fmtDist(tp.minD)}`); }
+    if (missCheck(tp, tp.seduced || tp.tgt || ship, h)) { tp.dead = true; tp.missed = true; log(`HOSTILE TORPEDO MISSED · SELF-DESTRUCT · CLOSEST ${fmtDist(tp.minD)}`); }
   }
   for (const tr of tracers) { tr.px = tr.x; tr.py = tr.y; tr.pz = tr.z; rk4(tr, h, 0, 0, 0); tr.age += h; }
   for (const tr of eTracers) { tr.px = tr.x; tr.py = tr.y; tr.pz = tr.z; rk4(tr, h, 0, 0, 0); tr.age += h; }
@@ -2903,6 +3173,14 @@ function physicsStep(h) {
   /* --- torpedo impacts on the hull --- */
   for (const tp of torpedoes) {
     if (tp.dead) continue;
+    if (tp.tgt) {                                    // aimed at a friendly unit or facility
+      if (!tp.tgt.gone && segDist(tp, tp.tgt) < tp.tgt.radius + 5) {
+        tp.dead = true; tp.tgt.integrity -= FRIENDLY_TORP_DMG;
+        flashes.push({ x: tp.x, y: tp.y, z: tp.z, vx: tp.tgt.vx, vy: tp.tgt.vy, vz: tp.tgt.vz, t0: simT, age: 0, dur: 0.8, peak: 0.9, kind: 'hit' });
+        log(`${tp.tgt.name} HIT · ${Math.max(0, Math.round(100*tp.tgt.integrity/tp.tgt.maxInt))}%`);
+      }
+      continue;
+    }
     if (segDist(tp, ship) < TORP_HULL_R) {          // swept over the step: torpedoes move up to ~250 m per step
       tp.dead = true;
       flashes.push({ x: tp.x, y: tp.y, z: tp.z, vx: tp.vx, vy: tp.vy, vz: tp.vz, t0: simT, age: 0, dur: 0.6, peak: 0.8, kind: 'hit' });
@@ -2918,7 +3196,8 @@ function physicsStep(h) {
   for (const t of targets) {
     if (!t.gone && t.integrity <= 0) {
       t.gone = true; groundMsg(`${t.name} CONFIRMED DESTROYED`);
-      if (mission && t.score) { scoreAdd(t.side === 'NEUTRAL' ? 'NEUTRALS DESTROYED' : `${t.name}`, t.score); if (t.side === 'NEUTRAL') mission.neutrals++; }
+      if (mission && t.score) { scoreAdd(t.side === 'NEUTRAL' ? 'NEUTRALS DESTROYED' : t.side === 'FRIENDLY' ? `LOST: ${t.name}` : `${t.name}`, t.score); if (t.side === 'NEUTRAL') mission.neutrals++; }
+      if (t.side === 'FRIENDLY') { log(`${t.name} DESTROYED`); sfx.klaxon(); }
       // Reactor explosion: a bright, longer flash at the ship's last position
       flashes.push({ x: t.x, y: t.y, z: t.z, vx: t.vx, vy: t.vy, vz: t.vz, t0: simT, age: 0, dur: 4.0, peak: 1.0, kind: 'kill' });
       const secs = breakUp(t);
@@ -2961,6 +3240,8 @@ function physicsStep(h) {
   /* --- crash into Earth --- */
   if (moonDist(ship) < R_MOON) shipDestroyed('LUNAR SURFACE IMPACT');
   if (marsDist(ship) < R_MARS) shipDestroyed('MARS SURFACE IMPACT');
+  if (titanDist(ship) < R_TITAN + TITAN_ATM) shipDestroyed('TITAN ATMOSPHERE ENTRY');
+  if (satDist(ship) < R_SAT + 500e3) shipDestroyed('SATURN ATMOSPHERE ENTRY');
   if (Math.hypot(ship.x, ship.y, ship.z) < R_E) {
     shipDestroyed('SURFACE IMPACT · ORBIT DECAYED');
   }
@@ -4717,8 +4998,25 @@ const MOON_ALB = (() => {
   for (let k = 0; k < A.length; k++) A[k] = clamp(A[k], 0.2, 1);
   return A;
 })();
-const bodyCache = { moon: { cv: null, key: null }, earth: { cv: null, key: null }, mars: { cv: null, key: null },
-  moonF: { cv: null, key: null, tf: 0 }, earthF: { cv: null, key: null, tf: 0 }, marsF: { cv: null, key: null, tf: 0 } };
+const bodyCache = { moon: { cv: null, key: null }, earth: { cv: null, key: null }, mars: { cv: null, key: null }, titan: { cv: null, key: null }, saturn: { cv: null, key: null },
+  moonF: { cv: null, key: null, tf: 0 }, earthF: { cv: null, key: null, tf: 0 }, marsF: { cv: null, key: null, tf: 0 }, titanF: { cv: null, key: null, tf: 0 }, saturnF: { cv: null, key: null, tf: 0 } };
+// Titan: an orange haze ball, no surface seen; the haze glows at the limb and scatters light past the terminator
+function titanShade(nx, ny, nz, z, ir) {
+  const lam = nx*SUN_DIR.x + ny*SUN_DIR.y + nz*SUN_DIR.z;
+  if (ir) { const v = 105 + 40*Math.max(0, lam); return [v, v, v]; }
+  const lit = clamp(lam*0.9 + 0.12, 0, 1), limb = 0.7 + 0.5*Math.pow(1 - z, 2);
+  return [228*lit*limb, 150*lit*limb, 62*lit*limb];
+}
+// Saturn: pale butterscotch bands by latitude (about its pole)
+function saturnShade(nx, ny, nz, z, ir) {
+  const lam = Math.max(0, nx*SUN_DIR.x + ny*SUN_DIR.y + nz*SUN_DIR.z);
+  if (ir) { const v = 95 + 60*lam; return [v, v, v]; }
+  const lat = Math.asin(clamp(nx*SAT_POLE.x + ny*SAT_POLE.y + nz*SAT_POLE.z, -1, 1));
+  const band = 0.85 + 0.1*Math.sin(lat*14) + 0.06*Math.sin(lat*31 + 1);
+  const lit = Math.min(1, lam*1.05 + 0.02)*band, limb = 1 - 0.3*Math.pow(1 - z, 2);
+  return [232*lit*limb, 206*lit*limb, 150*lit*limb];
+}
+const SHADE = { earth: (...a) => earthShade(...a), mars: (...a) => marsShade(...a), titan: titanShade, saturn: saturnShade };
 // Mars: ochre disc with the large dark albedo regions (smooth harmonics in Mars-fixed longitude, turning with its
 // 24.6 h day; pole roughly along the ecliptic pole) and white polar caps. IR: a warm, uniform disc lit by the Sun.
 const MARS_ROT = 2*Math.PI/88642.66;
@@ -4807,7 +5105,7 @@ function bodyFrame(kind, B, vq, fov, F, ir) {
       const mu = Math.max(0.12, -(nx*dx + ny*dy + nz*dz));   // grazing views stretch each pixel over more ground
       const v = moonShade(nx, ny, nz, octs, ir, t*2*fov/F.R/mu); d[o] = v; d[o + 1] = v; d[o + 2] = v*1.02;
     }
-    else { const mu = -(nx*dx + ny*dy + nz*dz), [r, gg, bb] = (kind === 'mars' ? marsShade : earthShade)(nx, ny, nz, mu, ir); d[o] = r; d[o + 1] = gg; d[o + 2] = bb; }
+    else { const mu = -(nx*dx + ny*dy + nz*dz), [r, gg, bb] = SHADE[kind](nx, ny, nz, mu, ir); d[o] = r; d[o + 1] = gg; d[o + 2] = bb; }
     d[o + 3] = 255;
   }
   g.putImageData(img, 0, 0);
@@ -4834,7 +5132,7 @@ function bodyImage(kind, vq, ir) {
     n.set(0, 0, 0).addScaledVector(ax, x).addScaledVector(ay, y).addScaledVector(az, z);   // surface normal, world
     let R, G, B;
     if (kind === 'moon') { R = G = moonShade(n.x, n.y, n.z, octs, ir); B = R*1.02; }
-    else [R, G, B] = (kind === 'mars' ? marsShade : earthShade)(n.x, n.y, n.z, z, ir);
+    else [R, G, B] = SHADE[kind](n.x, n.y, n.z, z, ir);
     d[o] = R; d[o + 1] = G; d[o + 2] = B; d[o + 3] = 255*clamp((1 - Math.sqrt(r2))*S/2, 0, 1);   // soft edge
   }
   g.putImageData(img, 0, 0);
@@ -4910,6 +5208,10 @@ return Object.fromEntries(Object.entries({
   booster:  [cyl(-0.38, 0.3, 0.065, 0.065), cyl(-0.34, 0.24, 0.048, 0.048, 0.105, 0), cyl(-0.34, 0.24, 0.048, 0.048, -0.105, 0),
              cyl(-0.34, 0.24, 0.048, 0.048, 0, 0.105), cyl(-0.34, 0.24, 0.048, 0.048, 0, -0.105), cyl(0.3, 0.47, 0.06, 0.075, 0, 0, 0.7),
              cyl(0.47, 0.5, 0.08, 0.08), cyl(-0.5, -0.38, 0.03, 0.08, 0, 0, BELL)],
+  // Missile carrier (CM-32 class): hull with dorsal and ventral cell blocks, canister pods, radiators, one bell
+  carrier:  [cyl(-0.42, 0.38, 0.07, 0.07), cyl(0.38, 0.5, 0.07, 0.03), box([0.05, 0.095, 0], [0.42, 0.05, 0.13], 0.85), box([0.05, -0.095, 0], [0.42, 0.05, 0.13], 0.85),
+             cyl(-0.1, 0.15, 0.03, 0.03, 0, 0.13, 0.9), cyl(-0.1, 0.15, 0.03, 0.03, 0, -0.13, 0.9),
+             box([-0.32, 0, 0.17], [0.14, 0.01, 0.2], RAD), box([-0.32, 0, -0.17], [0.14, 0.01, 0.2], RAD), cyl(-0.5, -0.42, 0.05, 0.09, 0, 0, BELL)],
   // Surface complex: long low halls, a dome and a tower
   base:     [box([0, -0.06, 0], [0.9, 0.1, 0.45], 0.8), sph([0.22, 0.02, 0.05], 0.14), box([-0.25, 0.04, -0.1], [0.25, 0.14, 0.18]),
              box([-0.05, 0.2, 0.12], [0.06, 0.4, 0.06])],
@@ -5257,19 +5559,35 @@ function drawScope(g, W, H, idx) {
   // Earth and the Moon as shaded discs, the farther one first. The angle mapping is extended past the field of
   // view so a disc whose centre is outside the frame still shows its limb.
   const mp = moonPos(simT);
-  const mrp = marsPos(simT);
-  const bodies = [{ kind: 'moon', v: new THREE.Vector3(mp[0]-ship.x, mp[1]-ship.y, mp[2]-ship.z), r: R_MOON },
-                  { kind: 'earth', v: new THREE.Vector3(-ship.x, -ship.y, -ship.z), r: R_E },
-                  { kind: 'mars', v: new THREE.Vector3(mrp[0]-ship.x, mrp[1]-ship.y, mrp[2]-ship.z), r: R_MARS }].sort((a, b) => b.v.length() - a.v.length());
+  const mrp = marsPos(simT), Eph = eph(simT), rel = c => new THREE.Vector3(c[0]-ship.x, c[1]-ship.y, c[2]-ship.z);
+  const bodies = [{ kind: 'moon', v: rel(mp), r: R_MOON }, { kind: 'earth', v: rel([0, 0, 0]), r: R_E }, { kind: 'mars', v: rel(mrp), r: R_MARS },
+                  { kind: 'saturn', v: rel(Eph.sat), r: R_SAT }, { kind: 'titan', v: rel(Eph.titan), r: R_TITAN + TITAN_ATM }].sort((a, b) => b.v.length() - a.v.length());
   for (const B of bodies) {
     const d = B.v.length(), ar = Math.asin(Math.min(1, B.r/d)), vv = B.v.clone().applyQuaternion(bq).normalize();
     const off = Math.acos(clamp(-vv.z, -1, 1));
     if (off > ar + SCOPE_FOV*1.5) continue;          // nowhere near the frame
     const az = Math.atan2(vv.x, -vv.z), el = Math.atan2(vv.y, -vv.z);   // the same mapping as proj()
     const px = cx + az/SCOPE_FOV*R, py = cy - el/SCOPE_FOV*R, pr = ar/SCOPE_FOV*R;
-    if (pr < 1.5) { g.fillStyle = irOn ? '#ddd' : ({ moon: '#c9c9c9', earth: '#7fa8e0', mars: '#d9845a' })[B.kind]; g.fillRect(px - 1, py - 1, 2, 2); continue; }
+    if (pr < 1.5) { g.fillStyle = irOn ? '#ddd' : ({ moon: '#c9c9c9', earth: '#7fa8e0', mars: '#d9845a', saturn: '#e8d49a', titan: '#e0973e' })[B.kind]; g.fillRect(px - 1, py - 1, 2, 2); continue; }
+    // Saturn's rings: the far half drawn before the planet, the near half after it
+    const rings = B.kind === 'saturn' && !irOn ? (front => {
+      const c = B.v.clone(), u = SAT_X, w = SAT_Y;
+      for (const [r0, r1, a] of [[74.5e6, 92e6, 0.25], [92e6, 117.6e6, 0.55], [122.2e6, 136.8e6, 0.4]]) {
+        g.beginPath(); let started2 = false;
+        const pts = (rr, rev) => { for (let i = 0; i <= 90; i++) { const th = (rev ? 90 - i : i)/90*Math.PI*2;
+          const v = c.clone().addScaledVector(u, rr*Math.cos(th)).addScaledVector(w, rr*Math.sin(th));
+          const nearSide = v.length() < c.length();
+          if (nearSide !== front) { started2 = false; continue; }
+          const q = projU(v.applyQuaternion(bq)); if (!q) { started2 = false; continue; }
+          started2 ? g.lineTo(q.x, q.y) : g.moveTo(q.x, q.y); started2 = true; } };
+        g.strokeStyle = `rgba(226,206,160,${a})`; g.lineWidth = Math.max(1, (r1 - r0)/B.v.length()/SCOPE_FOV*R*0.9);
+        g.beginPath(); started2 = false; pts((r0 + r1)/2, false); g.stroke();
+      }
+    }) : null;
+    if (rings) rings(false);
     if (pr > 140) g.drawImage(bodyFrame(B.kind, B, bq, SCOPE_FOV, { FX, FY, FW, FH, cx, cy, R }, irOn), FX, FY, FW, FH);
     else g.drawImage(bodyImage(B.kind, bq, irOn), px - pr, py - pr, 2*pr, 2*pr);
+    if (rings) rings(true);
   }
   // The elevator tether: a thin sunlit ribbon (warm white; IR: faint), drawn segment by segment
   for (const line of elevLines(simT)) {
@@ -7597,6 +7915,12 @@ function coastBlock() {
   if (BA && ['SLEW', 'WAIT', 'BURN', 'HOLD'].includes(BA.phase)) return 'STAGE AUTOPILOT';
   if (BA && BA.nextT && BA.nextT - simT < 660) return `${BA.name} SOON`;
   if (targets.some(t => t.hostile && !t.gone && isSeen(t) && rangeTo(t) < 2000e3)) return 'HOSTILES WITHIN 2000 KM';
+  // a fight between friendly ships or stations and the enemy goes on whether the player sees it or not
+  const fr = targets.filter(f => f.side === 'FRIENDLY' && !f.gone);
+  if (fr.length && targets.some(t => t.hostile && !t.gone && (!t.arrive || t.arrived || t.arrive.passed)
+      && fr.some(f => Math.hypot(t.x - f.x, t.y - f.y, t.z - f.z) < Math.max(3000e3, t.fireRange || 0)))) return 'BATTLE IN PROGRESS';
+  if (targets.some(t => t.arrive && !t.arrived && !t.gone && (t.arrive.mode === 'capture' ? titanDist(t) < 20000e3
+      : Math.hypot(t.x - t.arrive.obj.x, t.y - t.arrive.obj.y, t.z - t.arrive.obj.z) < 60000e3))) return 'ENEMY FLEET ARRIVING';
   return null;
 }
 let coastNote = 0;
@@ -7613,7 +7937,7 @@ function coastRun(T) {
     ship.px = ship.x; ship.py = ship.y; ship.pz = ship.z;
     rk4(ship, h, 0, 0, 0); simT += h; left -= h; n++;
     if (n % 20 === 0 && primaryName(ship, simT) !== p0) { changed = primaryName(ship, simT); break; }
-    if (Math.hypot(ship.x, ship.y, ship.z) < R_E + 100e3 || marsDist(ship) < R_MARS + 100e3 || moonDist(ship) < R_MOON + 20e3) { changed = 'LOW'; break; }
+    if (Math.hypot(ship.x, ship.y, ship.z) < R_E + 100e3 || marsDist(ship) < R_MARS + 100e3 || moonDist(ship) < R_MOON + 20e3 || titanDist(ship) < R_TITAN + TITAN_ATM + 100e3) { changed = 'LOW'; break; }
   }
   if (!changed && primaryName(ship, simT) !== p0) changed = primaryName(ship, simT);
   const dt = simT - tStart;
