@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OG — Cockpit prototype v0.5.2</title>
+<title>OG — Cockpit prototype v0.5.3</title>
 <style>
   html, body { margin:0; height:100%; background:#000; overflow:hidden;
     font-family: ui-monospace, Menlo, Consolas, monospace; color:#cfd8c0; }
@@ -90,7 +90,7 @@
 </head>
 <body>
 <canvas id="gl"></canvas>
-<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.5.2</span></div>
+<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.5.3</span></div>
 <div id="hangar"><div class="load" id="hangarLoad">LOADING SHIP</div>
   <div class="hint">DRAG TO ORBIT · WHEEL TO ZOOM · CLICK A HARDPOINT TO CHOOSE ITS MODULE</div>
   <div class="panel"><h2>HANGAR</h2><div class="sub">LOADOUT · SELECT A HARDPOINT, THEN A MODULE</div>
@@ -865,10 +865,13 @@ const rangeTo = o => Math.hypot(o.x-ship.x, o.y-ship.y, o.z-ship.z);
 // way blocks both.
 const radarOn = () => roleDamage('radar') > 0;
 const passiveRange = t => DET_BASE*Math.sqrt(targetSig(t));
+// Hysteresis: a contact already held is kept out to CONTACT_HOLD x the range needed to acquire it, so a target
+// at the edge of detection does not flicker in and out
+const CONTACT_HOLD = 1.25, MEM_TIME = 30;
 function contactKind(t) {
   if (!t || t.gone) return null;
-  const r = rangeTo(t);
-  if (r > Math.max(passiveRange(t), radarOn() ? sensorRange() : 0)) return null;
+  const r = rangeTo(t), f = t.held ? CONTACT_HOLD : 1;
+  if (r > Math.max(f*passiveRange(t), radarOn() ? sensorRange() : 0)) return null;
   if (!losClear(ship, t) || !losClearMoon(ship, t)) return null;
   return radarOn() && r <= sensorRange() ? 'RADAR' : 'PASSIVE';
 }
@@ -880,9 +883,28 @@ function losClear(a, b) {
   return Math.hypot(a.x + u*dx, a.y + u*dy, a.z + u*dz) > R_E + LOS_MARGIN;
 }
 // What the ship knows about a target: its own sensors within LOCAL_R, otherwise the datalink track (or nothing)
-function tgtKnown(t) { if (!t || t.gone) return null; return isLocal(t) ? t : (t.track || null); }
-// Fire control and the laser need own-sensor quality data
+function tgtKnown(t) { if (!t || t.gone) return null; return isLocal(t) ? t : (t.mem || t.track || null); }
+// The laser needs a live sensor contact; fire control (the railgun lead) also accepts a memory track
 const tgtLocal = t => isLocal(t) ? t : null;
+const tgtFire = t => !t || t.gone ? null : isLocal(t) ? t : (t.mem || null);
+/* Contact memory: when a held contact fades (signature drops, range opens, Earth or Moon in the way), fire control
+   keeps a predicted track from its last state for MEM_TIME s (gravity only: a target that burns walks away from
+   it). The lock and the lead stay on that estimate; a fresh contact replaces it. */
+function contactStep(h) {
+  for (const t of targets) {
+    if (t.gone) { t.mem = null; continue; }
+    if (contactKind(t)) { t.held = true; t.mem = null; continue; }
+    if (t.held) {
+      t.held = false;
+      t.mem = Object.assign(Object.create(t), { x: t.x, y: t.y, z: t.z, vx: t.vx, vy: t.vy, vz: t.vz }, { mem: true, memT0: simT });
+      if (t === targets[curTarget]) log(`CONTACT LOST · ${t.name} · MEMORY ${MEM_TIME} S`);
+    } else if (t.mem) {
+      rk4(t.mem, h, 0, 0, 0);
+      if (simT - t.mem.memT0 > MEM_TIME) { t.mem = null; if (t === targets[curTarget]) log(`MEMORY TRACK EXPIRED · ${t.name}`); }
+    }
+  }
+}
+const memLeft = t => t && t.mem ? Math.max(0, MEM_TIME - (simT - t.mem.memT0)) : 0;
 const trackAge = t => t && t.track ? Math.max(0, simT - t.track.tRep) : Infinity;   // intel tracks are stamped at the step's end
 function datalinkStep(h) {
   // Called after the targets have advanced this step, so their states are at time T = simT + h
@@ -1514,7 +1536,7 @@ function shootingSolution(tgt) {
 }
 // Lead point for the current target, relative to the ship (world axes), or null without an intercept
 function leadVector() {
-  const tgt = tgtLocal(targets[curTarget]);   // no fire-control solution beyond own-sensor range
+  const tgt = tgtFire(targets[curTarget]);    // own-sensor contact, or its memory track; no solution on datalink data
   if (!tgt || !hasRole('railgun')) return null;   // the solution is for the railgun
   if (leadCache && leadCache.simT === simT && leadCache.tgt === tgt) return leadCache.L ? leadCache.L.clone() : null;
   const sol = shootingSolution(tgt);
@@ -1542,7 +1564,15 @@ function leadHoldCmd(h) {
   const bd = plan && (plan.frozen || plan.t - simT < 900) ? planBurnDir() : null;   // near a node: hold the burn direction
   const L = bd ? bd.multiplyScalar(1e6) : leadVector();
   const tgt = bd ? true : targets[curTarget];
-  if (!L || !tgt) { leadPrev = null; return null; }
+  if (!L || !tgt) {
+    // Lead lost: keep turning at the last line-of-sight rate for up to MEM_TIME s, so the nose is still near the
+    // lead when the contact comes back
+    if (tgt && leadPrev && leadPrev.tgt === tgt && leadPrev.wLos && simT - leadPrev.t < MEM_TIME) {
+      const w = leadPrev.wLos.clone().applyQuaternion(toBodyQ()), wm = [omega.x, omega.y, omega.z], In = shipI();
+      return [w.x, w.y, w.z].map((v, i) => clamp(In[i]*(v - wm[i])/LEAD_TAU_TIME/rcsTorqueAxis(i), -1, 1));
+    }
+    leadPrev = null; return null;
+  }
   const Lb = L.clone().applyQuaternion(toBodyQ()).normalize();
   const fwd = new THREE.Vector3(0, 0, -1);
   const ang = Math.acos(clamp(fwd.dot(Lb), -1, 1));
@@ -1561,7 +1591,7 @@ function leadHoldCmd(h) {
     wLos = new THREE.Vector3().crossVectors(L, dL).divideScalar(L.lengthSq());
     if (leadPrev.wLos) dwLos = wLos.clone().sub(leadPrev.wLos).divideScalar(h);
   }
-  leadPrev = { tgt, L: L.clone(), wLos: wLos ? wLos.clone() : null };
+  leadPrev = { tgt, L: L.clone(), wLos: wLos ? wLos.clone() : (leadPrev && leadPrev.tgt === tgt ? leadPrev.wLos : null), t: simT };
   const qb = toBodyQ();
   const ff = (wLos || new THREE.Vector3()).clone().applyQuaternion(qb);
   const dff = dwLos.applyQuaternion(qb);
@@ -1795,6 +1825,7 @@ function physicsStep(h) {
     rk4(t, h, a[0], a[1], a[2]);
   }
   enemyPD(h);
+  contactStep(h);
   datalinkStep(h);
   // Interceptors launch automatically at closing torpedoes in range (not in TNG: they are expendable)
   for (const m of INT_MOUNTS) {
@@ -2760,7 +2791,9 @@ function drawTactical(g, W, H, idx) {
 
   let tgtLines = ['TGT  --'];
   const selT = targets[curTarget];
-  if (!cur && selT && !selT.gone && !isLocal(selT)) {   // far target: datalink track
+  if (!cur && selT && !selT.gone && !isLocal(selT) && selT.mem) {   // contact faded: memory track
+    tgtLines = [`TGT ${selT.name}`, `MEMORY ${memLeft(selT).toFixed(0)}s · EST`, `RNG ${fmtDist(rangeTo(selT.mem))}`, 'FCS EST SOL'];
+  } else if (!cur && selT && !selT.gone && !isLocal(selT)) {   // far target: datalink track
     const k = tgtKnown(selT), age = trackAge(selT);
     tgtLines = [`TGT ${selT.name}`, `TRK ${selT.trk} ${age > DL_STALE ? 'STALE' : 'DL'} ${age.toFixed(0)}s`,
       `RNG ${k ? fmtDist(rangeTo(k)) : '--'}`, 'FCS NO SOL · NO CONTACT'];
@@ -3177,7 +3210,7 @@ function drawMap(g, W, H, idx) {
   g.strokeStyle = DIM; g.lineWidth = 2; g.beginPath(); g.moveTo(10, 442); g.lineTo(W - 10, 442); g.stroke();
   if (sel && !sel.gone) {
     const o = tgtKnown(sel), local = isLocal(sel), age = trackAge(sel);
-    const src = local ? 'OWN SENS' : !o ? 'NO TRACK' : age > DL_STALE ? `STALE ${age.toFixed(0)}s` : `DL ${age.toFixed(0)}s`;
+    const src = local ? 'OWN SENS' : sel.mem ? `MEMORY ${memLeft(sel).toFixed(0)}s` : !o ? 'NO TRACK' : age > DL_STALE ? `STALE ${age.toFixed(0)}s` : `DL ${age.toFixed(0)}s`;
     txt(g, 14, 464, `TGT ${sel.trk} ${sel.name}  ${o ? fmtDist(rangeTo(o)) : '--'}  ${src}`, local ? PH : AMB, '20px monospace');
   } else txt(g, 14, 464, 'TGT --', DIM, '20px monospace');
   if (keyBuf) txt(g, W - 14, 464, `TRK ${keyBuf.padEnd(4, '_')}`, AMB, 'bold 20px monospace', 'right');
@@ -4342,7 +4375,7 @@ function drawScope(g, W, H, idx) {
   txt(g, 14, 150, 'AGC', PH, '20px monospace');
   txt(g, 14, 172, 'OFF', PH, '20px monospace');
   const dlOnly = lockOk && !isLocal(targets[curTarget]);   // pointing at a datalink estimate, not a sensor lock
-  txt(g, 80, 92, dlOnly ? 'DL TRK' : lockOk ? 'LOCK' : 'NO LOCK', lockOk ? AMB : PH, '20px monospace');
+  txt(g, 80, 92, dlOnly ? (targets[curTarget].mem ? `MEM ${memLeft(targets[curTarget]).toFixed(0)}s` : 'DL TRK') : lockOk ? 'LOCK' : 'NO LOCK', lockOk ? AMB : PH, '20px monospace');
   txt(g, cx, 92, `${irOn ? 'WHOT' : 'VIS'}   AZ ${(scopeAz*180/Math.PI).toFixed(0)}  EL ${(scopeEl*180/Math.PI).toFixed(0)}`, PH, '20px monospace', 'center');
   txt(g, 700, 92, lockOk ? fmtDist(Math.hypot(tgt.x-ship.x, tgt.y-ship.y, tgt.z-ship.z)) : '--', PH, '20px monospace', 'right');
   txt(g, cx, FY + FH + 20, lockOk ? 'TRACK' : 'POINT', PH, '20px monospace', 'center');
@@ -5670,7 +5703,8 @@ const MAN_PAGES = [
     }, rows: 9 }, { gap: 1 },
     { kv: [['RADIATED HEAT', '+1 PER 16.5 KW'], ['MAIN DRIVE', '+400 AT FULL THRUST'], ['RAILGUN SHOT', '+150 FOR 5 S'], ['MISSILE/TORP', '+80 FOR 5 S'],
       ['LASER OR LPD', '+60'], ['PDC FIRE', '+40 FOR 2 S'], ['RCS', '+3'], ['RADAR ON', '+200']], w: 15 },
-    { gap: 1 }, 'THE SIG BAR ON THE TACTICAL PAGE SHOWS THE RANGE AT WHICH THE ENEMY CAN SEE YOU. THE EARTH AND THE MOON BLOCK ALL SENSORS.'],
+    'THE SIG BAR ON THE TACTICAL PAGE SHOWS THE RANGE AT WHICH THE ENEMY CAN SEE YOU. THE EARTH AND THE MOON BLOCK ALL SENSORS.',
+    'A CONTACT THAT YOU HOLD STAYS TO 1.25 X THE RANGE. IF IT FADES, FIRE CONTROL KEEPS A MEMORY TRACK FOR 30 S (MEM).'],
   // 13 datalink
   () => [{ h: 'CONTACTS AND DATALINK' },
     { b: 'YOUR SENSORS SEE A SHIP BY ITS SIGNATURE. THE BOW RADAR (IF INSTALLED) SEES ALL SHIPS TO 500 KM.' },
