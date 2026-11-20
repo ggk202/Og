@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OG — Cockpit prototype v0.5.4</title>
+<title>OG — Cockpit prototype v0.5.5</title>
 <style>
   html, body { margin:0; height:100%; background:#000; overflow:hidden;
     font-family: ui-monospace, Menlo, Consolas, monospace; color:#cfd8c0; }
@@ -90,7 +90,7 @@
 </head>
 <body>
 <canvas id="gl"></canvas>
-<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.5.4</span></div>
+<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.5.5</span></div>
 <div id="hangar"><div class="load" id="hangarLoad">LOADING SHIP</div>
   <div class="hint">DRAG TO ORBIT · WHEEL TO ZOOM · CLICK A HARDPOINT TO CHOOSE ITS MODULE</div>
   <div class="panel"><h2>HANGAR</h2><div class="sub">LOADOUT · SELECT A HARDPOINT, THEN A MODULE</div>
@@ -883,17 +883,25 @@ function losClear(a, b) {
   return Math.hypot(a.x + u*dx, a.y + u*dy, a.z + u*dz) > R_E + LOS_MARGIN;
 }
 // What the ship knows about a target: its own sensors within LOCAL_R, otherwise the datalink track (or nothing)
-function tgtKnown(t) { if (!t || t.gone) return null; return isLocal(t) ? t : (t.mem || t.track || null); }
+// Stored orbit: an object that cannot change its orbit (fixedOrbit, e.g. a station) is remembered for good once
+// own sensors have seen it; its predicted position is then exact, so it is treated as a contact from then on
+const isSeen = t => isLocal(t) || (!!t && !t.gone && !!t.orbitKnown);
+function tgtKnown(t) { if (!t || t.gone) return null; return isSeen(t) ? t : (t.mem || t.track || null); }
 // The laser needs a live sensor contact; fire control (the railgun lead) also accepts a memory track
 const tgtLocal = t => isLocal(t) ? t : null;
-const tgtFire = t => !t || t.gone ? null : isLocal(t) ? t : (t.mem || null);
+const tgtFire = t => !t || t.gone ? null : isSeen(t) ? t : (t.mem || null);
 /* Contact memory: when a held contact fades (signature drops, range opens, Earth or Moon in the way), fire control
    keeps a predicted track from its last state for MEM_TIME s (gravity only: a target that burns walks away from
    it). The lock and the lead stay on that estimate; a fresh contact replaces it. */
 function contactStep(h) {
   for (const t of targets) {
     if (t.gone) { t.mem = null; continue; }
-    if (contactKind(t)) { t.held = true; t.mem = null; continue; }
+    if (contactKind(t)) {
+      t.held = true; t.mem = null;
+      if (t.fixedOrbit && !t.orbitKnown) { t.orbitKnown = true; log(`${t.name} · ORBIT STORED`); }
+      continue;
+    }
+    if (t.orbitKnown) { t.held = false; continue; }   // no memory track needed: the orbit is known
     if (t.held) {
       t.held = false;
       t.mem = Object.assign(Object.create(t), { x: t.x, y: t.y, z: t.z, vx: t.vx, vy: t.vy, vz: t.vz }, { mem: true, memT0: simT });
@@ -954,7 +962,7 @@ function cycleTarget() {
   const n = targets.length;
   for (let k = 1; k <= n; k++) {
     const i = (curTarget + k) % n;
-    if (isLocal(targets[i])) { curTarget = i; return; }
+    if (isSeen(targets[i])) { curTarget = i; return; }
   }
   log('NO SENSOR CONTACTS · ENTER A TRACK NUMBER');
 }
@@ -1038,7 +1046,7 @@ function planMission1(t0) {
     ship: start, q, arrive: tA,
     targets: () => [
       mkTargetAt('HE-3 DEPOT KORVA', onOrbit(M1.ST_ALT, M1.ST_LEAD), 25, 600, 'HOSTILE',
-        { ...def, objective: true, intel: true, score: 5000, sensor: 1.0, salvo: 2, salvoT: 25, fireRange: 80e3, fireT: 4, sig: 150, pd: 3 }),
+        { ...def, objective: true, intel: true, fixedOrbit: true, score: 5000, sensor: 1.0, salvo: 2, salvoT: 25, fireRange: 80e3, fireT: 4, sig: 150, pd: 3 }),
       mkTargetAt('ORE HAULER MAREK', onOrbit(M1.ST_ALT, M1.ST_LEAD - 6e3), 10, 80, 'NEUTRAL', { score: -2000, sig: 15 }),
       mkTargetAt('PATROL CORVETTE IRIS', onOrbit(M1.ST_ALT, M1.ST_LEAD + 60e3), 6, 200, 'HOSTILE',
         { ...def, score: 1500, sensor: 1.5, salvo: 3, salvoT: 20, fireRange: 80e3, fireT: 6, sig: 20, ai: { ...AI_DEF }, pd: 2, laser: true }),
@@ -2780,11 +2788,11 @@ function drawTactical(g, W, H, idx) {
 
   let cur = null;
   targets.forEach((t, i) => {
-    if (!isLocal(t)) return;                         // beyond own sensors: on the map only
+    if (!isSeen(t)) return;                          // beyond own sensors (and no stored orbit): on the map only
     const b = toB(t.x-ship.x, t.y-ship.y, t.z-ship.z);
-    if (b.z >= 0) return;
     const isCur = i === curTarget;
-    if (isCur) cur = { t, b, r: [t.x-ship.x, t.y-ship.y, t.z-ship.z] };
+    if (isCur) cur = { t, b, r: [t.x-ship.x, t.y-ship.y, t.z-ship.z] };   // the readout covers it even when behind
+    if (b.z >= 0) return;                            // the plot shows only what is ahead
     let px = sx(b), py = sy(b);
     const off = Math.hypot(px - cx, py - cy);
     if (off > R) { px = cx + (px - cx)*R/off; py = cy + (py - cy)*R/off; }   // beyond the range scale: pinned to the rim
@@ -2825,9 +2833,9 @@ function drawTactical(g, W, H, idx) {
     }
     tgtLines = [
       `TGT ${t.name}`,
-      `RNG ${fmtDist(rng)}`,
+      `RNG ${fmtDist(rng)}${isLocal(t) ? '' : ' · ORB'}`,
       `CL  ${closing.toFixed(0)} m/s`,
-      `LEAD ${tt !== null ? tt.toFixed(1)+' s' : 'NO SOL'}`,
+      `LEAD ${tt !== null ? tt.toFixed(1)+' s' : 'NO SOL'}${b.z >= 0 ? ' · BEHIND' : ''}`,
     ];
   }
 
@@ -2971,7 +2979,7 @@ function drawWeapons(g, W, H, idx) {
   y += 12;
   txt(g, 30, y, `CONTACTS · ${radarOn() ? 'RADAR ' + (sensorRange()/1e3).toFixed(0) + ' KM + PASSIVE' : 'PASSIVE'}`, DIM, '21px monospace'); y += 26;
   targets.forEach((t, i) => {
-    if (!isLocal(t) || y > H - 40) return;            // as many as fit
+    if (!isSeen(t) || y > H - 40) return;             // as many as fit
     const b = toBodyQ();
     const rel = new THREE.Vector3(t.x-ship.x, t.y-ship.y, t.z-ship.z);
     const rng = rel.length();
@@ -3041,7 +3049,7 @@ function drawMap(g, W, H, idx) {
   const cx = W/2, cy = 246, k = 190/ext;
   g.save(); g.beginPath(); g.rect(4, 44, W - 8, 396); g.clip();
   const sel = targets[curTarget];
-  const known = targets.filter(t => !t.gone).map(t => ({ t, o: tgtKnown(t), stale: !isLocal(t) && trackAge(t) > DL_STALE }));
+  const known = targets.filter(t => !t.gone).map(t => ({ t, o: tgtKnown(t), stale: !isSeen(t) && trackAge(t) > DL_STALE }));
   let beyond = 0;
   const label = (s2, x, y, col) => txt(g, x + 9, y - 7, s2, col, '18px monospace');
 
@@ -3219,7 +3227,7 @@ function drawMap(g, W, H, idx) {
   g.strokeStyle = DIM; g.lineWidth = 2; g.beginPath(); g.moveTo(10, 442); g.lineTo(W - 10, 442); g.stroke();
   if (sel && !sel.gone) {
     const o = tgtKnown(sel), local = isLocal(sel), age = trackAge(sel);
-    const src = local ? 'OWN SENS' : sel.mem ? `MEMORY ${memLeft(sel).toFixed(0)}s` : !o ? 'NO TRACK' : age > DL_STALE ? `STALE ${age.toFixed(0)}s` : `DL ${age.toFixed(0)}s`;
+    const src = local ? 'OWN SENS' : sel.orbitKnown ? 'ORBIT STORED' : sel.mem ? `MEMORY ${memLeft(sel).toFixed(0)}s` : !o ? 'NO TRACK' : age > DL_STALE ? `STALE ${age.toFixed(0)}s` : `DL ${age.toFixed(0)}s`;
     txt(g, 14, 464, `TGT ${sel.trk} ${sel.name}  ${o ? fmtDist(rangeTo(o)) : '--'}  ${src}`, local ? PH : AMB, '20px monospace');
   } else txt(g, 14, 464, 'TGT --', DIM, '20px monospace');
   if (keyBuf) txt(g, W - 14, 464, `TRK ${keyBuf.padEnd(4, '_')}`, AMB, 'bold 20px monospace', 'right');
@@ -4383,8 +4391,9 @@ function drawScope(g, W, H, idx) {
   txt(g, 14, 128, irOn ? 'GRAY' : 'COLOR', PH, '20px monospace');
   txt(g, 14, 150, 'AGC', PH, '20px monospace');
   txt(g, 14, 172, 'OFF', PH, '20px monospace');
-  const dlOnly = lockOk && !isLocal(targets[curTarget]);   // pointing at a datalink estimate, not a sensor lock
-  txt(g, 80, 92, dlOnly ? (targets[curTarget].mem ? `MEM ${memLeft(targets[curTarget]).toFixed(0)}s` : 'DL TRK') : lockOk ? 'LOCK' : 'NO LOCK', lockOk ? AMB : PH, '20px monospace');
+  const dlOnly = lockOk && !isLocal(targets[curTarget]);
+  const orbOnly = dlOnly && targets[curTarget].orbitKnown;   // pointing at a datalink estimate, not a sensor lock
+  txt(g, 80, 92, orbOnly ? 'ORB' : dlOnly ? (targets[curTarget].mem ? `MEM ${memLeft(targets[curTarget]).toFixed(0)}s` : 'DL TRK') : lockOk ? 'LOCK' : 'NO LOCK', lockOk ? AMB : PH, '20px monospace');
   txt(g, cx, 92, `${irOn ? 'WHOT' : 'VIS'}   AZ ${(scopeAz*180/Math.PI).toFixed(0)}  EL ${(scopeEl*180/Math.PI).toFixed(0)}`, PH, '20px monospace', 'center');
   txt(g, 700, 92, lockOk ? fmtDist(Math.hypot(tgt.x-ship.x, tgt.y-ship.y, tgt.z-ship.z)) : '--', PH, '20px monospace', 'right');
   txt(g, cx, FY + FH + 20, lockOk ? 'TRACK' : 'POINT', PH, '20px monospace', 'center');
