@@ -766,6 +766,51 @@ function enemyPD(h) {
   }
 }
 
+/* ---------- Enemy lasers ----------
+   Ships with `laser: true` fire bursts at the player inside ELASER.range when they have a clear line of sight (and,
+   in a mission, once the alert is up). Meant to make close range unpleasant, never fatal:
+   - the absorbed beam heats the hull (radiators have to work; at THERM.tMax the point-defence guns lock out),
+   - it ablates hull integrity slowly, but never below hullFloor,
+   - each burst may degrade one system on the side facing the shooter, never below sysFloor (nothing goes offline),
+   - each burst costs a little score. */
+const ELASER = { range: 5000, burst: 4, cool: 6, absorbed: 300e3, hullRate: 0.004, hullFloor: 0.4,
+                 sysChance: 0.3, sysDmg: [0.08, 0.15], sysFloor: 0.3, score: -100 };
+let laserHeat = 0, lastLaserHitT = -1e9;
+function enemyLasers(h) {
+  laserHeat = 0;
+  for (const t of targets) {
+    if (!t.laser) continue;
+    const able = !t.gone && t.side === 'HOSTILE' && !(t.needsAlert && !(mission && mission.alert)) && !dead;
+    const r = rangeTo(t), inReach = able && r < ELASER.range && losClear(ship, t) && losClearMoon(ship, t);
+    t.lzT = (t.lzT ?? 0) - h;
+    if (t.lasing) {
+      if (t.lzT <= 0 || !inReach) { t.lasing = false; t.lzT = ELASER.cool; continue; }
+      const f = 1.25 - 0.5*r/ELASER.range;            // closer is worse: 1.25 at contact, 0.75 at the edge
+      laserHeat += ELASER.absorbed*f;
+      if (hullInt > ELASER.hullFloor) hullInt = Math.max(ELASER.hullFloor, hullInt - ELASER.hullRate*f*h);
+      lastLaserHitT = simT;
+    } else if (t.lzT <= 0 && inReach) {
+      t.lasing = true; t.lzT = ELASER.burst; t.lastPdT = simT;
+      log(`LASER ILLUMINATION · ${t.name} · ${fmtDist(r)}`);
+      scoreAdd('LASER DAMAGE', ELASER.score);
+      if (Math.random() < ELASER.sysChance) {          // a system on the exposed side is scorched
+        const from = new THREE.Vector3(t.x - ship.x, t.y - ship.y, t.z - ship.z).applyQuaternion(toBodyQ()).normalize();
+        const cand = DMG_SYSTEMS.filter(sy => damage[sy.id] > ELASER.sysFloor).map(sy => {
+          const d = new THREE.Vector3(...sy.dir), L = d.length();
+          return { sy, w: 0.1 + (L > 0 ? Math.max(0, from.dot(d)/L)**2 : 0.2) };
+        });
+        if (cand.length) {
+          let x = Math.random()*cand.reduce((a, c) => a + c.w, 0), k = 0;
+          while (k < cand.length - 1 && (x -= cand[k].w) > 0) k++;
+          const sy = cand[k].sy, [a, b] = ELASER.sysDmg;
+          damage[sy.id] = Math.max(ELASER.sysFloor, damage[sy.id] - (a + Math.random()*(b - a)));
+          log(`${sy.name} LASER DAMAGE ${(damage[sy.id]*100).toFixed(0)}%`);
+        }
+      }
+    }
+  }
+}
+
 // side: HOSTILE / NEUTRAL / UNKNOWN (display only). `hostile: true` additionally means it fires torpedoes.
 // sig: base signature (radiated heat; 1 = cold), see targetSig
 function mkTarget(name, r, phase, radius, integrity, side = 'UNKNOWN', inc = 0, sig = undefined) {
@@ -898,13 +943,13 @@ function resetTargets() {
     mkTarget('DEBRIS 9F-22',    LEO_R,        -0.0008, 0.8, 15),   // ~5 km behind
     mkTarget('TUG MERIDIAN',    LEO_R + 6000, 0.0045,  5,   120),  // ~27 km ahead
     mkTarget('FRAGMENT C-3',    LEO_R,        0.0003,  0.5, 8),    // ~2 km ahead
-    { ...mkTarget('HOSTILE FRIGATE', LEO_R + 4000, 0.0025, 6, 300, 'HOSTILE'), hostile: true, fireT: 5, ai: { ...AI_DEF }, pd: 2 },   // fires torpedoes
+    { ...mkTarget('HOSTILE FRIGATE', LEO_R + 4000, 0.0025, 6, 300, 'HOSTILE'), hostile: true, fireT: 5, ai: { ...AI_DEF }, pd: 2, laser: true },   // fires torpedoes
     // Distant tracks, beyond own-sensor range: known only through the datalink
     mkTarget('CORVETTE VASK',      LEO_R + 50e3,  0.06,  5, 200, 'HOSTILE'),            // ~450 km ahead
-    mkTarget('GUNSHIP ORDA',       LEO_R + 120e3, -0.12, 6, 250, 'HOSTILE', 0.05),      // ~850 km behind
+    { ...mkTarget('GUNSHIP ORDA',       LEO_R + 120e3, -0.12, 6, 250, 'HOSTILE', 0.05), laser: true },      // ~850 km behind
     mkTarget('TANKER HALCYON',     LEO_R + 300e3, 0.25,  8, 150, 'NEUTRAL', 0.3),       // ~1800 km
     mkTarget('SURVEY MERIDIAN-2',  LEO_R + 800e3, 0.45,  3, 60,  'NEUTRAL', 0.9),       // ~3500 km
-    mkTarget('DESTROYER KORSAKOV', LEO_R + 20e3,  1.1,   9, 400, 'HOSTILE'),            // behind Earth's limb
+    { ...mkTarget('DESTROYER KORSAKOV', LEO_R + 20e3,  1.1,   9, 400, 'HOSTILE'), laser: true },            // behind Earth's limb
   ];
   curTarget = 0;
   assignTrackNumbers();
@@ -962,9 +1007,9 @@ function planMission1(t0) {
         { ...def, objective: true, intel: true, score: 5000, sensor: 1.0, salvo: 2, salvoT: 25, fireRange: 80e3, fireT: 4, sig: 150, pd: 3 }),
       mkTargetAt('ORE HAULER MAREK', onOrbit(M1.ST_ALT, M1.ST_LEAD - 6e3), 10, 80, 'NEUTRAL', { score: -2000, sig: 15 }),
       mkTargetAt('PATROL CORVETTE IRIS', onOrbit(M1.ST_ALT, M1.ST_LEAD + 60e3), 6, 200, 'HOSTILE',
-        { ...def, score: 1500, sensor: 1.5, salvo: 3, salvoT: 20, fireRange: 80e3, fireT: 6, sig: 20, ai: { ...AI_DEF }, pd: 2 }),
+        { ...def, score: 1500, sensor: 1.5, salvo: 3, salvoT: 20, fireRange: 80e3, fireT: 6, sig: 20, ai: { ...AI_DEF }, pd: 2, laser: true }),
       mkTargetAt('PATROL CORVETTE VEX', onOrbit(130e3, M1.ST_LEAD - 300e3), 6, 200, 'HOSTILE',   // 150 km behind the arrival point
-        { ...def, score: 1500, sensor: 1.5, salvo: 3, salvoT: 20, fireRange: 80e3, fireT: 8, sig: 20, ai: { ...AI_DEF }, pd: 2 }),
+        { ...def, score: 1500, sensor: 1.5, salvo: 3, salvoT: 20, fireRange: 80e3, fireT: 8, sig: 20, ai: { ...AI_DEF }, pd: 2, laser: true }),
     ],
   };
 }
@@ -1905,8 +1950,10 @@ function physicsStep(h) {
   brownout = battery <= 0 && loadE > reactorOut();
   battery = clamp(battery, 0, battCapEff());           // damaged capacitors hold less
 
-  /* --- thermal: all electrical load + reactor waste heat; radiators reject by Stefan-Boltzmann --- */
-  const qin = loadE + POWER.reactorWaste*damage.reactor;
+  /* --- enemy lasers on the hull --- */
+  enemyLasers(h);
+  /* --- thermal: all electrical load + reactor waste heat (+ absorbed laser light); radiators reject by Stefan-Boltzmann --- */
+  const qin = loadE + POWER.reactorWaste*damage.reactor + laserHeat;
   const A = radAreaEff();
   const qout = THERM.eps*THERM.sigma*A*(Math.pow(hullT,4) - Math.pow(THERM.tSpace,4));
   const dT = (qin - qout)*h/THERM.capacity;
@@ -2676,7 +2723,9 @@ function drawTactical(g, W, H, idx) {
     txt(g, 264, 447, `${fmtDist(dr)}${extra ? ' ' + extra : ''}`, mission && mission.alert ? RED : col, '17px monospace');
   }
   // Threat summary: closing torpedoes, time to impact of the nearest, PDC state, hull
-  line(threats ? `THREAT ${threats} TORP` : 'THREAT NONE', threats ? RED : DIM);
+  const lasing = targets.filter(t => t.lasing && !t.gone);
+  line(threats || lasing.length ? `THREAT${threats ? ' ' + threats + ' TORP' : ''}${lasing.length ? ' LASER' : ''}` : 'THREAT NONE',
+       threats || lasing.length ? RED : DIM);
   line(tti !== null ? `TTI ${tti.toFixed(1)}s ${fmtDist(tRng)}` : 'TTI --', tti !== null && tti < 20 ? RED : PH);
   const pdcS = m => ({ NONE: '--', OFFLINE: 'OFF', EMPTY: 'EMP', OVERHEAT: 'HOT', SAFE: 'SAFE', FIRING: 'FIRE', READY: 'RDY' })[pdcStatus(m)];
   line(PDC_MOUNTS.length ? 'PDC ' + PDC_MOUNTS.map(m => `${m.tag} ${pdcS(m)}`).join(' ') : 'PDC NONE',
@@ -3793,6 +3842,35 @@ function drawScope(g, W, H, idx) {
     g.beginPath();
     g.moveTo(leadP.x, leadP.y - 8); g.lineTo(leadP.x + 8, leadP.y); g.lineTo(leadP.x, leadP.y + 8); g.lineTo(leadP.x - 8, leadP.y); g.closePath();
     g.stroke();
+  }
+  // Laser glare: a ship firing its laser at us floods the sensor. A blinding core with a halo, diffraction spikes
+  // from the secondary-mirror vanes, a vertical blooming smear down the sensor and a wash over the whole frame.
+  // Stray light reaches the sensor even when the shooter is just outside the field. Weaker in IR (other band).
+  for (const t of targets) {
+    if (!t.lasing || t.gone) continue;
+    const v = new THREE.Vector3(t.x-ship.x, t.y-ship.y, t.z-ship.z).applyQuaternion(bq), pp = projU(v);
+    if (!pp) continue;
+    const off = Math.acos(clamp(-v.clone().normalize().z, -1, 1));
+    const near = clamp(1 - (off - SCOPE_FOV)/(2*SCOPE_FOV), 0, 1);   // full inside the field, fading beyond it
+    if (near <= 0) continue;
+    const I = near*(irOn ? 0.5 : 1)*(0.85 + 0.15*Math.random());
+    g.save();
+    g.globalCompositeOperation = 'lighter';
+    g.fillStyle = `rgba(255,240,255,${0.3*I})`; g.fillRect(FX, FY, FW, FH);
+    const hr = R*(0.6 + 0.3*Math.random());
+    const gr = g.createRadialGradient(pp.x, pp.y, 0, pp.x, pp.y, hr);
+    gr.addColorStop(0, `rgba(255,255,255,${I})`); gr.addColorStop(0.08, `rgba(255,250,255,${0.95*I})`);
+    gr.addColorStop(0.3, `rgba(255,210,255,${0.35*I})`); gr.addColorStop(1, 'rgba(255,200,255,0)');
+    g.fillStyle = gr; g.beginPath(); g.arc(pp.x, pp.y, hr, 0, Math.PI*2); g.fill();
+    for (let i = 0; i < 6; i++) {                    // diffraction spikes
+      const a = i*Math.PI/3 + Math.PI/12, L = R*(1.4 + 0.4*Math.random());
+      const sg2 = g.createLinearGradient(pp.x, pp.y, pp.x + Math.cos(a)*L, pp.y + Math.sin(a)*L);
+      sg2.addColorStop(0, `rgba(255,255,255,${0.9*I})`); sg2.addColorStop(1, 'rgba(255,220,255,0)');
+      g.strokeStyle = sg2; g.lineWidth = 3; g.beginPath(); g.moveTo(pp.x, pp.y); g.lineTo(pp.x + Math.cos(a)*L, pp.y + Math.sin(a)*L); g.stroke();
+    }
+    g.fillStyle = `rgba(255,255,255,${0.55*I})`;     // sensor blooming: charge spills along the column
+    g.fillRect(pp.x - 3, FY, 6, FH);
+    g.restore();
   }
   g.restore();
   // Frame and aim box
