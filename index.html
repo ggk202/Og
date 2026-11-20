@@ -332,6 +332,7 @@ const TORP_ACCEL = 40, TORP_BURN = 30, TORP_KILL_R = 1.5, TORP_HULL_R = 20, HOST
 let torpedoes = [], tracers = [], hullHits = 0;
 let eTracers = [];                                   // enemy point-defence rounds (they hunt player ordnance)
 let frags = [], fireballs = [];                      // debris fragments and fireballs from kills
+let spray = [];                                      // fine shrapnel from railgun hits (visual only, a few seconds)
 const FRAG_MAX = 160;
 // Enemy ships: thrust (m/s^2) and delta-v budget for manoeuvring; point defence against player ordnance
 const AI_DEF = { acc: 4, dv: 1500 };
@@ -966,7 +967,7 @@ function resetTargets() {
   for (const t of targets) if (t.intel) t.track = Object.assign(Object.create(t), { x: t.x, y: t.y, z: t.z, vx: t.vx, vy: t.vy, vz: t.vz }, { tRep: simT, sat: 'INTEL', intel: true });
   if (missionPlan) curTarget = Math.max(0, targets.findIndex(t => t.objective));
   flashes = [];
-  torpedoes = []; tracers = []; eTracers = []; frags = []; fireballs = []; hullHits = 0;
+  torpedoes = []; tracers = []; eTracers = []; frags = []; fireballs = []; spray = []; hullHits = 0;
 }
 resetTargets();
 
@@ -1825,9 +1826,11 @@ function physicsStep(h) {
         const ke = 0.5*WEAPON.railMass*vr*vr;
         if (masterMode === 'ON') t.integrity -= ke/WEAPON.railDmgDiv;   // TNG fires training rounds: no damage
         {                                            // where it struck: the slug's closest point to the target
-          const ax = p.x - p.px, ay = p.y - p.py, az = p.z - p.pz, aa = ax*ax + ay*ay + az*az || 1;
-          const k = clamp(((t.x - p.px)*ax + (t.y - p.py)*ay + (t.z - p.pz)*az)/aa, 0, 1);
-          recordHit(t, 'rail', [p.px + ax*k, p.py + ay*k, p.pz + az*k], v3arr(new THREE.Vector3(p.vx-t.vx, p.vy-t.vy, p.vz-t.vz).normalize()));
+          // in the target's frame over the step (both moved), placed relative to its current position
+          const r0 = [p.px - t.px, p.py - t.py, p.pz - t.pz], r1 = [p.x - t.x, p.y - t.y, p.z - t.z];
+          const ax = r1[0] - r0[0], ay = r1[1] - r0[1], az = r1[2] - r0[2], aa = ax*ax + ay*ay + az*az || 1;
+          const k = clamp(-(r0[0]*ax + r0[1]*ay + r0[2]*az)/aa, 0, 1);
+          recordHit(t, 'rail', [t.x + r0[0] + ax*k, t.y + r0[1] + ay*k, t.z + r0[2] + az*k], v3arr(new THREE.Vector3(p.vx-t.vx, p.vy-t.vy, p.vz-t.vz).normalize()));
         }
         // Hit flash on every hit, practice rounds included
         flashes.push({ x: t.x, y: t.y, z: t.z, age: 0, dur: 0.3, peak: 0.7, kind: 'hit' });
@@ -3621,6 +3624,7 @@ const toWorldL = (F, q) => F.f.clone().multiplyScalar(q[0]).addScaledVector(F.up
 // Where a weapon struck, kept for the kill that may follow; a hit that does not kill leaves a hole that vents.
 function recordHit(t, kind, pos, dir) {
   t.lastHit = { kind, pos, dir, t: simT };
+  if (kind === 'rail') railSpray(t, pos, dir);
   if (t.integrity > 0 && masterMode === 'ON') addHole(t, t.lastHit);
 }
 function addHole(t, hit) {
@@ -3669,6 +3673,28 @@ function splitModel(model, n, d) {
     sides.push(faces);
   }
   return sides;
+}
+// A railgun slug punching through throws a fan of fine shrapnel out of the far side: a narrow cone along the
+// shot, fast, catching the sunlight. Visual only; gone after a few seconds.
+const SPRAY_LIFE = 5;
+function railSpray(t, pos, dir) {
+  const d = new THREE.Vector3(...dir), exit = new THREE.Vector3(...pos).addScaledVector(d, (t.radius || 5)*0.5);
+  for (let i = 0; i < 70; i++) {
+    const v = d.clone().addScaledVector(rndUnit(), 0.08 + 0.22*Math.random()**2).normalize().multiplyScalar(8 + 55*Math.random()**1.5);   // a few ship lengths a second
+    spray.push({ x: exit.x, y: exit.y, z: exit.z, vx: t.vx + v.x, vy: t.vy + v.y, vz: t.vz + v.z, t0: simT,
+                 ph: Math.random()*6.3, spin: 3 + 12*Math.random(), size: 0.6 + Math.random() });
+  }
+  if (spray.length > 600) spray.splice(0, spray.length - 600);
+}
+// Sunlight on a small object at world position P seen from the ship: 0 in Earth's shadow, otherwise brighter when
+// the sun is behind the viewer (back-scatter), with a tumbling glint
+function sunlit(P, ph, spin) {
+  const sd = P.x*SUN_DIR.x + P.y*SUN_DIR.y + P.z*SUN_DIR.z;
+  if (sd < 0 && Math.hypot(P.x - SUN_DIR.x*sd, P.y - SUN_DIR.y*sd, P.z - SUN_DIR.z*sd) < R_E) return 0;   // eclipsed
+  const vx = ship.x - P.x, vy = ship.y - P.y, vz = ship.z - P.z, vl = Math.hypot(vx, vy, vz) || 1;
+  const cphase = (vx*SUN_DIR.x + vy*SUN_DIR.y + vz*SUN_DIR.z)/vl;     // 1: sun behind us, fully lit face
+  const glint = Math.max(0, Math.sin(ph + spin*simT))**6;
+  return clamp(0.25 + 0.45*(1 + cphase)/2 + 0.6*glint, 0, 1);
 }
 const rndUnit = () => { const v = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5); return v.lengthSq() > 1e-6 ? v.normalize() : new THREE.Vector3(1, 0, 0); };
 // A spray of small fragments: random directions, or a cone about `axis`
@@ -3777,14 +3803,18 @@ function debrisStep(h) {
       t.lastBump = simT; if (applyCollision(t, 0.12, 0.3, `COLLISION · ${t.name}`)) return;
     }
   }
-  for (const fr of frags) { fr.px = fr.x; fr.py = fr.y; fr.pz = fr.z; rk4(fr, h, 0, 0, 0); }
+  // Anything spawned this step is already at the end-of-step position: move it from the next step on
+  for (const fr of frags) { fr.px = fr.x; fr.py = fr.y; fr.pz = fr.z; if (fr.t0 !== simT) rk4(fr, h, 0, 0, 0); }
   for (const fr of frags) {
     if (fr.dead) continue;
     if (segDist(fr, ship) < 6) { fr.dead = true; if (applyCollision(fr, 0.02 + 0.04*fr.size, fr.size > 0.4 ? 0.15 : 0, 'DEBRIS STRIKE')) return; }
     else if (Math.hypot(fr.x - ship.x, fr.y - ship.y, fr.z - ship.z) > 400e3) fr.dead = true;   // far away: forget it
   }
   frags = frags.filter(fr => !fr.dead);
+  for (const fb of fireballs) if (fb.t0 !== simT) { fb.x += fb.vx*h; fb.y += fb.vy*h; fb.z += fb.vz*h; }   // straight lines: they last seconds
+  for (const sp of spray) if (sp.t0 !== simT) { sp.x += sp.vx*h; sp.y += sp.vy*h; sp.z += sp.vz*h; }
   fireballs = fireballs.filter(fb => simT - fb.t0 < fb.dur);
+  spray = spray.filter(sp => simT - sp.t0 < SPRAY_LIFE);
 }
 const SCOPE_AZ_MAX = 60 * Math.PI/180, SCOPE_EL_MAX = 45 * Math.PI/180, SCOPE_SLEW = 25 * Math.PI/180;
 // Scope view rotation: the gimbal turns the boresight, so the view is taken in the gimbal's frame
@@ -4002,7 +4032,7 @@ function drawScope(g, W, H, idx) {
   const resG = Math.max(1.2, (irOn ? SCOPE_RES_IR : SCOPE_RES)/(SCOPE_FOV/R));
   for (const fb of fireballs) {
     const a = (simT - fb.t0)/fb.dur; if (a < 0 || a > 1) continue;
-    const dt = simT - fb.t0, pos = new THREE.Vector3(fb.x + fb.vx*dt - ship.x, fb.y + fb.vy*dt - ship.y, fb.z + fb.vz*dt - ship.z);
+    const pos = new THREE.Vector3(fb.x - ship.x, fb.y - ship.y, fb.z - ship.z);
     const pp = projU(pos.clone().applyQuaternion(bq)); if (!pp) continue;
     const rr = Math.max(3, fb.rmax*Math.sqrt(a)*pxPerM(pos.length())) + resG, al = (1 - a)*(1 - a);
     const gr = g.createRadialGradient(pp.x, pp.y, 0, pp.x, pp.y, rr);
@@ -4011,10 +4041,27 @@ function drawScope(g, W, H, idx) {
     gr.addColorStop(1, 'rgba(0,0,0,0)');
     g.save(); g.globalCompositeOperation = 'lighter'; g.fillStyle = gr; g.beginPath(); g.arc(pp.x, pp.y, rr, 0, Math.PI*2); g.fill(); g.restore();
   }
-  // Fragments: tumbling shards that glint as they turn; hot ones glow for half a minute
+  // Railgun shrapnel: short streaks along their motion, lit by the sun (dark in Earth's shadow), white-hot at first
+  g.save(); g.globalCompositeOperation = 'lighter'; g.lineCap = 'round';
+  for (const sp of spray) {
+    const a = simT - sp.t0, P = new THREE.Vector3(sp.x, sp.y, sp.z);
+    const rel = P.clone().sub(new THREE.Vector3(ship.x, ship.y, ship.z));
+    const p1 = projU(rel.clone().applyQuaternion(bq)); if (!p1) continue;
+    const vr = new THREE.Vector3(sp.vx - ship.vx, sp.vy - ship.vy, sp.vz - ship.vz);
+    const p0 = projU(rel.clone().addScaledVector(vr, -Math.min(a, 0.25)).applyQuaternion(bq)); if (!p0) continue;   // motion streak
+    const hot = Math.exp(-a/0.8), fade = 1 - a/SPRAY_LIFE, lit = sunlit(P, sp.ph, sp.spin);
+    let r, gg, b, al;
+    if (irOn) { r = gg = b = 255; al = (0.15 + 0.85*hot)*fade; }
+    else { r = 255; gg = 240 - 60*hot; b = 220 - 150*hot; al = Math.max(lit, hot)*fade; }
+    if (al < 0.03) continue;
+    g.strokeStyle = `rgba(${r|0},${gg|0},${b|0},${al.toFixed(3)})`; g.lineWidth = Math.max(1, sp.size*Math.min(2, pxPerM(rel.length())*0.15));
+    g.beginPath(); g.moveTo(p0.x, p0.y); g.lineTo(p1.x + 0.01, p1.y); g.stroke();
+  }
+  g.restore();
+  // Fragments: tumbling shards that glint as they turn in the sunlight; hot ones glow for half a minute
   for (const fr of frags) {
     const v = new THREE.Vector3(fr.x-ship.x, fr.y-ship.y, fr.z-ship.z), pp = proj(v.clone().applyQuaternion(bq)); if (!pp) continue;
-    const age = simT - fr.t0, hot = fr.hot*Math.exp(-age/30), glint = 0.35 + 0.65*Math.max(0, Math.sin(fr.ph + fr.spin*simT))**4;
+    const age = simT - fr.t0, hot = fr.hot*Math.exp(-age/30), glint = sunlit(new THREE.Vector3(fr.x, fr.y, fr.z), fr.ph, fr.spin);
     const sz = Math.max(1, fr.size*pxPerM(v.length()));
     let col;
     if (irOn) { const c = 60 + 195*Math.max(hot, 0.1); col = `rgb(${c|0},${c|0},${c|0})`; }
