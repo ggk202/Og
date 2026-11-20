@@ -4075,9 +4075,16 @@ function drawScope(g, W, H, idx) {
     for (let i = 0; i < 7; i++) g.fillRect(p.x + Math.sin(i*2.4 + dc.age)*sp, p.y + Math.cos(i*3.1 + dc.age*0.7)*sp, 1.5, 1.5);
   }
   // Point-defence tracers and hostile torpedoes: a streak from the last position to the current one
+  // Streaks are motion blur over a short exposure (relative to our ship), not the whole physics step, and are
+  // capped on screen so they stay short at high zoom
+  const EXPO = 1/120, STREAK_MAX = 28;
   const drawTrail = (o, col, w, dotR) => {
-    const p1 = projU(new THREE.Vector3(o.x-ship.x, o.y-ship.y, o.z-ship.z).applyQuaternion(bq));
-    const p0 = projU(new THREE.Vector3(o.px-ship.x, o.py-ship.y, o.pz-ship.z).applyQuaternion(bq));
+    const rel = new THREE.Vector3(o.x-ship.x, o.y-ship.y, o.z-ship.z);
+    const p1 = projU(rel.clone().applyQuaternion(bq));
+    let p0 = projU(rel.clone().addScaledVector(new THREE.Vector3(o.vx-ship.vx, o.vy-ship.vy, o.vz-ship.vz), -EXPO).applyQuaternion(bq));
+    if (p0 && p1) { const L = Math.hypot(p1.x - p0.x, p1.y - p0.y);
+      if (L > STREAK_MAX) p0 = { x: p1.x + (p0.x - p1.x)*STREAK_MAX/L, y: p1.y + (p0.y - p1.y)*STREAK_MAX/L };
+      if (L < 1.5) p0 = { x: p1.x - 0.75, y: p1.y }; }
     if (p0 && p1) { g.strokeStyle = col; g.lineWidth = w; g.beginPath(); g.moveTo(p0.x, p0.y); g.lineTo(p1.x, p1.y); g.stroke(); }
     if (dotR && p1) { g.fillStyle = col; g.beginPath(); g.arc(p1.x, p1.y, dotR, 0, Math.PI*2); g.fill(); }
   };
@@ -4090,10 +4097,12 @@ function drawScope(g, W, H, idx) {
     const c = tp.cmd, cm = c ? Math.hypot(c[0], c[1], c[2]) : 0;
     if (cm > 1) {
       const rel = new THREE.Vector3(tp.x-ship.x, tp.y-ship.y, tp.z-ship.z), d = rel.length();
-      const len = d*0.004*(cm/TORP_ACCEL)*(0.7 + 0.6*Math.random());
+      const len = 12*(cm/TORP_ACCEL)*(0.7 + 0.6*Math.random());   // a few torpedo lengths of exhaust
       const tail = rel.clone().add(new THREE.Vector3(-c[0], -c[1], -c[2]).multiplyScalar(len/cm));
-      const p1 = proj(rel.applyQuaternion(bq)), p2 = proj(tail.applyQuaternion(bq));
-      if (p1 && p2) {
+      const p1 = proj(rel.applyQuaternion(bq)); let p2 = projU(tail.applyQuaternion(bq));
+      if (p1 && p2) {                                // at least a visible flicker far away, at most a short flame close up
+        const L = Math.hypot(p2.x - p1.x, p2.y - p1.y) || 1, Lc = clamp(L, 4, STREAK_MAX);
+        p2 = { x: p1.x + (p2.x - p1.x)*Lc/L, y: p1.y + (p2.y - p1.y)*Lc/L };
         g.strokeStyle = irOn ? 'rgba(255,255,255,0.9)' : 'rgba(255,220,150,0.9)'; g.lineWidth = 1.5;
         g.beginPath(); g.moveTo(p1.x, p1.y); g.lineTo(p2.x, p2.y); g.stroke();
       }
@@ -4345,12 +4354,7 @@ function animateCockpit(dt) {
     const rate = SCOPE_SLEW*sdt;
     scopeAz += clamp(azT - scopeAz, -rate, rate);
     scopeEl += clamp(elT - scopeEl, -rate, rate);
-    // Mild shake while an explosion is in view, fading with the blast
-    if (kill && aimAt === kill) {
-      const amp = 0.004 * (1 - kill.age/kill.dur);
-      scopeShakeAz = (Math.random()*2 - 1) * amp;
-      scopeShakeEl = (Math.random()*2 - 1) * amp;
-    } else { scopeShakeAz = 0; scopeShakeEl = 0; }
+    scopeShakeAz = 0; scopeShakeEl = 0;              // no shake on kills
   }
   // Laser gimbal: slaved to the locked target within a few degrees of the nose, stowed when unlocked
   {
