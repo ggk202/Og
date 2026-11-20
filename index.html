@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OG — Cockpit prototype v0.10.0</title>
+<title>OG — Cockpit prototype v0.11.0</title>
 <style>
   html, body { margin:0; height:100%; background:#000; overflow:hidden;
     font-family: ui-monospace, Menlo, Consolas, monospace; color:#cfd8c0; }
@@ -93,7 +93,7 @@
 </head>
 <body>
 <canvas id="gl"></canvas>
-<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.10.0</span></div>
+<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.11.0</span></div>
 <div id="hangar"><div class="load" id="hangarLoad">LOADING SHIP</div>
   <div class="hint">DRAG TO ORBIT · WHEEL TO ZOOM · CLICK A HARDPOINT TO CHOOSE ITS MODULE</div>
   <div class="panel"><h2>HANGAR</h2><div class="sub" id="hullName"></div><div id="hullSel"></div><div class="sub">LOADOUT · SELECT A HARDPOINT, THEN A MODULE</div>
@@ -573,7 +573,7 @@ function restartAfterDeath() {
   mainProp = SHIP.mainProp0; rcsProp = SHIP.rcsProp0; podProp = tankProp0Total(); podsOn = tankCount() > 0;
   leadHold = false; leadPrev = null; hullHits = 0;
   dock = { state: 'FREE', capArmed: false, lights: true, t: 0, sepArmT: -1e9, prop: 0, g: null };
-  BA = null;
+  BA = null; ELEV = null;
   updateSunDir();
   for (const t of targets) if (t.hostile) t.fireT = 10;
   const el = document.getElementById('death');
@@ -1273,6 +1273,170 @@ const V3 = a => new THREE.Vector3(a[0], a[1], a[2]);
 // Mars' north pole (IAU: RA 317.68 deg, Dec 52.89 deg; the game frame is Earth-equatorial)
 const MARS_POLE = (() => { const ra = 317.68*Math.PI/180, de = 52.89*Math.PI/180; return new THREE.Vector3(Math.cos(de)*Math.cos(ra), Math.cos(de)*Math.sin(ra), Math.sin(de)); })();
 
+
+/* ---------- Mars-fixed frame, surface sites and the space elevator ----------
+   Mars turns once in 88,642.66 s about MARS_POLE. MARS_X/MARS_Y span its equator; longitude 0 lies along MARS_X at
+   T+0. Pinned objects (surface sites, the parts of the intact elevator) take their state from t.pin(time) instead
+   of falling under gravity. */
+const MARS_OMEGA = 2*Math.PI/88642.66, R_AREOSTAT = Math.cbrt(4.282837e13/(MARS_OMEGA*MARS_OMEGA));   // GM_MARS (defined further down)
+const MARS_X = new THREE.Vector3().crossVectors(MARS_POLE, new THREE.Vector3(0, 0, 1)).normalize();
+const MARS_Y = new THREE.Vector3().crossVectors(MARS_POLE, MARS_X);
+const marsEq = a => MARS_X.clone().multiplyScalar(Math.cos(a)).addScaledVector(MARS_Y, Math.sin(a));
+// A point turning with Mars at radius r (from its centre) and longitude lon, at time t
+function marsFixedState(lon, r, t) {
+  const a = lon + MARS_OMEGA*t, p = marsEq(a), e = marsEq(a + Math.PI/2), mp = marsPos(t), mv = marsVel(t), v = MARS_OMEGA*r;
+  return { x: mp[0] + p.x*r, y: mp[1] + p.y*r, z: mp[2] + p.z*r, vx: mv[0] + e.x*v, vy: mv[1] + e.y*v, vz: mv[2] + e.z*v };
+}
+// Circular orbit about Mars: altitude, phase along it from MARS_X, inclination to the equator (node on MARS_X)
+function marsOrbitState(alt, phase, inc, t) {
+  const r = R_MARS + alt, v = Math.sqrt(GM_MARS/r), mp = marsPos(t), mv = marsVel(t);
+  const ex = MARS_X, ey = MARS_Y.clone().multiplyScalar(Math.cos(inc)).addScaledVector(MARS_POLE, Math.sin(inc));
+  const p = ex.clone().multiplyScalar(Math.cos(phase)).addScaledVector(ey, Math.sin(phase));
+  const d = ex.clone().multiplyScalar(-Math.sin(phase)).addScaledVector(ey, Math.cos(phase));
+  return { x: mp[0] + p.x*r, y: mp[1] + p.y*r, z: mp[2] + p.z*r, vx: mv[0] + d.x*v, vy: mv[1] + d.y*v, vz: mv[2] + d.z*v };
+}
+/* The elevator: a tether from the anchor on the equator (longitude ELEV_DEF.lon) straight out through areostationary
+   height to the counterweight, turning rigidly with Mars while intact. Destroying the splice node cuts it there.
+   Collapse: both pieces become chains of point masses (rope: links may slacken, not stretch) under Mars' gravity in
+   a Mars-centred frame. The lower piece stays tied to the anchor; below areostationary height it is slower than
+   orbital speed and falls, gaining eastward speed as it drops, and drapes along the equator. Nodes that reach the
+   ground stop there (turning with Mars). The upper piece, above areostationary height overall, is flung outward with
+   the hub and counterweight. Anything a moving link passes within ELEV_KILL_R of is destroyed; surface sites within
+   ELEV_GROUND_R of where it lands are destroyed. */
+const ELEV_DEF = { lon: 0, rCW: 30000e3, nodeAlt: 9000e3, NL: 56, NU: 36, dt: 4 };
+const ELEV_KILL_R = 2000, ELEV_GROUND_R = 150e3;
+let ELEV = null;
+const elevIntactPos = (r, t) => marsFixedState(ELEV_DEF.lon, r, t);
+function makeChain(r0, r1, n, t) {
+  const C = { p: [], v: [], w: [], landed: [], L0: (r1 - r0)/(n - 1) };
+  const a = ELEV_DEF.lon + MARS_OMEGA*t, e = marsEq(a), en = marsEq(a + Math.PI/2);
+  for (let i = 0; i < n; i++) {
+    const r = r0 + i*C.L0;
+    C.p.push([e.x*r, e.y*r, e.z*r]); C.v.push([en.x*MARS_OMEGA*r, en.y*MARS_OMEGA*r, en.z*MARS_OMEGA*r]); C.w.push(1); C.landed.push(false);
+  }
+  return C;
+}
+// Rotate a Mars-centred vector with the planet by angle a (Rodrigues about the pole)
+function rotPole(v, a) {
+  const k = MARS_POLE, c = Math.cos(a), sn = Math.sin(a), d = k.x*v[0] + k.y*v[1] + k.z*v[2];
+  const cx = k.y*v[2] - k.z*v[1], cy = k.z*v[0] - k.x*v[2], cz = k.x*v[1] - k.y*v[0];
+  return [v[0]*c + cx*sn + k.x*d*(1 - c), v[1]*c + cy*sn + k.y*d*(1 - c), v[2]*c + cz*sn + k.z*d*(1 - c)];
+}
+function chainStep(C, dt, anchorP) {
+  const n = C.p.length, q = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const p = C.p[i];
+    if (C.landed[i]) { q[i] = rotPole(p, MARS_OMEGA*dt); continue; }
+    if (C.w[i] === 0) { q[i] = anchorP; continue; }
+    const r2 = p[0]*p[0] + p[1]*p[1] + p[2]*p[2], f = -GM_MARS/(r2*Math.sqrt(r2)), v = C.v[i];
+    v[0] += f*p[0]*dt; v[1] += f*p[1]*dt; v[2] += f*p[2]*dt;
+    q[i] = [p[0] + v[0]*dt, p[1] + v[1]*dt, p[2] + v[2]*dt];
+  }
+  const wOf = i => C.landed[i] ? 0 : C.w[i];
+  for (let it = 0; it < 8; it++) for (let j = 0; j < n - 1; j++) {
+    const a = q[j], b = q[j + 1], dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2], L = Math.hypot(dx, dy, dz);
+    if (L <= C.L0) continue;                         // a rope only pulls
+    const wa = wOf(j), wb = wOf(j + 1), ws = wa + wb; if (ws === 0) continue;
+    const k = (L - C.L0)/L/ws;
+    if (wa) q[j] = [a[0] + dx*k*wa, a[1] + dy*k*wa, a[2] + dz*k*wa];
+    if (wb) q[j + 1] = [b[0] - dx*k*wb, b[1] - dy*k*wb, b[2] - dz*k*wb];
+  }
+  const landedNow = [];
+  for (let i = 0; i < n; i++) {
+    if (C.landed[i] || C.w[i] === 0) { C.p[i] = q[i]; continue; }
+    const r = Math.hypot(...q[i]);
+    if (r < R_MARS) {
+      const k = R_MARS/r; q[i] = [q[i][0]*k, q[i][1]*k, q[i][2]*k]; C.landed[i] = true; landedNow.push(i);
+      C.v[i] = [0, 0, 0];
+    } else C.v[i] = [(q[i][0] - C.p[i][0])/dt, (q[i][1] - C.p[i][1])/dt, (q[i][2] - C.p[i][2])/dt];
+    C.p[i] = q[i];
+  }
+  return landedNow;
+}
+// Mars-centred chain node -> absolute state
+function chainState(C, i, t) {
+  const mp = marsPos(t), mv = marsVel(t), p = C.p[i], v = C.landed[i] ? (() => { const e = new THREE.Vector3(...p).normalize().cross(MARS_POLE).negate(); return [e.x*MARS_OMEGA*R_MARS, e.y*MARS_OMEGA*R_MARS, e.z*MARS_OMEGA*R_MARS]; })() : C.v[i];
+  return { x: mp[0] + p[0], y: mp[1] + p[1], z: mp[2] + p[2], vx: mv[0] + v[0], vy: mv[1] + v[1], vz: mv[2] + v[2] };
+}
+function elevCut(t) {
+  const rc = R_MARS + ELEV_DEF.nodeAlt;
+  const L = makeChain(R_MARS, rc, ELEV_DEF.NL, t), U = makeChain(rc, ELEV_DEF.rCW, ELEV_DEF.NU, t);
+  L.w[0] = 0;                                        // tied to the anchor
+  const hubI = Math.round((R_AREOSTAT - rc)/U.L0);
+  U.w[hubI] = 0.25; U.w[U.p.length - 1] = 0.03;      // the hub and the counterweight are the heavy points
+  ELEV = { ...ELEV, intact: false, tCut: t, lower: L, upper: U, hubI, acc: 0, kills: 0, upperUntil: t + 8*3600 };
+  for (const tg of targets) {
+    if (tg.elevPart === 'hub' && !tg.gone) tg.pin = tt => chainState(ELEV.upper, ELEV.hubI, tt);
+    if (tg.elevPart === 'cw' && !tg.gone) tg.pin = tt => chainState(ELEV.upper, ELEV.upper.p.length - 1, tt);
+  }
+  log('TETHER CUT · THE LOWER TETHER IS FALLING'); log('ELEVATOR HUB AND COUNTERWEIGHT FLUNG OUTWARD');
+  if (mission) scoreAdd('ELEVATOR CUT', 3000);
+  sfx.klaxon();
+}
+// Destroy a target struck by the tether (a hypervelocity cut: it breaks up like a railgun hit)
+function tetherKill(tg, dirW) {
+  if (tg.gone || tg.integrity <= 0) return;
+  tg.integrity = 0; tg.lastHit = { kind: 'rail', pos: [tg.x, tg.y, tg.z], dir: dirW, t: simT };
+  log(`${tg.name} · STRUCK BY THE TETHER`);
+  ELEV.kills++; if (mission) scoreAdd('TETHER COLLATERAL', 400);
+}
+function elevatorStep(h) {
+  if (!ELEV) return;
+  if (ELEV.intact) {
+    const node = targets.find(t => t.elevPart === 'node');
+    if (!node || node.gone || node.integrity <= 0) elevCut(simT);
+    return;
+  }
+  ELEV.acc += h;
+  let steps = 0;
+  while (ELEV.acc >= ELEV_DEF.dt && steps++ < 3000) {
+    ELEV.acc -= ELEV_DEF.dt;
+    const tNow = simT + h - ELEV.acc;
+    const anc = marsFixedState(ELEV_DEF.lon, R_MARS, tNow), mp = marsPos(tNow);
+    const landed = chainStep(ELEV.lower, ELEV_DEF.dt, [anc.x - mp[0], anc.y - mp[1], anc.z - mp[2]]);
+    if (tNow < ELEV.upperUntil) chainStep(ELEV.upper, ELEV_DEF.dt, null);
+    else if (!ELEV.upperFree) {                       // far out now: the hub and counterweight continue on their own orbits
+      ELEV.upperFree = true;
+      for (const tg of targets) if (tg.elevPart === 'hub' || tg.elevPart === 'cw') delete tg.pin;
+    }
+    // Ground strikes: surface sites near a landing point are destroyed
+    for (const i of landed) {
+      const lp = ELEV.lower.p[i];
+      for (const tg of targets) if (tg.surface && !tg.gone && tg.integrity > 0) {
+        const d = Math.hypot(tg.x - mp[0] - lp[0], tg.y - mp[1] - lp[1], tg.z - mp[2] - lp[2]);
+        if (d < ELEV_GROUND_R) tetherKill(tg, [0, 0, 1]);
+      }
+    }
+    // Moving links sweep through anything close (the ship included)
+    const sweep = (C, o) => {
+      const rx = o.x - mp[0], ry = o.y - mp[1], rz = o.z - mp[2];
+      for (let j = 0; j < C.p.length - 1; j++) {
+        if (C.landed[j] && C.landed[j + 1]) continue;
+        const a = C.p[j], b = C.p[j + 1], dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2], dd = dx*dx + dy*dy + dz*dz;
+        const u = dd > 0 ? clamp(((rx - a[0])*dx + (ry - a[1])*dy + (rz - a[2])*dz)/dd, 0, 1) : 0;
+        if (Math.hypot(rx - a[0] - u*dx, ry - a[1] - u*dy, rz - a[2] - u*dz) < ELEV_KILL_R) return [dx, dy, dz];
+      }
+      return null;
+    };
+    for (const tg of targets) {
+      if (tg.gone || tg.integrity <= 0 || tg.surface || tg.elevPart || tg.wreck) continue;
+      const hit = sweep(ELEV.lower, tg) || (!ELEV.upperFree && sweep(ELEV.upper, tg));
+      if (hit) tetherKill(tg, hit);
+    }
+    if (!dead && (sweep(ELEV.lower, ship) || (!ELEV.upperFree && sweep(ELEV.upper, ship)))) shipDestroyed('STRUCK BY THE FALLING TETHER');
+  }
+}
+// The tether as absolute polylines (for the map and the telescope)
+function elevLines(t) {
+  if (!ELEV) return [];
+  if (ELEV.intact) {
+    const a = elevIntactPos(R_MARS, t), b = elevIntactPos(ELEV_DEF.rCW, t);
+    return [[[a.x, a.y, a.z], [b.x, b.y, b.z]]];
+  }
+  const mp = marsPos(t), abs = C => C.p.map(p => [mp[0] + p[0], mp[1] + p[1], mp[2] + p[2]]);
+  return ELEV.upperFree ? [abs(ELEV.lower)] : [abs(ELEV.lower), abs(ELEV.upper)];
+}
+
 /* ---------- Stage autopilot (Operation Cataclysm) ----------
    After hard dock the BS-90 takes the stack: it waits BA_HOLD s, picks the next pass of the departure point in
    the parking orbit, solves the departure burn by shooting (a fixed inertial thrust direction and a cutoff delta-v,
@@ -1509,6 +1673,54 @@ function planCataclysm(t0) {
   return { ship, q, arrive: tA, tD, tA, vinfArr, bHat: new THREE.Vector3().crossVectors(va, na), B,
     targets: () => [mkBooster(bState, q)] };
 }
+
+/* Phase 2 order of battle, placed when the ship enters Mars' sphere of influence (the fleet's orbits are inclined to
+   keep clear of the tether). req: must be destroyed to win. Surface sites and the elevator are known positions. */
+const SURF = [['ELEVATOR ANCHOR', 0, 300, 1500], ['SPACEPORT THARSIS', 3.0, 400, 800], ['GARRISON PAVONIS', 7.5, 250, 800]];
+function marsOOB(t) {
+  const hostile = (extra) => ({ hostile: true, needsAlert: true, req: true, side: 'HOSTILE', ...extra });
+  const ship = (name, cls, radius, integ, alt, ph, inc, extra) => mkTargetAt(name, marsOrbitState(alt, ph*D2R, inc*D2R, t), radius, integ, 'HOSTILE',
+    hostile({ cls, intel: true, ...extra }));
+  const out = [];
+  const cv = { score: 600, sensor: 1.5, salvo: 3, salvoT: 20, fireRange: 80e3, sig: 20, ai: { ...AI_DEF }, pd: 2, laser: true };
+  [['CORVETTE TALON', 450, 20, 8], ['CORVETTE SPUR', 520, 140, 12], ['CORVETTE HALBERD', 600, 250, 25],
+   ['CORVETTE PIKE', 700, 330, 35], ['CORVETTE LANCE', 900, 80, 18], ['CORVETTE DIRK', 1100, 200, 40]]
+    .forEach(([n, alt, ph, inc], i) => out.push(ship(n, 'corvette', 6, 200, alt*1e3, ph, inc, { ...cv, fireT: 6 + 2*i })));
+  const fg = { score: 1200, sensor: 1.4, salvo: 4, salvoT: 22, fireRange: 90e3, sig: 35, ai: { ...AI_DEF, dv: 1000 }, pd: 3, laser: true };
+  [['FRIGATE BASTION', 1300, 60, 15], ['FRIGATE RAMPART', 1600, 180, 22], ['FRIGATE CITADEL', 2000, 300, 10]]
+    .forEach(([n, alt, ph, inc], i) => out.push(ship(n, 'capital', 9, 450, alt*1e3, ph, inc, { ...fg, fireT: 5 + 3*i })));
+  const ds = { score: 1000, sensor: 1.2, salvo: 3, salvoT: 25, fireRange: 80e3, sig: 60, pd: 3 };
+  [['DEFENCE STATION D-1', 800, 110, 6], ['DEFENCE STATION D-2', 1500, 230, 6], ['DEFENCE STATION D-3', 3000, 350, 6]]
+    .forEach(([n, alt, ph, inc], i) => out.push(ship(n, 'defsat', 8, 500, alt*1e3, ph, inc, { ...ds, fireT: 4 + 3*i })));
+  // Surface sites on the equator, east of the anchor (the falling tether lands to the east)
+  for (const [n, dl, len, sc] of SURF)
+    out.push(mkTargetAt(n, marsFixedState(ELEV_DEF.lon + dl*D2R, R_MARS, t), len/2, 800, 'HOSTILE',
+      { req: true, surface: true, cls: 'base', len, score: sc, orbitKnown: true, pin: tt => marsFixedState(ELEV_DEF.lon + dl*D2R, R_MARS, tt) }));
+  // The elevator: splice node (the weak point), hub at areostationary height, counterweight
+  const rN = R_MARS + ELEV_DEF.nodeAlt;
+  out.push(mkTargetAt('TETHER SPLICE NODE', elevIntactPos(rN, t), 20, 150, 'HOSTILE',
+    { req: true, elevPart: 'node', cls: 'node', len: 40, score: 0, orbitKnown: true, pin: tt => elevIntactPos(rN, tt) }));
+  out.push(mkTargetAt('ELEVATOR HUB', elevIntactPos(R_AREOSTAT, t), 60, 700, 'HOSTILE',
+    hostile({ elevPart: 'hub', cls: 'station', len: 120, score: 2000, orbitKnown: true, sensor: 1.0, salvo: 4, salvoT: 30, fireRange: 80e3, fireT: 5, pd: 4, sig: 120,
+      pin: tt => elevIntactPos(R_AREOSTAT, tt) })));
+  out.push(mkTargetAt('COUNTERWEIGHT', elevIntactPos(ELEV_DEF.rCW, t), 100, 2000, 'UNKNOWN',
+    { elevPart: 'cw', cls: 'counterweight', len: 200, orbitKnown: true, pin: tt => elevIntactPos(ELEV_DEF.rCW, tt) }));
+  ELEV = { intact: true };
+  return out;
+}
+// Mission defenders notice the ship: by its signature (each defender's sensor factor) with a clear line of sight,
+// or a while after one of them is hit
+function alertScan(h) {
+  if (mission.alert) return;
+  mission.undetT += h;
+  const dr = detectionRange();
+  for (const t of targets) {
+    if (t.gone) continue;
+    if (t.side === 'HOSTILE' && t.integrity < t.maxInt && mission.attackT === undefined) mission.attackT = simT;
+    if (t.sensor && rangeTo(t) < dr*t.sensor && losClearMoon(t, ship) && losClear(t, ship)) { raiseAlert(`DETECTED BY ${t.name}`); break; }
+  }
+  if (!mission.alert && mission.attackT !== undefined && simT - mission.attackT > ATTACK_REACT) raiseAlert('DEFENDERS UNDER ATTACK');
+}
 const MISSIONS = {
   m1: { id: 'm1', name: 'OPERATION LANTERN', title: 'HELIUM-3 DEPOT STRIKE', plan: planMission1,
     // Briefing transmission: [text, typing speed in chars/s, pause after in s]; 'ANIM' is the transfer diagram
@@ -1541,9 +1753,11 @@ const MISSIONS = {
       'Stowed radiators keep you hidden but the ship heats up. A civilian ore hauler is',
       'docked near the depot: avoid hitting it.',
     ] },
-  cat: { id: 'cat', name: 'OPERATION CATACLYSM', title: 'MARS · PHASE 1: THE VOYAGE', plan: planCataclysm, hull: 'dd84', stageAuto: true, max: 11000,
-    scoring: 'SCORE: +1000 hard dock, +500 clean capture (no rebound), +5000 Mars orbit, up to +3000 for DD-84 propellant left, ' +
-      'up to +1500 for using the stage\'s last propellant before separation; −450 per hull hit. S for a clean run.',
+  cat: { id: 'cat', name: 'OPERATION CATACLYSM', title: 'MARS: VOYAGE AND ASSAULT', plan: planCataclysm, hull: 'dd84', stageAuto: true, max: 27000,
+    scoring: 'SCORE: +1000 hard dock, +500 clean capture, +5000 Mars orbit; +600 per corvette, +1200 per frigate, +1000 per defence ' +
+      'station, +2000 elevator hub, +3000 tether cut, +1500 anchor, +800 per surface site, +400 for each target the falling tether ' +
+      'destroys; on success up to +3000 for DD-84 propellant left and +1500 for using the stage\'s last propellant. −450 per hull hit. ' +
+      'S for a clean run (no hull hits, no damage, no docking rebound).',
     orders: [
       ['// LASER LINK ESTABLISHED - FLEET COMMAND, CHEYENNE //', 38, 1.4],
       ['ORDERS RECEIVED. STAND BY FOR FILE TRANSMISSION.', 32, 1.6],
@@ -1560,7 +1774,10 @@ const MISSIONS = {
       ['   BURN THE STAGE DRY FIRST, THEN SEPARATE AND FINISH', 170, 0.06],
       ['   ON YOUR OWN DRIVE. KEEP PERIAPSIS ABOVE 100 KM.', 170, 0.2],
       ['CONTACT LIMITS: 0.15 M/S, 0.3 M OFFSET, 3 DEG.', 120, 0.1],
-      ['PHASE 2 ORDERS FOLLOW ON ARRIVAL.', 140, 0.4],
+      ['4. DESTROY EVERYTHING: FLEET, DEFENCE STATIONS, SURFACE SITES,', 170, 0.06],
+      ['   ELEVATOR HUB. CUT THE TETHER AT ITS SPLICE NODE (9000 KM):', 170, 0.06],
+      ['   THE LOWER TETHER WILL FALL ALONG THE EQUATOR.', 170, 0.2],
+      ['WARNING: STAY CLEAR OF THE EQUATOR WHILE IT FALLS.', 120, 0.4],
       ['// END OF TRANSMISSION //', 60, 0],
     ],
     brief: [
@@ -1571,8 +1788,11 @@ const MISSIONS = {
       'then two small corrections; warp through the 125-day transit. At Mars, start braking',
       'retrograde about 10 minutes before periapsis (ORBIT page: PE IN): the main engine fires',
       'the stage while docked; when it runs dry, SEP twice and finish on the DD-84 drive.',
-      'Any closed orbit with periapsis above 100 km completes phase 1. The battle at Mars is',
-      'phase 2 (next update).',
+      'Phase 2 starts on arrival: six corvettes, three frigates, three defence stations, three',
+      'surface sites on the equator and the space elevator (hub at areostationary height).',
+      'Cut the tether at its splice node (9000 km): the lower tether falls along the equator',
+      'over a few hours, destroying what it hits, the surface sites included. Everything',
+      'hostile must be destroyed.',
     ],
     start() {
       log('OPERATION CATACLYSM · PHASE 1');
@@ -1583,16 +1803,32 @@ const MISSIONS = {
     step(h) {
       const pn = primaryName(ship, simT);
       if (pn === 'MARS') {
-        if (!mission.inMars) { mission.inMars = true; log('MARS SPHERE OF INFLUENCE · CHECK PERIAPSIS ON THE ORBIT PAGE'); }
+        if (!mission.inMars) {
+          mission.inMars = true; log('MARS SPHERE OF INFLUENCE · CHECK PERIAPSIS ON THE ORBIT PAGE');
+          // Phase 2 forces appear (their orbits and positions arrive as intelligence)
+          const fresh = marsOOB(simT), used = new Set(targets.map(t => t.trk));
+          for (const t of fresh) {
+            let n; do { n = String(1000 + Math.floor(Math.random()*9000)); } while (used.has(n)); used.add(n); t.trk = n;
+            if (t.intel) t.track = Object.assign(Object.create(t), { x: t.x, y: t.y, z: t.z, vx: t.vx, vy: t.vy, vz: t.vz }, { tRep: simT, sat: 'INTEL', intel: true });
+          }
+          targets.push(...fresh);
+          log(`PHASE 2 · ${fresh.filter(t => t.req).length} TARGETS · TETHER NODE TRK ${fresh.find(t => t.elevPart === 'node').trk}`);
+        }
         const el = elementsAt(ship, bodyAt('MARS', simT));
-        if (el.e < 1 && el.pe > 100e3 && thrustFrac === 0) { mission.boundT = (mission.boundT || 0) + h; if (mission.boundT > 30) endMission('SUCCESS'); }
-        else mission.boundT = 0;
-      } else if (mission.inMars && pn === 'SUN') endMission('ABANDONED', 'MISSED MARS ORBIT');
+        if (!mission.captured) {
+          if (el.e < 1 && el.pe > 100e3 && thrustFrac === 0) { mission.boundT = (mission.boundT || 0) + h;
+            if (mission.boundT > 30) { mission.captured = true; scoreAdd('MARS ORBIT', 5000); log('PHASE 1 COMPLETE · MARS ORBIT'); sfx.chime(); } }
+          else mission.boundT = 0;
+        }
+      } else if (mission.inMars && pn === 'SUN') endMission('ABANDONED', mission.captured ? 'LEFT MARS' : 'MISSED MARS ORBIT');
       if (pn === 'SUN' && simT > missionPlan.tA + 20*86400) endMission('ABANDONED', 'MISSED MARS');
+      if (mission.inMars) {
+        alertScan(h);
+        if (!mission.ended && !targets.some(t => t.req && !t.gone)) endMission('SUCCESS');
+      }
     },
     bonus(result) {
       if (result !== 'SUCCESS') return;
-      scoreAdd('MARS ORBIT', 5000);
       scoreAdd('PROPELLANT LEFT', Math.round(3000*clamp((mainProp + podProp)/(SHIP.mainProp0 + tankProp0Total()), 0, 1)));
       const left = mission.stageLeft || BOOSTER.prop0*0.1, wasted = mission.sepProp ?? (dock.state === 'DOCKED' ? dock.prop : left);
       scoreAdd('STAGE PROPELLANT USED', Math.round(1500*clamp(1 - wasted/left, 0, 1)));
@@ -2455,9 +2691,11 @@ function physicsStep(h) {
   /* --- other bodies and projectiles (gravity only) --- */
   for (const t of targets) {
     t.px = t.x; t.py = t.y; t.pz = t.z; t.s0 = { x: t.x, y: t.y, z: t.z, vx: t.vx, vy: t.vy, vz: t.vz };
+    if (t.pin) { Object.assign(t, t.pin(simT + h)); continue; }   // surface sites, elevator parts
     const a = enemyAI(t, h) || [0, 0, 0];
     rk4(t, h, a[0], a[1], a[2]);
   }
+  elevatorStep(h);
   dockStep(h);
   enemyPD(h);
   contactStep(h);
@@ -3882,6 +4120,15 @@ function drawMap(g, W, H, idx) {
       }
       g.setLineDash([]);
     };
+    // The space elevator's tether (amber), straight while intact, as it falls once cut
+    if (B.name === 'MARS') for (const line of elevLines(simT)) {
+      g.strokeStyle = AMB; g.lineWidth = 2; let prev = null;
+      for (const pt of line) {
+        const q = P(...pt), vis = !earthHides(q);
+        if (prev && vis && prev.vis) { g.beginPath(); g.moveTo(prev.X, prev.Y); g.lineTo(q.X, q.Y); g.stroke(); }
+        prev = { ...q, vis };
+      }
+    }
     for (const sat of sats) drawOrbit2(sat, 'rgba(125,255,154,0.18)', 1, [3, 5]);
     for (const { t, o } of known) if (o && !isLocal(t)) drawOrbit2(o, t.side === 'HOSTILE' ? 'rgba(255,80,64,0.45)' : 'rgba(125,255,154,0.35)', 1.2, []);
     drawOrbit2(ship, PH, 2, []);
@@ -4644,6 +4891,14 @@ return Object.fromEntries(Object.entries({
   booster:  [cyl(-0.38, 0.3, 0.065, 0.065), cyl(-0.34, 0.24, 0.048, 0.048, 0.105, 0), cyl(-0.34, 0.24, 0.048, 0.048, -0.105, 0),
              cyl(-0.34, 0.24, 0.048, 0.048, 0, 0.105), cyl(-0.34, 0.24, 0.048, 0.048, 0, -0.105), cyl(0.3, 0.47, 0.06, 0.075, 0, 0, 0.7),
              cyl(0.47, 0.5, 0.08, 0.08), cyl(-0.5, -0.38, 0.03, 0.08, 0, 0, BELL)],
+  // Surface complex: long low halls, a dome and a tower
+  base:     [box([0, -0.06, 0], [0.9, 0.1, 0.45], 0.8), sph([0.22, 0.02, 0.05], 0.14), box([-0.25, 0.04, -0.1], [0.25, 0.14, 0.18]),
+             box([-0.05, 0.2, 0.12], [0.06, 0.4, 0.06])],
+  // Tether splice node: a box clamped on the ribbon (the ribbon runs along u)
+  node:     [box([0, 0, 0], [0.35, 0.45, 0.45]), cyl(-0.5, 0.5, 0.02, 0.02, 0, 0, 0.7, 6), box([0, 0, 0.42], [0.25, 0.02, 0.35], RAD)],
+  counterweight: [box([0, 0, 0], [0.7, 0.55, 0.55], 0.6), cyl(0.35, 0.5, 0.03, 0.03, 0, 0, 0.7, 6), box([-0.1, 0.3, 0], [0.2, 0.05, 0.4])],
+  // Defence station: hull sphere, gun barrel, radiator boom
+  defsat:   [sph([0, 0, 0], 0.22), cyl(0.15, 0.5, 0.035, 0.035), box([-0.1, 0, 0], [0.9, 0.025, 0.22], RAD), box([-0.25, 0.2, 0], [0.18, 0.12, 0.12])],
   ordnance: [cyl(-0.4, 0.35, 0.05, 0.05, 0, 0, 1, 8), cyl(0.35, 0.5, 0.05, 0, 0, 0, 1, 8),
              box([-0.42, 0, 0.09], [0.12, 0.01, 0.08], RAD), box([-0.42, 0, -0.09], [0.12, 0.01, 0.08], RAD),
              box([-0.42, 0.09, 0], [0.12, 0.08, 0.01], RAD), box([-0.42, -0.09, 0], [0.12, 0.08, 0.01], RAD)],
@@ -4651,6 +4906,7 @@ return Object.fromEntries(Object.entries({
 })();
 function silClass(t) {
   if (t.booster) return 'booster';
+  if (t.cls) return t.cls;
   const n = t.name;
   if (/DEPOT|STATION/.test(n)) return 'station';
   if (/HAULER/.test(n)) return 'hauler';
@@ -4770,6 +5026,7 @@ function spawnFrags(t, n, vmin, vmax, axis = null, cone = 0.5, hotness = 1) {
    torpedo - three sections, fast tumble, a big fireball, many fragments, the cut ends vent gas and glow longest.
    Sections become wreck contacts (trackable, can be shot) and are a collision hazard, as are the fragments. */
 function breakUp(t) {
+  if (t.surface) { fireballs.push({ x: t.x, y: t.y, z: t.z, vx: t.vx, vy: t.vy, vz: t.vz, t0: simT, dur: 3, rmax: t.radius*3, white: true }); return []; }   // a ground site burns where it stands
   const hit = t.lastHit && simT - t.lastHit.t < 3 ? t.lastHit : null;
   if (t.wreck) { spawnFrags(t, 8, 3, 15); fireballs.push({ x: t.x, y: t.y, z: t.z, vx: t.vx, vy: t.vy, vz: t.vz, t0: simT, dur: 1, rmax: t.radius*1.5, white: true }); return []; }
   if (!hit || !['rail', 'missile', 'torpedo'].includes(hit.kind)) return [];
@@ -4994,6 +5251,16 @@ function drawScope(g, W, H, idx) {
     if (pr < 1.5) { g.fillStyle = irOn ? '#ddd' : ({ moon: '#c9c9c9', earth: '#7fa8e0', mars: '#d9845a' })[B.kind]; g.fillRect(px - 1, py - 1, 2, 2); continue; }
     if (pr > 140) g.drawImage(bodyFrame(B.kind, B, bq, SCOPE_FOV, { FX, FY, FW, FH, cx, cy, R }, irOn), FX, FY, FW, FH);
     else g.drawImage(bodyImage(B.kind, bq, irOn), px - pr, py - pr, 2*pr, 2*pr);
+  }
+  // The elevator tether: a thin sunlit ribbon (warm white; IR: faint), drawn segment by segment
+  for (const line of elevLines(simT)) {
+    g.strokeStyle = irOn ? 'rgba(200,200,200,0.5)' : 'rgba(255,236,200,0.75)'; g.lineWidth = 1.2;
+    let prev = null;
+    for (const pt of line) {
+      const v = new THREE.Vector3(pt[0] - ship.x, pt[1] - ship.y, pt[2] - ship.z).applyQuaternion(bq), q = projU(v);
+      if (prev && q) { g.beginPath(); g.moveTo(prev.x, prev.y); g.lineTo(q.x, q.y); g.stroke(); }
+      prev = q;
+    }
   }
   // Ships and objects: flat silhouettes along their direction of travel (relative to the body they orbit),
   // scaled to the range; a point of light when smaller than a few pixels. Hidden behind Earth or the Moon.
@@ -7270,8 +7537,9 @@ function coastRun(T) {
   }
   if (!changed && primaryName(ship, simT) !== p0) changed = primaryName(ship, simT);
   const dt = simT - tStart;
-  for (const t of targets) if (!t.gone) keplerAdvance(t, tStart, dt);
+  for (const t of targets) if (!t.gone) { if (t.pin) Object.assign(t, t.pin(simT)); else keplerAdvance(t, tStart, dt); }
   for (const sat of sats) keplerAdvance(sat, tStart, dt);
+  { const s0 = simT; simT = tStart; elevatorStep(dt); simT = s0; }
   omega.set(0, 0, 0); updateSunDir();
   // Power and heat settle over a long coast: battery charges at the idle surplus, hull temperature relaxes
   battery = clamp(battery + (reactorOut() - POWER.avionics)*dt, 0, battCapEff());
