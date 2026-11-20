@@ -4081,7 +4081,10 @@ function drawScope(g, W, H, idx) {
     g.save(); g.globalCompositeOperation = 'lighter'; g.fillStyle = gr; g.beginPath(); g.arc(pp.x, pp.y, rr, 0, Math.PI*2); g.fill(); g.restore();
   }
   // Railgun shrapnel: short streaks along their motion, lit by the sun (dark in Earth's shadow), white-hot at first
-  g.save(); g.globalCompositeOperation = 'lighter'; g.lineCap = 'round';
+  // Shrapnel and fragments go through the same optics as everything else: blurred to the sensor's resolution
+  // (coarser in IR), so far away they are a soft glittering haze rather than sharp lines
+  const sensorBlur = `blur(${(resG*0.45).toFixed(1)}px)`;
+  g.save(); g.globalCompositeOperation = 'lighter'; g.lineCap = 'round'; g.filter = sensorBlur;
   for (const sp of spray) {
     const a = simT - sp.t0, P = new THREE.Vector3(sp.x, sp.y, sp.z);
     const rel = P.clone().sub(new THREE.Vector3(ship.x, ship.y, ship.z));
@@ -4093,11 +4096,14 @@ function drawScope(g, W, H, idx) {
     if (irOn) { r = gg = b = 255; al = (0.15 + 0.85*hot)*fade; }
     else { r = 255; gg = 240 - 60*hot; b = 220 - 150*hot; al = Math.max(lit, hot)*fade; }
     if (al < 0.03) continue;
-    g.strokeStyle = `rgba(${r|0},${gg|0},${b|0},${al.toFixed(3)})`; g.lineWidth = Math.max(1, sp.size*Math.min(2, pxPerM(rel.length())*0.15));
+    const lw = Math.max(1, resG*0.5, sp.size*Math.min(2, pxPerM(rel.length())*0.15));
+    al *= Math.min(1, 1.5/lw);                       // a tiny shard's light spread over a wider blur is fainter
+    g.strokeStyle = `rgba(${r|0},${gg|0},${b|0},${al.toFixed(3)})`; g.lineWidth = lw;
     g.beginPath(); g.moveTo(p0.x, p0.y); g.lineTo(p1.x + 0.01, p1.y); g.stroke();
   }
   g.restore();
   // Fragments: tumbling shards that glint as they turn in the sunlight; hot ones glow for half a minute
+  g.save(); g.filter = sensorBlur;
   for (const fr of frags) {
     const v = new THREE.Vector3(fr.x-ship.x, fr.y-ship.y, fr.z-ship.z), pp = proj(v.clone().applyQuaternion(bq)); if (!pp) continue;
     const age = simT - fr.t0, hot = fr.hot*Math.exp(-age/30), glint = sunlit(new THREE.Vector3(fr.x, fr.y, fr.z), fr.ph, fr.spin);
@@ -4105,8 +4111,10 @@ function drawScope(g, W, H, idx) {
     let col;
     if (irOn) { const c = 60 + 195*Math.max(hot, 0.1); col = `rgb(${c|0},${c|0},${c|0})`; }
     else { const c = 200*glint; col = hot > 0.1 ? `rgb(${Math.max(c, 255*hot)|0},${Math.max(c*0.97, 130*hot)|0},${c|0})` : `rgb(${c*0.9|0},${c*0.95|0},${c|0})`; }
-    g.fillStyle = col; g.fillRect(pp.x - sz/2, pp.y - sz/2, sz, sz);
+    const sb = Math.max(sz, resG*0.6);              // never sharper than the sensor resolves
+    g.fillStyle = col; g.fillRect(pp.x - sb/2, pp.y - sb/2, sb, sb);
   }
+  g.restore();
   for (const dc of decoys) {                         // decoy clouds: a scatter of sparks
     const p = proj(new THREE.Vector3(dc.x-ship.x, dc.y-ship.y, dc.z-ship.z).applyQuaternion(bq)); if (!p) continue;
     const sp = Math.max(2, pxPerM(Math.hypot(dc.x-ship.x, dc.y-ship.y, dc.z-ship.z))*30);
