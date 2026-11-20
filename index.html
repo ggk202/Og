@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OG — Cockpit prototype v0.5.1</title>
+<title>OG — Cockpit prototype v0.5.2</title>
 <style>
   html, body { margin:0; height:100%; background:#000; overflow:hidden;
     font-family: ui-monospace, Menlo, Consolas, monospace; color:#cfd8c0; }
@@ -90,7 +90,7 @@
 </head>
 <body>
 <canvas id="gl"></canvas>
-<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.5.1</span></div>
+<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.5.2</span></div>
 <div id="hangar"><div class="load" id="hangarLoad">LOADING SHIP</div>
   <div class="hint">DRAG TO ORBIT · WHEEL TO ZOOM · CLICK A HARDPOINT TO CHOOSE ITS MODULE</div>
   <div class="panel"><h2>HANGAR</h2><div class="sub">LOADOUT · SELECT A HARDPOINT, THEN A MODULE</div>
@@ -2413,12 +2413,16 @@ function drawBallTexture(g, w, h) {
 const ballTex = canvasTex(512, 256, drawBallTexture);
 const ball = new THREE.Mesh(new THREE.SphereGeometry(BALL_R, 48, 32),
   new THREE.MeshStandardMaterial({ map: ballTex.tex, roughness: 0.3, metalness: 0 }));
-ball.position.set(0, BALL_Y, BALL_Z);
-cockpit.add(ball);
+// The ball sits in a mirrored mount (z flipped): the ship's nose direction (body -Z) then faces the pilot, with
+// right on the right and up at the top. Without the mirror the pilot saw the far side of the sky: the prograde
+// marker hid behind the ball when the nose pointed prograde, and every marker showed the opposite direction.
+const ballMount = new THREE.Group();
+ballMount.position.set(0, BALL_Y, BALL_Z); ballMount.scale.set(1, 1, -1);
+ballMount.add(ball); cockpit.add(ballMount);
 // Glossy glass shell over the navball, so it catches cabin light
 const ballGlass = new THREE.Mesh(new THREE.SphereGeometry(BALL_R*1.02, 48, 32),
   new THREE.MeshPhysicalMaterial({ color: 0xffffff, roughness: 0.04, metalness: 0, transparent: true, opacity: 0.14, envMapIntensity: 1.6, depthWrite: false }));
-ballGlass.position.copy(ball.position); cockpit.add(ballGlass);
+ballGlass.position.set(0, BALL_Y, BALL_Z); cockpit.add(ballGlass);
 
 // Markers live on the ball, in ball-local coordinates (+X prograde, +Y radial-up, +Z normal)
 const markerZ = new THREE.Vector3(0, 0, 1);
@@ -2445,11 +2449,22 @@ const markerRetro = new THREE.Group();
   }
 }
 placeOnBall(markerRetro, new THREE.Vector3(-1, 0, 0));
-const markerTgt = new THREE.Mesh(new THREE.SphereGeometry(0.005, 10, 8),
-  new THREE.MeshBasicMaterial({ color: 0xff3fd0, toneMapped: false }));
+// Target direction (magenta): an open square with a centre dot; anti-target (the opposite direction): the same
+// square with an X through it, so a target behind the ship still has a marker on the visible face of the ball
+function squareMarker(color, cross) {
+  const grp = new THREE.Group(), mat = new THREE.MeshBasicMaterial({ color, toneMapped: false, side: THREE.DoubleSide });
+  const a = 0.011, w = 0.0022;
+  for (const [x, y, sx, sy] of [[0, a, 2*a + w, w], [0, -a, 2*a + w, w], [a, 0, w, 2*a + w], [-a, 0, w, 2*a + w]]) {
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(sx, sy), mat); m.position.set(x, y, 0); grp.add(m);
+  }
+  if (cross) for (const ang of [Math.PI/4, -Math.PI/4]) { const m = new THREE.Mesh(new THREE.PlaneGeometry(2*a*1.3, w), mat); m.rotation.z = ang; grp.add(m); }
+  else grp.add(new THREE.Mesh(new THREE.CircleGeometry(0.0032, 12), mat));
+  return grp;
+}
+const markerTgt = squareMarker(0xff3fd0, false), markerAntiTgt = squareMarker(0xff3fd0, true);
 // Planned burn direction (cyan ring)
 const markerBurn = ringMarker(0x3fe0ff, 0.008, 0.012);
-ball.add(markerPro, markerRetro, markerTgt, markerBurn);
+ball.add(markerPro, markerRetro, markerTgt, markerAntiTgt, markerBurn);
 // Fixed nose reticle on the ball's front: marks where the ship's nose points
 const noseRet = ringMarker(0xffffff, 0.009, 0.0115);
 noseRet.position.set(0, BALL_Y, BALL_Z + BALL_R*1.01);
@@ -4431,10 +4446,10 @@ function updateNavball() {
   const t = tgtKnown(targets[curTarget]);
   if (t) {
     const dir = new THREE.Vector3(t.x-ship.x, t.y-ship.y, t.z-ship.z).normalize().applyQuaternion(orbQ.clone().invert());
-    placeOnBall(markerTgt, dir);
-    markerTgt.visible = true;
+    placeOnBall(markerTgt, dir); placeOnBall(markerAntiTgt, dir.clone().negate());
+    markerTgt.visible = markerAntiTgt.visible = true;
   } else {
-    markerTgt.visible = false;
+    markerTgt.visible = markerAntiTgt.visible = false;
   }
   const bd = planBurnDir();
   markerBurn.visible = !!bd;
@@ -5633,14 +5648,16 @@ const MAN_PAGES = [
       ring(cx, cy, 6);
       const lx = x + w*0.4; ring(lx + 4, y + 8); lab('PROGRADE (YELLOW)', lx + 14, y + 5);
       cross(lx + 4, y + 22); lab('RETROGRADE (YELLOW)', lx + 14, y + 19);
-      g.fillRect(lx + 2, y + 34, 4, 4); lab('TARGET (MAGENTA)', lx + 14, y + 33);
-      ring(lx + 4, y + 50, 5); lab('BURN (CYAN)', lx + 14, y + 47);
-      ring(lx + 4, y + 64, 6); lab('NOSE (WHITE)', lx + 14, y + 61);
-    }, rows: 9 },
+      g.strokeRect(lx, y + 32, 8, 8); g.fillRect(lx + 3, y + 35, 2, 2); lab('TARGET (MAGENTA)', lx + 14, y + 33);
+      g.strokeRect(lx, y + 46, 8, 8); g.beginPath(); g.moveTo(lx, y + 46); g.lineTo(lx + 8, y + 54); g.moveTo(lx + 8, y + 46); g.lineTo(lx, y + 54); g.stroke(); lab('ANTI-TARGET', lx + 14, y + 47);
+      ring(lx + 4, y + 64, 5); lab('BURN (CYAN)', lx + 14, y + 61);
+      ring(lx + 4, y + 78, 6); lab('NOSE (WHITE)', lx + 14, y + 75);
+    }, rows: 10 },
     'THE NAVBALL SHOWS THE DIRECTIONS AROUND THE SHIP. THE BLUE HALF IS AWAY FROM THE EARTH OR THE MOON. THE BROWN HALF IS TOWARD IT.',
     'THE WHITE RING IN THE CENTRE SHOWS THE NOSE. THE PROGRADE AND RETROGRADE MARKERS ARE ON THE LINE BETWEEN THE HALVES.',
     { gap: 1 },
     { b: 'TO BURN PROGRADE, PUT THE PROGRADE MARKER IN THE WHITE RING. THEN BURN.' },
+    { b: 'TO POINT AT THE TARGET, PUT THE TARGET MARKER IN THE WHITE RING. IF YOU SEE THE ANTI-TARGET MARKER, THE TARGET IS BEHIND YOU.' },
     { b: 'LEAD HOLD TURNS THE NOSE TO THE FIRING LEAD. IF A NODE IS NEAR, IT TURNS THE NOSE TO THE BURN.' }],
   // 12 sensors and signature
   () => [{ h: 'SECTION IV - SENSORS' }, { h: 'SIGNATURE' },
