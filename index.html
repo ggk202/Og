@@ -331,6 +331,8 @@ const PDC_RANGE = 5000, PDC_V = 1500, PDC_RATE = 8, PDC_ENERGY = 2e4, PDC_SPREAD
 const TORP_ACCEL = 40, TORP_BURN = 30, TORP_KILL_R = 1.5, TORP_HULL_R = 20, HOSTILE_SALVO_T = 15;
 let torpedoes = [], tracers = [], hullHits = 0;
 let eTracers = [];                                   // enemy point-defence rounds (they hunt player ordnance)
+let frags = [], fireballs = [];                      // debris fragments and fireballs from kills
+const FRAG_MAX = 160;
 // Enemy ships: thrust (m/s^2) and delta-v budget for manoeuvring; point defence against player ordnance
 const AI_DEF = { acc: 4, dv: 1500 };
 // range, muzzle speed, rounds/s per mount, per-round scatter, fire-control tracking error (one per step, shared
@@ -826,7 +828,7 @@ function mkTarget(name, r, phase, radius, integrity, side = 'UNKNOWN', inc = 0, 
 function defaultSig(radius, side) { return side === 'UNKNOWN' ? 1 + 0.3*radius : 4 + 4*radius; }
 // Current signature of a target: base, plus engine burns (AI), launches and point-defence fire in the last seconds
 function targetSig(t) {
-  let sg = t.sig ?? defaultSig(t.radius, t.side);
+  let sg = t.wreck ? 1.5 + 40*Math.exp(-(simT - t.tKill)/t.glowT) : t.sig ?? defaultSig(t.radius, t.side);   // wrecks cool off
   if (t.burning) sg += 400;
   if (simT - (t.lastLaunchT ?? -1e9) < 5) sg += 150;
   if (simT - (t.lastPdT ?? -1e9) < 2) sg += 40;
@@ -964,7 +966,7 @@ function resetTargets() {
   for (const t of targets) if (t.intel) t.track = Object.assign(Object.create(t), { x: t.x, y: t.y, z: t.z, vx: t.vx, vy: t.vy, vz: t.vz }, { tRep: simT, sat: 'INTEL', intel: true });
   if (missionPlan) curTarget = Math.max(0, targets.findIndex(t => t.objective));
   flashes = [];
-  torpedoes = []; tracers = []; eTracers = []; hullHits = 0;
+  torpedoes = []; tracers = []; eTracers = []; frags = []; fireballs = []; hullHits = 0;
 }
 resetTargets();
 
@@ -1822,6 +1824,11 @@ function physicsStep(h) {
         const vr = Math.hypot(p.vx-t.vx, p.vy-t.vy, p.vz-t.vz);
         const ke = 0.5*WEAPON.railMass*vr*vr;
         if (masterMode === 'ON') t.integrity -= ke/WEAPON.railDmgDiv;   // TNG fires training rounds: no damage
+        {                                            // where it struck: the slug's closest point to the target
+          const ax = p.x - p.px, ay = p.y - p.py, az = p.z - p.pz, aa = ax*ax + ay*ay + az*az || 1;
+          const k = clamp(((t.x - p.px)*ax + (t.y - p.py)*ay + (t.z - p.pz)*az)/aa, 0, 1);
+          recordHit(t, 'rail', [p.px + ax*k, p.py + ay*k, p.pz + az*k], v3arr(new THREE.Vector3(p.vx-t.vx, p.vy-t.vy, p.vz-t.vz).normalize()));
+        }
         // Hit flash on every hit, practice rounds included
         flashes.push({ x: t.x, y: t.y, z: t.z, age: 0, dur: 0.3, peak: 0.7, kind: 'hit' });
         p.dead = true;
@@ -1920,6 +1927,7 @@ function physicsStep(h) {
         if (masterMode === 'ON') scoreAdd('TORPEDOES DESTROYED', SCORE.torpedoKill);
       } else {
         if (masterMode === 'ON') tg.integrity -= T.dmg;
+        recordHit(tg, o.kind, [o.x, o.y, o.z], v3arr(new THREE.Vector3(o.vx-tg.vx, o.vy-tg.vy, o.vz-tg.vz).normalize()));
         log(`${T.name} HIT ${tg.name}${masterMode === 'ON' ? '' : ' · PRACTICE'}`);
       }
       continue;
@@ -1948,15 +1956,26 @@ function physicsStep(h) {
   tracers = tracers.filter(tr => !tr.dead && tr.age < 4);
 
   /* --- kills --- */
+  const newWrecks = []; let selectAfter = null;
   for (const t of targets) {
     if (!t.gone && t.integrity <= 0) {
       t.gone = true; groundMsg(`${t.name} CONFIRMED DESTROYED`);
       if (mission && t.score) { scoreAdd(t.side === 'NEUTRAL' ? 'NEUTRALS DESTROYED' : `${t.name}`, t.score); if (t.side === 'NEUTRAL') mission.neutrals++; }
       // Reactor explosion: a bright, longer flash at the ship's last position
       flashes.push({ x: t.x, y: t.y, z: t.z, age: 0, dur: 4.0, peak: 1.0, kind: 'kill' });
+      const secs = breakUp(t);
+      if (secs.length && targets[curTarget] === t) selectAfter = secs.reduce((a, b) => b.radius > a.radius ? b : a);   // keep the lock on the largest section
+      newWrecks.push(...secs);
     }
   }
   targets = targets.filter(t => !t.gone);
+  if (newWrecks.length) {                            // wreck sections join the contacts, with new track numbers
+    const used = new Set(targets.map(t => t.trk));
+    for (const w of newWrecks) { let n; do { n = String(1000 + Math.floor(Math.random()*9000)); } while (used.has(n)); used.add(n); w.trk = n; }
+    targets.push(...newWrecks);
+    if (selectAfter) curTarget = targets.indexOf(selectAfter);
+  }
+  debrisStep(h);
   missionStep(h);
   for (const f of flashes) f.age += h;
   flashes = flashes.filter(f => f.age < f.dur);
@@ -3529,7 +3548,7 @@ const PRIM = {
 };
 function buildModel(prims) {                         // flatten to faces with outward unit normals
   const out = [];
-  for (const pr of prims) for (const f of pr.faces) {
+  prims.forEach((pr, pi) => { for (const f of pr.faces) {
     let nx = 0, ny = 0, nz = 0, mx = 0, my = 0, mz = 0;
     for (let i = 0; i < f.length; i++) {             // Newell's method
       const a = f[i], b = f[(i + 1) % f.length];
@@ -3539,8 +3558,8 @@ function buildModel(prims) {                         // flatten to faces with ou
     const nl = Math.hypot(nx, ny, nz); if (nl < 1e-12) continue;
     nx /= nl; ny /= nl; nz /= nl; mx /= f.length; my /= f.length; mz /= f.length;
     if (nx*(mx - pr.c[0]) + ny*(my - pr.c[1]) + nz*(mz - pr.c[2]) < 0) { nx = -nx; ny = -ny; nz = -nz; }
-    out.push({ pts: f, n: [nx, ny, nz], tone: pr.tone });
-  }
+    out.push({ pts: f, n: [nx, ny, nz], tone: pr.tone, prim: pi });
+  } });
   return out;
 }
 const MODELS3D = (() => {
@@ -3583,6 +3602,190 @@ function silClass(t) {
   if (/FRIGATE|DESTROYER/.test(n)) return 'capital';
   return 'corvette';
 }
+
+/* ---------- Kills that break ships apart ----------
+   A target's local frame: f along its travel relative to the body it orbits, up away from that body (the same
+   frame the telescope draws it in), or its own tumbling attitude q once it is a wreck. */
+function targetFrame(t) {
+  if (t.q) return { f: new THREE.Vector3(1, 0, 0).applyQuaternion(t.q), up: new THREE.Vector3(0, 1, 0).applyQuaternion(t.q),
+                    rt: new THREE.Vector3(0, 0, 1).applyQuaternion(t.q) };
+  const mp = moonPos(simT), mv = moonVel(simT), inMoon = Math.hypot(t.x - mp[0], t.y - mp[1], t.z - mp[2]) < MOON_SOI;
+  const f = new THREE.Vector3(t.vx - (inMoon ? mv[0] : 0), t.vy - (inMoon ? mv[1] : 0), t.vz - (inMoon ? mv[2] : 0)).normalize();
+  const up = new THREE.Vector3(t.x - (inMoon ? mp[0] : 0), t.y - (inMoon ? mp[1] : 0), t.z - (inMoon ? mp[2] : 0));
+  up.addScaledVector(f, -up.dot(f)).normalize();
+  return { f, up, rt: new THREE.Vector3().crossVectors(f, up) };
+}
+const v3arr = v => [v.x, v.y, v.z];
+const toLocal = (F, v) => [v.dot(F.f), v.dot(F.up), v.dot(F.rt)];
+const toWorldL = (F, q) => F.f.clone().multiplyScalar(q[0]).addScaledVector(F.up, q[1]).addScaledVector(F.rt, q[2]);
+// Where a weapon struck, kept for the kill that may follow; a hit that does not kill leaves a hole that vents.
+function recordHit(t, kind, pos, dir) {
+  t.lastHit = { kind, pos, dir, t: simT };
+  if (t.integrity > 0 && masterMode === 'ON') addHole(t, t.lastHit);
+}
+function addHole(t, hit) {
+  const F = targetFrame(t), L = t.len || 2*t.radius;
+  const h = toLocal(F, new THREE.Vector3(hit.pos[0] - t.x, hit.pos[1] - t.y, hit.pos[2] - t.z)).map(v => v/L);
+  const sd = toLocal(F, new THREE.Vector3(...hit.dir));
+  let nv = -sd[1], nw = -sd[2]; const nl = Math.hypot(nv, nw) || 1; nv /= nl; nw /= nl;   // the side it came in on
+  if (Math.hypot(sd[1], sd[2]) < 1e-3) { nv = 1; nw = 0; }
+  const r0 = t.wreck ? 0.05 : 0.085, size = { rail: 0.025, missile: 0.06, torpedo: 0.09 }[hit.kind] || 0.03;
+  (t.holes = t.holes || []).push({ p: [clamp(h[0], -0.4, 0.4), nv*r0, nw*r0], n: [0, nv, nw], t: simT, dur: 8, size });
+  if (t.holes.length > 12) t.holes.shift();
+}
+// Sutherland-Hodgman: keep the part of a convex polygon with n.p >= d; also returns where the plane crossed it
+function clipPoly(pts, n, d) {
+  const out = [], cut = [], side = q => q[0]*n[0] + q[1]*n[1] + q[2]*n[2] - d;
+  for (let i = 0; i < pts.length; i++) {
+    const A = pts[i], B = pts[(i + 1) % pts.length], sa = side(A), sb = side(B);
+    if (sa >= 0) out.push(A);
+    if ((sa >= 0) !== (sb >= 0)) {
+      const k = sa/(sa - sb), X = [A[0] + (B[0] - A[0])*k, A[1] + (B[1] - A[1])*k, A[2] + (B[2] - A[2])*k];
+      out.push(X); cut.push(X);
+    }
+  }
+  return { out, cut };
+}
+// Split a model by the plane n.p = d into two closed pieces: every convex primitive cut gets a cap (a cut face)
+function splitModel(model, n, d) {
+  const sides = [];
+  for (const sgn of [1, -1]) {
+    const nn = n.map(v => v*sgn), faces = [], caps = {};
+    for (const fc of model) {
+      const { out, cut } = clipPoly(fc.pts, nn, d*sgn);
+      if (out.length >= 3) faces.push({ ...fc, pts: out });
+      if (cut.length) (caps[fc.prim] = caps[fc.prim] || []).push(...cut);
+    }
+    for (const [pi, cp] of Object.entries(caps)) {
+      if (cp.length < 3) continue;
+      const c = cp.reduce((a, q) => [a[0] + q[0]/cp.length, a[1] + q[1]/cp.length, a[2] + q[2]/cp.length], [0, 0, 0]);
+      const any = Math.abs(n[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0];
+      const e1 = new THREE.Vector3(...any).cross(new THREE.Vector3(...n)).normalize(), e2 = new THREE.Vector3(...n).cross(e1);
+      const ang = q => Math.atan2((q[0]-c[0])*e2.x + (q[1]-c[1])*e2.y + (q[2]-c[2])*e2.z, (q[0]-c[0])*e1.x + (q[1]-c[1])*e1.y + (q[2]-c[2])*e1.z);
+      const ring = cp.map(q => [q, ang(q)]).sort((A, B) => A[1] - B[1]).map(x => x[0])
+        .filter((q, i, arr) => i === 0 || Math.hypot(q[0]-arr[i-1][0], q[1]-arr[i-1][1], q[2]-arr[i-1][2]) > 1e-6);
+      if (ring.length >= 3) faces.push({ pts: ring, n: nn.map(v => -v), tone: 0.8, prim: +pi, cut: true });
+    }
+    sides.push(faces);
+  }
+  return sides;
+}
+const rndUnit = () => { const v = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5); return v.lengthSq() > 1e-6 ? v.normalize() : new THREE.Vector3(1, 0, 0); };
+// A spray of small fragments: random directions, or a cone about `axis`
+function spawnFrags(t, n, vmin, vmax, axis = null, cone = 0.5, hotness = 1) {
+  for (let i = 0; i < n; i++) {
+    let dir = rndUnit();
+    if (axis) dir = axis.clone().normalize().addScaledVector(dir, cone).normalize();
+    const v = vmin + Math.random()*(vmax - vmin), r = 0.15 + 0.6*Math.random()**2;
+    frags.push({ x: t.x, y: t.y, z: t.z, vx: t.vx + dir.x*v, vy: t.vy + dir.y*v, vz: t.vz + dir.z*v,
+                 size: r, ph: Math.random()*6.3, spin: 0.5 + 4*Math.random(), t0: simT, hot: hotness });
+  }
+  if (frags.length > FRAG_MAX) frags.splice(0, frags.length - FRAG_MAX);
+}
+/* Break a destroyed ship apart, by what killed it:
+   railgun - a clean cut into two sections, a spray of spall out of the exit side, slow tumble;
+   missile - two sections pushed apart by the blast, scorched, a fireball and a ring of fragments;
+   torpedo - three sections, fast tumble, a big fireball, many fragments, the cut ends vent gas and glow longest.
+   Sections become wreck contacts (trackable, can be shot) and are a collision hazard, as are the fragments. */
+function breakUp(t) {
+  const hit = t.lastHit && simT - t.lastHit.t < 3 ? t.lastHit : null;
+  if (t.wreck) { spawnFrags(t, 8, 3, 15); fireballs.push({ x: t.x, y: t.y, z: t.z, vx: t.vx, vy: t.vy, vz: t.vz, t0: simT, dur: 1, rmax: t.radius*1.5, white: true }); return []; }
+  if (!hit || !['rail', 'missile', 'torpedo'].includes(hit.kind)) return [];
+  const kind = hit.kind, F = targetFrame(t), L = t.len || 2*t.radius, model = t.model || MODELS3D[silClass(t)];
+  const hl = toLocal(F, new THREE.Vector3(hit.pos[0] - t.x, hit.pos[1] - t.y, hit.pos[2] - t.z)).map(v => v/L);
+  const shotW = new THREE.Vector3(...hit.dir);
+  const plane = u => { const n = v3arr(new THREE.Vector3(1, (Math.random() - 0.5)*0.7, (Math.random() - 0.5)*0.7).normalize());
+                       return [n, n[0]*clamp(u, -0.38, 0.38)]; };
+  // A slug breaks the hull where it passed; a warhead's blast (its fuse fires short of the hull) breaks it
+  // near the middle
+  const uc = kind === 'rail' ? hl[0] : 0.3*clamp(hl[0], -0.4, 0.4) + (Math.random() - 0.5)*0.15;
+  let parts;
+  if (kind === 'torpedo') {
+    const [n2, d2] = plane(uc + 0.17), [fore, rest] = splitModel(model, n2, d2);
+    const [n1, d1] = plane(uc - 0.17), [mid, aft] = splitModel(rest, n1, d1);
+    parts = [fore, mid, aft];
+  } else { const [n, d] = plane(uc); parts = splitModel(model, n, d); }
+  parts = parts.filter(fs => fs.length >= 4);
+  const spec = { rail: { sep: [1.5, 3], push: 2, spin: [0.04, 0.12], glowT: 60, scorch: 1 },
+                 missile: { sep: [2.5, 5], push: 1.5, spin: [0.1, 0.3], glowT: 90, scorch: 0.72 },
+                 torpedo: { sep: [3.5, 7], push: 1, spin: [0.2, 0.5], glowT: 150, scorch: 0.55 } }[kind];
+  const station = silClass(t) === 'station';
+  const names = parts.length === 3 ? (station ? ['SECTION A', 'SECTION B', 'SECTION C'] : ['BOW', 'MID', 'STERN'])
+                                   : (station ? ['SECTION A', 'SECTION B'] : ['BOW', 'STERN']);
+  const short = t.name.split(' ').pop();
+  const q0 = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(F.f, F.up, F.rt));
+  const out = parts.map((faces, i) => {
+    let c = [0, 0, 0], nv = 0;
+    for (const fc of faces) for (const q of fc.pts) { c[0] += q[0]; c[1] += q[1]; c[2] += q[2]; nv++; }
+    c = c.map(v => v/nv);
+    let rmax = 0;
+    const fs = faces.map(fc => ({ ...fc, pts: fc.pts.map(q => { const r = [q[0] - c[0], q[1] - c[1], q[2] - c[2]]; rmax = Math.max(rmax, Math.hypot(...r)); return r; }) }));
+    const off = toWorldL(F, c).multiplyScalar(L);
+    const along = (parts.length - 1)/2 - i;           // bow forward, stern back, a middle section sideways
+    const sepDir = F.f.clone().multiplyScalar(along).addScaledVector(rndUnit(), 0.6).normalize();
+    const sep = spec.sep[0] + Math.random()*(spec.sep[1] - spec.sep[0]);
+    const vel = new THREE.Vector3(t.vx, t.vy, t.vz).addScaledVector(sepDir, sep).addScaledVector(shotW, spec.push).addScaledVector(rndUnit(), 0.5);
+    const holes = [];
+    if (kind === 'torpedo') for (const fc of fs) if (fc.cut) {      // the cut ends vent for a while
+      const cc = fc.pts.reduce((a, q) => [a[0] + q[0]/fc.pts.length, a[1] + q[1]/fc.pts.length, a[2] + q[2]/fc.pts.length], [0, 0, 0]);
+      holes.push({ p: cc, n: fc.n, t: simT, dur: 20, size: 0, big: true });
+    }
+    return { name: `WRECK ${short} ${names[i]}`, wreck: true, model: fs, len: L, q: q0.clone(),
+             spin: rndUnit().multiplyScalar(spec.spin[0] + Math.random()*(spec.spin[1] - spec.spin[0])),
+             tKill: simT, glowT: spec.glowT, scorch: spec.scorch, holes, radius: Math.max(1.5, rmax*L),
+             integrity: 40, maxInt: 40, gone: false, side: 'UNKNOWN', sig: 1.5,
+             x: t.x + off.x, y: t.y + off.y, z: t.z + off.z, vx: vel.x, vy: vel.y, vz: vel.z };
+  });
+  if (kind === 'rail') {
+    spawnFrags(t, 12, 20, 60, shotW, 0.45, 0.8);   // spall out of the exit side
+    spawnFrags(t, 4, 5, 15, shotW.clone().negate(), 0.6, 0.6);
+    fireballs.push({ x: t.x, y: t.y, z: t.z, vx: t.vx, vy: t.vy, vz: t.vz, t0: simT, dur: 0.6, rmax: L*0.5, white: true });
+  } else if (kind === 'missile') {
+    spawnFrags(t, 20, 10, 40);
+    fireballs.push({ x: t.x, y: t.y, z: t.z, vx: t.vx, vy: t.vy, vz: t.vz, t0: simT, dur: 3, rmax: L*1.3 });
+  } else {
+    spawnFrags(t, 32, 15, 80);
+    fireballs.push({ x: t.x, y: t.y, z: t.z, vx: t.vx, vy: t.vy, vz: t.vz, t0: simT, dur: 5, rmax: L*2.2 });
+    fireballs.push({ x: t.x, y: t.y, z: t.z, vx: t.vx, vy: t.vy, vz: t.vz, t0: simT, dur: 0.5, rmax: L*0.8, white: true });
+  }
+  log(`${t.name} BROKEN UP · ${out.length} SECTIONS`);
+  return out;
+}
+// Debris collisions with the ship: a wreck section is a heavy blow; a fragment a light one
+function applyCollision(o, hull, sysLoss, label) {
+  hullInt = Math.max(0, hullInt - hull);
+  hitShakeUntil = performance.now()/1000 + 0.5;
+  sfx.hullThump(hull > 0.05);
+  const from = new THREE.Vector3(o.x - ship.x, o.y - ship.y, o.z - ship.z).applyQuaternion(toBodyQ());
+  if (from.lengthSq() > 0) from.normalize();
+  hullImpacts.push({ y: from.y, z: from.z, t: simT });
+  if (sysLoss > 0) {
+    const live = DMG_SYSTEMS.filter(sy => damage[sy.id] > 0);
+    if (live.length) { const sy = live[Math.random()*live.length | 0]; damage[sy.id] = Math.max(0, damage[sy.id] - sysLoss);
+      if (damage[sy.id] < 0.05) damage[sy.id] = 0; log(`${sy.name} ${damage[sy.id] > 0 ? 'DAMAGED ' + (damage[sy.id]*100).toFixed(0) + '%' : 'OFFLINE'}`); }
+  }
+  log(`${label} · HULL ${(hullInt*100).toFixed(0)}%`);
+  scoreAdd('DEBRIS STRIKES', hull > 0.05 ? -300 : -100);
+  if (hullInt <= 0) { shipDestroyed('HULL BREACH · DEBRIS COLLISION'); return true; }
+  return false;
+}
+function debrisStep(h) {
+  for (const t of targets) if (t.wreck && t.spin) {
+    const w = t.spin.length();
+    if (w > 1e-6) t.q.premultiply(new THREE.Quaternion().setFromAxisAngle(t.spin.clone().divideScalar(w), w*h)).normalize();
+    if (!t.gone && simT - (t.lastBump ?? -1e9) > 5 && segDist(t, ship) < t.radius + 6) {
+      t.lastBump = simT; if (applyCollision(t, 0.12, 0.3, `COLLISION · ${t.name}`)) return;
+    }
+  }
+  for (const fr of frags) { fr.px = fr.x; fr.py = fr.y; fr.pz = fr.z; rk4(fr, h, 0, 0, 0); }
+  for (const fr of frags) {
+    if (fr.dead) continue;
+    if (segDist(fr, ship) < 6) { fr.dead = true; if (applyCollision(fr, 0.02 + 0.04*fr.size, fr.size > 0.4 ? 0.15 : 0, 'DEBRIS STRIKE')) return; }
+    else if (Math.hypot(fr.x - ship.x, fr.y - ship.y, fr.z - ship.z) > 400e3) fr.dead = true;   // far away: forget it
+  }
+  frags = frags.filter(fr => !fr.dead);
+  fireballs = fireballs.filter(fb => simT - fb.t0 < fb.dur);
+}
 const SCOPE_AZ_MAX = 60 * Math.PI/180, SCOPE_EL_MAX = 45 * Math.PI/180, SCOPE_SLEW = 25 * Math.PI/180;
 // Scope view rotation: the gimbal turns the boresight, so the view is taken in the gimbal's frame
 function scopeGimbalQ() {
@@ -3616,6 +3819,7 @@ function leadTime(rel, relV, V = WEAPON.railV) {
   return null;
 }
 function irLevel(t) {
+  if (t.wreck) return 0.08 + 0.6*Math.exp(-(simT - t.tKill)/t.glowT);
   const n = t.name;
   return n.includes('TUG') ? 0.85 : n.includes('DERELICT') ? 0.35 : n.includes('DEBRIS') ? 0.2 : 0.4;
 }
@@ -3669,7 +3873,7 @@ function drawScope(g, W, H, idx) {
   // Ships and objects: flat silhouettes along their direction of travel (relative to the body they orbit),
   // scaled to the range; a point of light when smaller than a few pixels. Hidden behind Earth or the Moon.
   const pxPerM = d => (1/d)/SCOPE_FOV*R;
-  const silhouette = (rel, axisW, len, model, fill, heat, upW = null) => {
+  const silhouette = (rel, axisW, len, model, fill, heat, upW = null, ex = null) => {
     const v = rel.clone().applyQuaternion(bq), p = proj(v); if (!p) return;
     const d = rel.length(), k = pxPerM(d)*len;
     if (k < 5) {                                     // unresolved: a dot (or a bloom in IR)
@@ -3682,11 +3886,15 @@ function drawScope(g, W, H, idx) {
     }
     // Attitude: nose along the axis, top toward `upW` (away from the body it orbits), flat-shaded faces,
     // back faces culled, drawn far to near.
-    const f = axisW.clone().normalize();
-    let up = (upW || new THREE.Vector3(0, 0, 1)).clone().addScaledVector(f, -(upW || new THREE.Vector3(0, 0, 1)).dot(f));
-    if (up.lengthSq() < 1e-8) up = new THREE.Vector3(1, 0, 0).addScaledVector(f, -f.x);
-    up.normalize();
-    const rt = new THREE.Vector3().crossVectors(f, up);
+    let f, up, rt;
+    if (ex && ex.basis) ({ f, up, rt } = ex.basis);
+    else {
+      f = axisW.clone().normalize();
+      up = (upW || new THREE.Vector3(0, 0, 1)).clone().addScaledVector(f, -(upW || new THREE.Vector3(0, 0, 1)).dot(f));
+      if (up.lengthSq() < 1e-8) up = new THREE.Vector3(1, 0, 0).addScaledVector(f, -f.x);
+      up.normalize();
+      rt = new THREE.Vector3().crossVectors(f, up);
+    }
     const fv = f.clone().applyQuaternion(bq), uv = up.clone().applyQuaternion(bq), rv = rt.clone().applyQuaternion(bq);
     const kk = pxPerM(d)*len;
     const toV = q => [fv.x*q[0] + uv.x*q[1] + rv.x*q[2], fv.y*q[0] + uv.y*q[1] + rv.y*q[2], fv.z*q[0] + uv.z*q[1] + rv.z*q[2]];
@@ -3697,7 +3905,7 @@ function drawScope(g, W, H, idx) {
             nWz = f.z*fc.n[0] + up.z*fc.n[1] + rt.z*fc.n[2];
       const lam = Math.max(0, nW*SUN_DIR.x + nWy*SUN_DIR.y + nWz*SUN_DIR.z);
       let zs = 0; const pts = fc.pts.map(q => { const vq = toV(q); zs += vq[2]; return [p.x + vq[0]*kk, p.y - vq[1]*kk]; });
-      draw.push({ pts, z: zs/fc.pts.length, lam, nz: nV[2], tone: fc.tone });
+      draw.push({ pts, z: zs/fc.pts.length, lam, nz: nV[2], tone: fc.tone, cut: fc.cut });
     }
     draw.sort((A, B) => A.z - B.z);
     if (irOn) {                                      // heat bloom behind the shape
@@ -3715,16 +3923,38 @@ function drawScope(g, W, H, idx) {
     if (scopeSilCv.width !== S) { scopeSilCv.width = S; scopeSilCv.height = S; }
     const sg = scopeSilCv.getContext('2d'), sc = S/2;
     sg.clearRect(0, 0, S, S);
+    const age = ex && ex.tKill !== undefined ? simT - ex.tKill : 1e9;
+    const glowV = Math.exp(-age/20), glowI = ex && ex.glowT ? Math.exp(-age/ex.glowT) : 0, scorch = ex && ex.scorch || 1;
     for (const fc of draw) {
       let v;
-      if (irOn) v = (55 + 200*heat*(fc.tone < 1 ? 1 : 0.75))*(0.8 + 0.2*fc.nz);     // radiators glow hottest; a cold hull is dark
-      else v = 255*Math.min(1, 0.06 + 0.8*fc.lam*fc.tone);
+      if (irOn) v = (55 + 200*Math.max(heat*(fc.tone < 1 ? 1 : 0.75), fc.cut ? glowI : 0))*(0.8 + 0.2*fc.nz);   // radiators glow hottest; a cold hull is dark; cut ends stay hot
+      else v = 255*Math.min(1, 0.06 + 0.8*fc.lam*fc.tone)*scorch;
       const c = clamp(v, 0, 255) | 0;
-      sg.fillStyle = irOn ? `rgb(${c},${c},${c})` : `rgb(${c*0.92|0},${c*0.97|0},${c})`;
+      if (!irOn && fc.cut && glowV > 0.02) {           // freshly cut metal glows orange, then cools
+        sg.fillStyle = `rgb(${Math.max(c*0.92, 255*glowV)|0},${Math.max(c*0.97, 140*glowV)|0},${Math.max(c, 60*glowV)|0})`;
+      } else sg.fillStyle = irOn ? `rgb(${c},${c},${c})` : `rgb(${c*0.92|0},${c*0.97|0},${c})`;
       sg.strokeStyle = sg.fillStyle; sg.lineWidth = 0.6/resPx + 0.2;   // hide hairline seams between faces
       sg.beginPath();
       fc.pts.forEach(([x, y], i) => { const X = sc + (x - p.x)/resPx, Y = sc + (y - p.y)/resPx; i ? sg.lineTo(X, Y) : sg.moveTo(X, Y); });
       sg.closePath(); sg.fill(); sg.stroke();
+    }
+    // Holes punched by hits that did not kill, and the gas venting from them (and from torpedo-cut sections)
+    if (ex && ex.holes) for (const ho of ex.holes) {
+      const hv = toV(ho.p), nvv = toV(ho.n), X = sc + hv[0]*kk/resPx, Y = sc - hv[1]*kk/resPx;
+      if (ho.size && nvv[2] > 0.1) {
+        sg.fillStyle = irOn ? 'rgba(20,20,20,0.9)' : 'rgba(8,8,10,0.95)';
+        sg.beginPath(); sg.ellipse(X, Y, Math.max(0.6, ho.size*kk/resPx), Math.max(0.4, ho.size*kk/resPx*(0.4 + 0.6*nvv[2])),
+          Math.atan2(-nvv[1], nvv[0]), 0, Math.PI*2); sg.fill();
+      }
+      const ha = simT - ho.t;
+      if (ha < ho.dur) for (let i = 0; i < (ho.big ? 14 : 8); i++) {   // puffs drifting outward and spreading
+        const a = ha - i*0.3; if (a < 0) continue;
+        const dist = (ho.big ? 0.04 : 0.02) + a*(ho.big ? 0.025 : 0.03), sp = 0.04*a*(1 + (i % 3));
+        const qx = ho.p[0] + ho.n[0]*dist + Math.sin(i*2.3)*sp*0.3, qy = ho.p[1] + ho.n[1]*dist + Math.cos(i*1.7)*sp*0.3, qz = ho.p[2] + ho.n[2]*dist + Math.sin(i*3.1)*sp*0.3;
+        const pv = toV([qx, qy, qz]), al = 0.4*(1 - ha/ho.dur)*(1 - i/16);
+        sg.fillStyle = irOn ? `rgba(255,255,255,${al*0.35})` : `rgba(225,230,238,${al})`;
+        sg.beginPath(); sg.arc(sc + pv[0]*kk/resPx, sc - pv[1]*kk/resPx, Math.max(0.5, (0.008 + (ho.big ? 0.012 : 0.008)*a)*kk/resPx), 0, Math.PI*2); sg.fill();
+      }
     }
     try {                                            // sensor noise, stronger the fewer elements the object covers
       const img = sg.getImageData(0, 0, S, S), dd = img.data, amp = clamp(60/Math.sqrt(kk/resPx), 8, 45);
@@ -3753,7 +3983,8 @@ function drawScope(g, W, H, idx) {
     const rel = new THREE.Vector3(t.x-ship.x, t.y-ship.y, t.z-ship.z);
     const inMoon = Math.hypot(t.x - mpp[0], t.y - mpp[1], t.z - mpp[2]) < MOON_SOI;
     const upW = new THREE.Vector3(t.x - (inMoon ? mpp[0] : 0), t.y - (inMoon ? mpp[1] : 0), t.z - (inMoon ? mpp[2] : 0));   // radial out
-    const r = silhouette(rel, relVel(t), 2*t.radius, MODELS3D[silClass(t)], '#b8c4cc', Math.min(1, irLevel(t) + (t.burning ? 0.5 : 0)), upW);
+    const ex = { basis: targetFrame(t), holes: t.holes, tKill: t.tKill, glowT: t.glowT, scorch: t.scorch };
+    const r = silhouette(rel, relVel(t), t.len || 2*t.radius, t.model || MODELS3D[silClass(t)], '#b8c4cc', Math.min(1, irLevel(t) + (t.burning ? 0.5 : 0)), upW, ex);
     // A burning ship shows its drive flame, opposite the thrust
     if (r && t.burning && t.thrA) {
       const a = new THREE.Vector3(...t.thrA).normalize().applyQuaternion(bq);
@@ -3767,6 +3998,29 @@ function drawScope(g, W, H, idx) {
   const ordAxis = o => o.cmd && Math.hypot(...o.cmd) > 1 ? new THREE.Vector3(...o.cmd) : new THREE.Vector3(o.vx-ship.vx, o.vy-ship.vy, o.vz-ship.vz);
   for (const o of ordnance) silhouette(new THREE.Vector3(o.x-ship.x, o.y-ship.y, o.z-ship.z), ordAxis(o), o.kind === 'torpedo' ? 5 : 3, MODELS3D.ordnance, ORD[o.kind].color, 0.9);
   for (const tp of torpedoes) if (!tp.dead) silhouette(new THREE.Vector3(tp.x-ship.x, tp.y-ship.y, tp.z-ship.z), ordAxis(tp), 4, MODELS3D.ordnance, '#ff8a4a', 0.9);
+  // Fireballs: an expanding, fading ball of hot gas (white flash for spall and secondary blasts)
+  const resG = Math.max(1.2, (irOn ? SCOPE_RES_IR : SCOPE_RES)/(SCOPE_FOV/R));
+  for (const fb of fireballs) {
+    const a = (simT - fb.t0)/fb.dur; if (a < 0 || a > 1) continue;
+    const dt = simT - fb.t0, pos = new THREE.Vector3(fb.x + fb.vx*dt - ship.x, fb.y + fb.vy*dt - ship.y, fb.z + fb.vz*dt - ship.z);
+    const pp = projU(pos.clone().applyQuaternion(bq)); if (!pp) continue;
+    const rr = Math.max(3, fb.rmax*Math.sqrt(a)*pxPerM(pos.length())) + resG, al = (1 - a)*(1 - a);
+    const gr = g.createRadialGradient(pp.x, pp.y, 0, pp.x, pp.y, rr);
+    if (irOn || fb.white) { gr.addColorStop(0, `rgba(255,255,255,${al})`); gr.addColorStop(0.5, `rgba(255,255,255,${0.5*al})`); }
+    else { gr.addColorStop(0, `rgba(255,245,200,${al})`); gr.addColorStop(0.35, `rgba(255,150,50,${0.8*al})`); gr.addColorStop(0.75, `rgba(170,50,20,${0.4*al})`); }
+    gr.addColorStop(1, 'rgba(0,0,0,0)');
+    g.save(); g.globalCompositeOperation = 'lighter'; g.fillStyle = gr; g.beginPath(); g.arc(pp.x, pp.y, rr, 0, Math.PI*2); g.fill(); g.restore();
+  }
+  // Fragments: tumbling shards that glint as they turn; hot ones glow for half a minute
+  for (const fr of frags) {
+    const v = new THREE.Vector3(fr.x-ship.x, fr.y-ship.y, fr.z-ship.z), pp = proj(v.clone().applyQuaternion(bq)); if (!pp) continue;
+    const age = simT - fr.t0, hot = fr.hot*Math.exp(-age/30), glint = 0.35 + 0.65*Math.max(0, Math.sin(fr.ph + fr.spin*simT))**4;
+    const sz = Math.max(1, fr.size*pxPerM(v.length()));
+    let col;
+    if (irOn) { const c = 60 + 195*Math.max(hot, 0.1); col = `rgb(${c|0},${c|0},${c|0})`; }
+    else { const c = 200*glint; col = hot > 0.1 ? `rgb(${Math.max(c, 255*hot)|0},${Math.max(c*0.97, 130*hot)|0},${c|0})` : `rgb(${c*0.9|0},${c*0.95|0},${c|0})`; }
+    g.fillStyle = col; g.fillRect(pp.x - sz/2, pp.y - sz/2, sz, sz);
+  }
   for (const dc of decoys) {                         // decoy clouds: a scatter of sparks
     const p = proj(new THREE.Vector3(dc.x-ship.x, dc.y-ship.y, dc.z-ship.z).applyQuaternion(bq)); if (!p) continue;
     const sp = Math.max(2, pxPerM(Math.hypot(dc.x-ship.x, dc.y-ship.y, dc.z-ship.z))*30);
