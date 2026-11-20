@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OG — Cockpit prototype v0.5.3</title>
+<title>OG — Cockpit prototype v0.5.4</title>
 <style>
   html, body { margin:0; height:100%; background:#000; overflow:hidden;
     font-family: ui-monospace, Menlo, Consolas, monospace; color:#cfd8c0; }
@@ -90,7 +90,7 @@
 </head>
 <body>
 <canvas id="gl"></canvas>
-<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.5.3</span></div>
+<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.5.4</span></div>
 <div id="hangar"><div class="load" id="hangarLoad">LOADING SHIP</div>
   <div class="hint">DRAG TO ORBIT · WHEEL TO ZOOM · CLICK A HARDPOINT TO CHOOSE ITS MODULE</div>
   <div class="panel"><h2>HANGAR</h2><div class="sub">LOADOUT · SELECT A HARDPOINT, THEN A MODULE</div>
@@ -1551,7 +1551,7 @@ function leadBodyDir() {
 // Fire-control hold: body-axis RCS commands (-1..1) that rotate the nose onto the lead point.
 // Uses the same torque path as manual control, so it spends RCS propellant and respects the torque limit.
 // Damping ratio of the hold is 1/(2*sqrt(LEAD_GAIN*LEAD_TAU_TIME)): about 1.1 here, so it settles without overshoot.
-const LEAD_GAIN = 0.4, LEAD_MAX_RATE = 0.5, LEAD_TAU_TIME = 0.5;   // 1/s (error correction), rad/s (cap), s
+const LEAD_GAIN = 0.4, LEAD_MAX_RATE = 0.5, LEAD_TAU_TIME = 0.5, LEAD_FILT = 0.25;   // 1/s (error correction), rad/s (cap), s
 // Previous lead point, used to find how fast the lead direction turns (the feed-forward term)
 let leadPrev = null;
 // Turn axis from the last well-defined direction. When the lead point is nearly behind the nose, fwd x Lb
@@ -1585,13 +1585,22 @@ function leadHoldCmd(h) {
   // Skipped on the first step after a target change, when the lead point jumps.
   // Acceleration feed-forward: the rate at which the line of sight turns is itself changing, so the torque
   // also needs its time derivative. Without it the nose lags a few hundredths of a degree on a curving target.
+  // The rates come from the change since the previous call, over the time that actually passed (frames vary in
+  // length; dividing by the current step instead made the rate up to 4x wrong on uneven frame times). Both are
+  // smoothed over LEAD_FILT s, so solver noise and frame jitter are not differentiated into torque spikes.
   let wLos = null, dwLos = new THREE.Vector3();
-  if (leadPrev && leadPrev.tgt === tgt && h > 0) {
-    const dL = L.clone().sub(leadPrev.L).divideScalar(h);
-    wLos = new THREE.Vector3().crossVectors(L, dL).divideScalar(L.lengthSq());
-    if (leadPrev.wLos) dwLos = wLos.clone().sub(leadPrev.wLos).divideScalar(h);
-  }
-  leadPrev = { tgt, L: L.clone(), wLos: wLos ? wLos.clone() : (leadPrev && leadPrev.tgt === tgt ? leadPrev.wLos : null), t: simT };
+  const el = leadPrev ? simT - leadPrev.t : 0;
+  if (leadPrev && leadPrev.tgt === tgt && el > 1e-4 && el < 1) {
+    const dL = L.clone().sub(leadPrev.L).divideScalar(el);
+    const wRaw = new THREE.Vector3().crossVectors(L, dL).divideScalar(L.lengthSq());
+    const k = Math.min(1, el/LEAD_FILT);
+    wLos = leadPrev.wLos ? leadPrev.wLos.clone().multiplyScalar(1 - k).addScaledVector(wRaw, k) : wRaw;
+    const dRaw = leadPrev.wLos ? wLos.clone().sub(leadPrev.wLos).divideScalar(el) : new THREE.Vector3();
+    dwLos = leadPrev.dwLos ? leadPrev.dwLos.clone().multiplyScalar(1 - k).addScaledVector(dRaw, k) : dRaw;
+    if (dwLos.length() > 0.05) dwLos.setLength(0.05);   // rad/s^2: no real lead turns faster than this
+  } else if (leadPrev && leadPrev.tgt === tgt && el <= 1e-4) { wLos = leadPrev.wLos; dwLos = leadPrev.dwLos ? leadPrev.dwLos.clone() : dwLos; }
+  if (!(leadPrev && leadPrev.tgt === tgt && el <= 1e-4))
+    leadPrev = { tgt, L: L.clone(), wLos: wLos ? wLos.clone() : (leadPrev && leadPrev.tgt === tgt ? leadPrev.wLos : null), dwLos: dwLos.clone(), t: simT };
   const qb = toBodyQ();
   const ff = (wLos || new THREE.Vector3()).clone().applyQuaternion(qb);
   const dff = dwLos.applyQuaternion(qb);
