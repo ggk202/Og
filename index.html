@@ -3429,30 +3429,76 @@ function bodyImage(kind, vq, ir) {
   return C.cv;
 }
 
-/* ---------- Telescope silhouettes ----------
-   Flat 2D outlines, no surface detail. u runs along the object's long axis (+u forward), w across it; both in units
-   of the object's length. Shapes: ['p', [[u, w], ...]] polygon, ['c', u, w, r] circle (spheres need no turning). */
-const SIL = {
-  warship: [['p', [[0.5, 0], [0.34, 0.07], [0.12, 0.08], [0.12, 0.24], [-0.06, 0.24], [-0.06, 0.08], [-0.34, 0.08], [-0.4, 0.12],
-                   [-0.5, 0.12], [-0.5, -0.12], [-0.4, -0.12], [-0.34, -0.08], [-0.06, -0.08], [-0.06, -0.24], [0.12, -0.24],
-                   [0.12, -0.08], [0.34, -0.07]]]],
-  station: [['p', [[0.5, 0.03], [-0.5, 0.03], [-0.5, -0.03], [0.5, -0.03]]], ['p', [[0.03, 0.5], [-0.03, 0.5], [-0.03, -0.5], [0.03, -0.5]]],
-            ['c', 0.3, 0, 0.11], ['c', -0.3, 0, 0.11], ['c', 0, 0.3, 0.11], ['c', 0, -0.3, 0.11], ['c', 0, 0, 0.09],
-            ['p', [[0.42, 0.05], [0.42, 0.32], [0.36, 0.32], [0.36, 0.05]]], ['p', [[-0.42, -0.05], [-0.42, -0.32], [-0.36, -0.32], [-0.36, -0.05]]]],
-  hauler:  [['p', [[0.5, 0.05], [0.42, 0.09], [0.42, 0.16], [-0.3, 0.16], [-0.3, 0.06], [-0.38, 0.06], [-0.44, 0.1], [-0.5, 0.1],
-                   [-0.5, -0.1], [-0.44, -0.1], [-0.38, -0.06], [-0.3, -0.06], [-0.3, -0.16], [0.42, -0.16], [0.42, -0.09], [0.5, -0.05]]]],
-  tanker:  [['p', [[0.5, 0.02], [0.4, 0.15], [-0.32, 0.15], [-0.32, -0.15], [0.4, -0.15], [0.5, -0.02]]],
-            ['p', [[-0.32, 0.05], [-0.42, 0.05], [-0.5, 0.11], [-0.5, -0.11], [-0.42, -0.05], [-0.32, -0.05]]]],
-  tug:     [['p', [[0.5, 0.18], [0.5, 0.26], [0.2, 0.26], [0.2, 0.2], [0.1, 0.2], [0.1, -0.2], [0.2, -0.2], [0.2, -0.26], [0.5, -0.26],
-                   [0.5, -0.18], [0.28, -0.18], [0.28, 0.18]]],
-            ['p', [[0.1, 0.16], [-0.25, 0.16], [-0.25, -0.16], [0.1, -0.16]]],
-            ['p', [[-0.25, 0.08], [-0.34, 0.08], [-0.5, 0.2], [-0.5, -0.2], [-0.34, -0.08], [-0.25, -0.08]]]],
-  satellite: [['p', [[0.1, 0.1], [-0.1, 0.1], [-0.1, -0.1], [0.1, -0.1]]],
-              ['p', [[0.06, 0.13], [0.06, 0.5], [-0.06, 0.5], [-0.06, 0.13]]], ['p', [[0.06, -0.13], [0.06, -0.5], [-0.06, -0.5], [-0.06, -0.13]]],
-              ['p', [[0.1, 0.01], [0.24, 0.01], [0.24, -0.01], [0.1, -0.01]]], ['c', 0.27, 0, 0.05]],
-  debris:  [['p', [[0.5, 0.05], [0.25, 0.3], [0.05, 0.22], [-0.15, 0.42], [-0.4, 0.18], [-0.5, -0.1], [-0.2, -0.32], [0.1, -0.2], [0.3, -0.38]]]],
-  ordnance: [['p', [[0.5, 0], [0.38, 0.06], [-0.36, 0.06], [-0.5, 0.16], [-0.5, -0.16], [-0.36, -0.06], [0.38, -0.06]]]],
+/* ---------- Telescope models: primitive 3D shapes, no surface detail ----------
+   Each class is a few convex primitives in units of the object's length: u forward (+0.5 is the nose), v up, w right.
+   cyl(u0, u1, r0, r1, v, w): cylinder or cone along u; box(centre, size); sph(centre, r). Tone scales the brightness
+   (radiators and engine bells darker in daylight, hotter in IR). Meshes are built once; faces face outward. */
+const PRIM = {
+  cyl: (u0, u1, r0, r1, cv = 0, cw = 0, tone = 1, N = 12) => {
+    const ring = (u, r) => Array.from({ length: N }, (_, i) => [u, cv + r*Math.cos(i/N*2*Math.PI), cw + r*Math.sin(i/N*2*Math.PI)]);
+    const A = ring(u0, r0), B = ring(u1, r1), F = [];
+    for (let i = 0; i < N; i++) { const j = (i + 1) % N; F.push([A[i], A[j], B[j], B[i]]); }
+    if (r0 > 0) F.push(A); if (r1 > 0) F.push(B);
+    return { faces: F, c: [(u0 + u1)/2, cv, cw], tone };
+  },
+  box: (c, sz, tone = 1) => {
+    const V = (i, j, k) => [c[0] + (i - 0.5)*sz[0], c[1] + (j - 0.5)*sz[1], c[2] + (k - 0.5)*sz[2]];
+    return { c, tone, faces: [[V(0,0,0), V(0,1,0), V(0,1,1), V(0,0,1)], [V(1,0,0), V(1,1,0), V(1,1,1), V(1,0,1)],
+      [V(0,0,0), V(1,0,0), V(1,0,1), V(0,0,1)], [V(0,1,0), V(1,1,0), V(1,1,1), V(0,1,1)],
+      [V(0,0,0), V(1,0,0), V(1,1,0), V(0,1,0)], [V(0,0,1), V(1,0,1), V(1,1,1), V(0,1,1)]] };
+  },
+  sph: (c, r, tone = 1) => {
+    const P = (i, j) => { const th = i/5*Math.PI, ph = j/8*2*Math.PI;
+      return [c[0] + r*Math.cos(th), c[1] + r*Math.sin(th)*Math.cos(ph), c[2] + r*Math.sin(th)*Math.sin(ph)]; };
+    const F = []; for (let i = 0; i < 5; i++) for (let j = 0; j < 8; j++) F.push([P(i, j), P(i + 1, j), P(i + 1, j + 1), P(i, j + 1)]);
+    return { faces: F, c, tone };
+  },
 };
+function buildModel(prims) {                         // flatten to faces with outward unit normals
+  const out = [];
+  for (const pr of prims) for (const f of pr.faces) {
+    let nx = 0, ny = 0, nz = 0, mx = 0, my = 0, mz = 0;
+    for (let i = 0; i < f.length; i++) {             // Newell's method
+      const a = f[i], b = f[(i + 1) % f.length];
+      nx += (a[1] - b[1])*(a[2] + b[2]); ny += (a[2] - b[2])*(a[0] + b[0]); nz += (a[0] - b[0])*(a[1] + b[1]);
+      mx += a[0]; my += a[1]; mz += a[2];
+    }
+    const nl = Math.hypot(nx, ny, nz); if (nl < 1e-12) continue;
+    nx /= nl; ny /= nl; nz /= nl; mx /= f.length; my /= f.length; mz /= f.length;
+    if (nx*(mx - pr.c[0]) + ny*(my - pr.c[1]) + nz*(mz - pr.c[2]) < 0) { nx = -nx; ny = -ny; nz = -nz; }
+    out.push({ pts: f, n: [nx, ny, nz], tone: pr.tone });
+  }
+  return out;
+}
+const MODELS3D = (() => {
+const { cyl, box, sph } = PRIM;
+const RAD = 0.55, BELL = 0.6;                        // radiator and engine-bell tones
+return Object.fromEntries(Object.entries({
+  // corvette: hull cylinder, nose cone, two radiator panels, drive bell
+  corvette: [cyl(-0.42, 0.32, 0.075, 0.075), cyl(0.32, 0.5, 0.075, 0.025), cyl(-0.5, -0.42, 0.05, 0.09, 0, 0, BELL),
+             box([-0.05, 0, 0.175], [0.3, 0.012, 0.2], RAD), box([-0.05, 0, -0.175], [0.3, 0.012, 0.2], RAD)],
+  // frigate / destroyer: heavier hull, two radiator pairs, turrets above and below
+  capital:  [cyl(-0.42, 0.3, 0.09, 0.09), cyl(0.3, 0.5, 0.09, 0.04), cyl(-0.5, -0.42, 0.06, 0.11, 0, 0, BELL),
+             box([-0.2, 0, 0.2], [0.18, 0.012, 0.22], RAD), box([-0.2, 0, -0.2], [0.18, 0.012, 0.22], RAD),
+             box([0.05, 0, 0.2], [0.18, 0.012, 0.22], RAD), box([0.05, 0, -0.2], [0.18, 0.012, 0.22], RAD),
+             box([0.18, 0.11, 0], [0.08, 0.04, 0.06]), box([0.18, -0.11, 0], [0.08, 0.04, 0.06])],
+  station:  [sph([0, 0, 0], 0.1), box([0, 0, 0], [1, 0.04, 0.04]), box([0, 0, 0], [0.04, 0.04, 1]),
+             sph([0.3, 0, 0], 0.11), sph([-0.3, 0, 0], 0.11), sph([0, 0, 0.3], 0.11), sph([0, 0, -0.3], 0.11),
+             box([0, 0.12, 0], [0.3, 0.01, 0.3], RAD)],
+  hauler:   [cyl(-0.42, 0.5, 0.03, 0.03), box([0.02, 0, 0], [0.7, 0.24, 0.24]), box([0.44, 0, 0], [0.1, 0.1, 0.1]),
+             cyl(-0.5, -0.42, 0.04, 0.09, 0, 0, BELL)],
+  tanker:   [cyl(-0.35, 0.42, 0.1, 0.1, 0, 0.1), cyl(-0.35, 0.42, 0.1, 0.1, 0, -0.1), cyl(0.42, 0.5, 0.1, 0.05, 0, 0.1),
+             cyl(0.42, 0.5, 0.1, 0.05, 0, -0.1), cyl(-0.5, -0.35, 0.05, 0.1, 0, 0, BELL)],
+  tug:      [box([0.02, 0, 0], [0.34, 0.3, 0.3]), box([0.36, 0, 0.18], [0.3, 0.06, 0.06]), box([0.36, 0, -0.18], [0.3, 0.06, 0.06]),
+             cyl(-0.5, -0.15, 0.06, 0.15, 0, 0, BELL)],
+  satellite:[box([0, 0, 0], [0.2, 0.2, 0.2]), box([0, 0, 0.32], [0.12, 0.01, 0.36], RAD), box([0, 0, -0.32], [0.12, 0.01, 0.36], RAD),
+             cyl(0.1, 0.2, 0.02, 0.09)],
+  debris:   [box([0, 0, 0], [0.6, 0.25, 0.4]), box([0.25, 0.12, 0.1], [0.3, 0.3, 0.15], 0.8), cyl(-0.5, -0.15, 0.08, 0.13, -0.05, 0.05, 0.7)],
+  ordnance: [cyl(-0.4, 0.35, 0.05, 0.05, 0, 0, 1, 8), cyl(0.35, 0.5, 0.05, 0, 0, 0, 1, 8),
+             box([-0.42, 0, 0.09], [0.12, 0.01, 0.08], RAD), box([-0.42, 0, -0.09], [0.12, 0.01, 0.08], RAD),
+             box([-0.42, 0.09, 0], [0.12, 0.08, 0.01], RAD), box([-0.42, -0.09, 0], [0.12, 0.08, 0.01], RAD)],
+}).map(([k, v]) => [k, buildModel(v)]));
+})();
 function silClass(t) {
   const n = t.name;
   if (/DEPOT|STATION/.test(n)) return 'station';
@@ -3461,7 +3507,8 @@ function silClass(t) {
   if (/TUG/.test(n)) return 'tug';
   if (/SAT|SURVEY/.test(n)) return 'satellite';
   if (/DEBRIS|FRAGMENT/.test(n)) return 'debris';
-  return 'warship';
+  if (/FRIGATE|DESTROYER/.test(n)) return 'capital';
+  return 'corvette';
 }
 const SCOPE_AZ_MAX = 60 * Math.PI/180, SCOPE_EL_MAX = 45 * Math.PI/180, SCOPE_SLEW = 25 * Math.PI/180;
 // Scope view rotation: the gimbal turns the boresight, so the view is taken in the gimbal's frame
@@ -3549,7 +3596,7 @@ function drawScope(g, W, H, idx) {
   // Ships and objects: flat silhouettes along their direction of travel (relative to the body they orbit),
   // scaled to the range; a point of light when smaller than a few pixels. Hidden behind Earth or the Moon.
   const pxPerM = d => (1/d)/SCOPE_FOV*R;
-  const silhouette = (rel, axisW, len, shapes, fill, heat) => {
+  const silhouette = (rel, axisW, len, model, fill, heat, upW = null) => {
     const v = rel.clone().applyQuaternion(bq), p = proj(v); if (!p) return;
     const d = rel.length(), k = pxPerM(d)*len;
     if (k < 5) {                                     // unresolved: a dot (or a bloom in IR)
@@ -3560,22 +3607,41 @@ function drawScope(g, W, H, idx) {
       } else { g.fillStyle = fill; g.beginPath(); g.arc(p.x, p.y, Math.max(1.5, k/2), 0, Math.PI*2); g.fill(); }
       return;
     }
-    // Long axis on the screen: foreshortened along u; w is drawn full width, at right angles to it
-    const a = axisW.clone().normalize().applyQuaternion(bq);
-    let ux = a.x, uy = -a.y; const ul = Math.hypot(ux, uy);
-    if (ul < 1e-3) { ux = 1; uy = 0; } else { ux /= ul; uy /= ul; }
-    const fu = Math.max(0.4, ul), wx = -uy, wy = ux;     // never fully end-on: the outline stays readable
-    const P = (u, w) => [p.x + (u*fu*ux + w*wx)*k, p.y + (u*fu*uy + w*wy)*k];
-    if (irOn) { g.shadowColor = `rgba(255,255,255,${0.4 + 0.6*heat})`; g.shadowBlur = 6 + 10*heat; }
-    g.fillStyle = irOn ? `rgb(${(150 + 105*heat)|0},${(150 + 105*heat)|0},${(150 + 105*heat)|0})` : fill;
-    for (const sh of shapes) {
-      g.beginPath();
-      if (sh[0] === 'p') { sh[1].forEach(([u, w], i) => { const [x, y] = P(u, w); i ? g.lineTo(x, y) : g.moveTo(x, y); }); g.closePath(); }
-      else { const [x, y] = P(sh[1], sh[2]); g.arc(x, y, sh[3]*k, 0, Math.PI*2); }
-      g.fill();
+    // Attitude: nose along the axis, top toward `upW` (away from the body it orbits), flat-shaded faces,
+    // back faces culled, drawn far to near.
+    const f = axisW.clone().normalize();
+    let up = (upW || new THREE.Vector3(0, 0, 1)).clone().addScaledVector(f, -(upW || new THREE.Vector3(0, 0, 1)).dot(f));
+    if (up.lengthSq() < 1e-8) up = new THREE.Vector3(1, 0, 0).addScaledVector(f, -f.x);
+    up.normalize();
+    const rt = new THREE.Vector3().crossVectors(f, up);
+    const fv = f.clone().applyQuaternion(bq), uv = up.clone().applyQuaternion(bq), rv = rt.clone().applyQuaternion(bq);
+    const kk = pxPerM(d)*len;
+    const toV = q => [fv.x*q[0] + uv.x*q[1] + rv.x*q[2], fv.y*q[0] + uv.y*q[1] + rv.y*q[2], fv.z*q[0] + uv.z*q[1] + rv.z*q[2]];
+    const draw = [];
+    for (const fc of model) {
+      const nV = toV(fc.n); if (nV[2] <= 0) continue;   // facing away from the scope
+      const nW = f.x*fc.n[0] + up.x*fc.n[1] + rt.x*fc.n[2], nWy = f.y*fc.n[0] + up.y*fc.n[1] + rt.y*fc.n[2],
+            nWz = f.z*fc.n[0] + up.z*fc.n[1] + rt.z*fc.n[2];
+      const lam = Math.max(0, nW*SUN_DIR.x + nWy*SUN_DIR.y + nWz*SUN_DIR.z);
+      let zs = 0; const pts = fc.pts.map(q => { const vq = toV(q); zs += vq[2]; return [p.x + vq[0]*kk, p.y - vq[1]*kk]; });
+      draw.push({ pts, z: zs/fc.pts.length, lam, nz: nV[2], tone: fc.tone });
     }
-    g.shadowBlur = 0;
-    return { p, k, ux, uy, fu };
+    draw.sort((A, B) => A.z - B.z);
+    if (irOn) {                                      // heat bloom behind the shape
+      const gr = g.createRadialGradient(p.x, p.y, 0, p.x, p.y, kk*0.8);
+      gr.addColorStop(0, `rgba(255,255,255,${0.15 + 0.3*heat})`); gr.addColorStop(1, 'rgba(0,0,0,0)');
+      g.fillStyle = gr; g.beginPath(); g.arc(p.x, p.y, kk*0.8, 0, Math.PI*2); g.fill();
+    }
+    for (const fc of draw) {
+      let v;
+      if (irOn) v = (55 + 200*heat*(fc.tone < 1 ? 1 : 0.75))*(0.8 + 0.2*fc.nz);     // radiators glow hottest; a cold hull is dark
+      else v = 255*Math.min(1, 0.06 + 0.8*fc.lam*fc.tone);
+      const c = clamp(v, 0, 255) | 0;
+      g.fillStyle = irOn ? `rgb(${c},${c},${c})` : `rgb(${c*0.92|0},${c*0.97|0},${c})`;
+      g.strokeStyle = g.fillStyle; g.lineWidth = 0.6;   // hide hairline seams between faces
+      g.beginPath(); fc.pts.forEach(([x, y], i) => i ? g.lineTo(x, y) : g.moveTo(x, y)); g.closePath(); g.fill(); g.stroke();
+    }
+    return { p, k };
   };
   const mv = moonVel(simT), mpp = moonPos(simT);
   const relVel = o => {                              // velocity relative to the body it is orbiting
@@ -3585,7 +3651,9 @@ function drawScope(g, W, H, idx) {
   for (const t of targets) {
     if (t.gone || !losClear(ship, t) || !losClearMoon(ship, t)) continue;
     const rel = new THREE.Vector3(t.x-ship.x, t.y-ship.y, t.z-ship.z);
-    const r = silhouette(rel, relVel(t), 2*t.radius, SIL[silClass(t)], '#b8c4cc', Math.min(1, irLevel(t) + (t.burning ? 0.5 : 0)));
+    const inMoon = Math.hypot(t.x - mpp[0], t.y - mpp[1], t.z - mpp[2]) < MOON_SOI;
+    const upW = new THREE.Vector3(t.x - (inMoon ? mpp[0] : 0), t.y - (inMoon ? mpp[1] : 0), t.z - (inMoon ? mpp[2] : 0));   // radial out
+    const r = silhouette(rel, relVel(t), 2*t.radius, MODELS3D[silClass(t)], '#b8c4cc', Math.min(1, irLevel(t) + (t.burning ? 0.5 : 0)), upW);
     // A burning ship shows its drive flame, opposite the thrust
     if (r && t.burning && t.thrA) {
       const a = new THREE.Vector3(...t.thrA).normalize().applyQuaternion(bq);
@@ -3597,8 +3665,8 @@ function drawScope(g, W, H, idx) {
   }
   // Ordnance and torpedoes: slender silhouettes along their thrust, or along their motion past the ship
   const ordAxis = o => o.cmd && Math.hypot(...o.cmd) > 1 ? new THREE.Vector3(...o.cmd) : new THREE.Vector3(o.vx-ship.vx, o.vy-ship.vy, o.vz-ship.vz);
-  for (const o of ordnance) silhouette(new THREE.Vector3(o.x-ship.x, o.y-ship.y, o.z-ship.z), ordAxis(o), o.kind === 'torpedo' ? 5 : 3, SIL.ordnance, ORD[o.kind].color, 0.9);
-  for (const tp of torpedoes) if (!tp.dead) silhouette(new THREE.Vector3(tp.x-ship.x, tp.y-ship.y, tp.z-ship.z), ordAxis(tp), 4, SIL.ordnance, '#ff8a4a', 0.9);
+  for (const o of ordnance) silhouette(new THREE.Vector3(o.x-ship.x, o.y-ship.y, o.z-ship.z), ordAxis(o), o.kind === 'torpedo' ? 5 : 3, MODELS3D.ordnance, ORD[o.kind].color, 0.9);
+  for (const tp of torpedoes) if (!tp.dead) silhouette(new THREE.Vector3(tp.x-ship.x, tp.y-ship.y, tp.z-ship.z), ordAxis(tp), 4, MODELS3D.ordnance, '#ff8a4a', 0.9);
   for (const dc of decoys) {                         // decoy clouds: a scatter of sparks
     const p = proj(new THREE.Vector3(dc.x-ship.x, dc.y-ship.y, dc.z-ship.z).applyQuaternion(bq)); if (!p) continue;
     const sp = Math.max(2, pxPerM(Math.hypot(dc.x-ship.x, dc.y-ship.y, dc.z-ship.z))*30);
