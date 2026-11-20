@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OG — Cockpit prototype v0.9.0</title>
+<title>OG — Cockpit prototype v0.10.0</title>
 <style>
   html, body { margin:0; height:100%; background:#000; overflow:hidden;
     font-family: ui-monospace, Menlo, Consolas, monospace; color:#cfd8c0; }
@@ -93,7 +93,7 @@
 </head>
 <body>
 <canvas id="gl"></canvas>
-<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.9.0</span></div>
+<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.10.0</span></div>
 <div id="hangar"><div class="load" id="hangarLoad">LOADING SHIP</div>
   <div class="hint">DRAG TO ORBIT · WHEEL TO ZOOM · CLICK A HARDPOINT TO CHOOSE ITS MODULE</div>
   <div class="panel"><h2>HANGAR</h2><div class="sub" id="hullName"></div><div id="hullSel"></div><div class="sub">LOADOUT · SELECT A HARDPOINT, THEN A MODULE</div>
@@ -270,7 +270,7 @@ const MOD_GEOM = {"mod_spinal_railgun":{"box":[-0.71,-0.525,-13.625,0.71,2.676,1
    the ship view. */
 const NEW_HULLS = {
   dd84: { name: 'DD-84 DESTROYER', short: 'DD-84', file: 'dd84_destroyer_bare.glb', length: 80,
-    ship: { hullDry: 210000, mainProp0: 60000, rcsProp0: 4000, rcsThrust: 8000, rcsIsp: 250, mainThrust: 300000, mainIsp: 3200 },
+    ship: { hullDry: 210000, mainProp0: 60000, rcsProp0: 4000, rcsThrust: 8000, rcsIsp: 250, mainThrust: 1500000, mainIsp: 3200 },
     power: { reactor: 1.5e6, reactorWaste: 1.0e6, avionics: 120e3, battCap: 200e6 }, therm: { capacity: 5e6, radArea: 300, radStowedArea: 300 },
     turn: 0.35, inertiaBox: [8.8, 9.4, 75], sys: { scope: [-35, -31], capacitors: [-25, -14], reactor: [0, 14], radiators: [22, 28], main: [30, 37.5] }, plume: 3,
     dockZ: 37.0, hitHull: 0.04, dials: { dv: 10000, load: 2000, heat: 1500 } },   // stern docking ring (body z) for the BS-90 booster collar
@@ -573,6 +573,7 @@ function restartAfterDeath() {
   mainProp = SHIP.mainProp0; rcsProp = SHIP.rcsProp0; podProp = tankProp0Total(); podsOn = tankCount() > 0;
   leadHold = false; leadPrev = null; hullHits = 0;
   dock = { state: 'FREE', capArmed: false, lights: true, t: 0, sepArmT: -1e9, prop: 0, g: null };
+  BA = null;
   updateSunDir();
   for (const t of targets) if (t.hostile) t.fireT = 10;
   const el = document.getElementById('death');
@@ -1155,8 +1156,10 @@ resetTargets();
    latches armed and, at contact, a closing rate, lateral offset and axis misalignment inside DOCK_LIM; soft capture
    pulls in and goes to hard dock after DOCK_HARD_T s. Docked, the booster rides with the ship (its mass and inertia
    added) until STAGE SEP, when its retro motors push it clear aft. bq: the booster's attitude (file axes). */
+// Nine LOX/LH2 engines: 9.8 MN, Isp 455 s. With the DD-84 docked the full stage gives about 4.9 km/s; the
+// departure burn for Mars takes about 3.8 of it.
 const BOOSTER = { name: 'BS-90 BOOSTER', file: 'mod_bs90_heavy_booster.glb', len: 69.5, center: 34.1, radius: 10.7,
-  dry: 90000, prop0: 1500000, sepV: 1.0, rcsTorque: 1.8e7 };
+  dry: 110000, prop0: 1210000, thrust: 9.8e6, isp: 455, sepV: 1.0, rcsTorque: 1.8e7 };
 const DOCK_LIM = { v: 0.15, lat: 0.3, ang: 3 }, DOCK_HARD_T = 4, DOCK_GAP = 150;
 const Q_X_TO_NEGZ = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI/2);   // model +x (forward) -> file -Z
 let dock = { state: 'FREE', capArmed: false, lights: true, t: 0, sepArmT: -1e9, prop: 0, g: null };
@@ -1213,6 +1216,7 @@ function dockStep(h) {
   ship.vx += G.a.x*dv; ship.vy += G.a.y*dv; ship.vz += G.a.z*dv;
   ship.x += G.a.x*(0.06 - G.s); ship.y += G.a.y*(0.06 - G.s); ship.z += G.a.z*(0.06 - G.s);
   log(`CONTACT · NO CAPTURE · ${why}`); hullHitShake();
+  if (mission) mission.rebounds = (mission.rebounds || 0) + 1;
   if (G.closing > 0.6) {                             // a hard hit damages the drive bells against the truss
     hullInt = Math.max(0.05, hullInt - 0.04*G.closing); damage.main = Math.max(0, damage.main - 0.25*G.closing);
     log(`HARD CONTACT · MAIN DRIVE ${Math.round(damage.main*100)}%`);
@@ -1224,6 +1228,11 @@ function hardDock(b) {
   const i = targets.indexOf(b), cur = targets[curTarget];
   targets.splice(i, 1); curTarget = Math.max(0, targets.indexOf(cur));
   log(`HARD DOCK · STACK ${((shipMass())/1e3).toFixed(0)} T`);
+  if (mission && MISSIONS[mission.id].stageAuto && !BA) {
+    BA = { phase: 'HOLD', t: simT + BA_HOLD, done: [], dvAcc: 0, locked: false, firing: false, nextT: null };
+    log(`STAGE AUTOPILOT ENGAGED · DEPARTURE SEQUENCE IN ${BA_HOLD} S`);
+  }
+  if (mission && MISSIONS[mission.id].onDock) MISSIONS[mission.id].onDock();
 }
 function stageSep() {
   if (dock.state !== 'DOCKED') { log(dock.state === 'CAPTURE' ? 'SEP INHIBIT · CAPTURE IN PROGRESS' : 'NO STAGE ATTACHED'); return; }
@@ -1235,7 +1244,182 @@ function stageSep() {
     vx: ship.vx + aft.x*BOOSTER.sepV, vy: ship.vy + aft.y*BOOSTER.sepV, vz: ship.vz + aft.z*BOOSTER.sepV }, shipQ, dock.prop);
   b.trk = String(1000 + Math.floor(Math.random()*9000));
   targets.push(b); dock.state = 'FREE'; dock.capArmed = false;
+  if (BA) { BA.phase = 'OFF'; BA.locked = BA.firing = false; }
+  if (mission && MISSIONS[mission.id].onSep) MISSIONS[mission.id].onSep(b.prop);
   log('STAGE SEPARATION · BOOSTER CLEAR AFT');
+}
+
+/* ---------- Lambert's problem (universal variables, short way, prograde) ----------
+   Velocities at r1 and r2 for a transfer of duration tof about a body mu. */
+function lambert(r1, r2, tof, mu) {
+  const R1 = Math.hypot(...r1), R2 = Math.hypot(...r2), dot = r1[0]*r2[0] + r1[1]*r2[1] + r1[2]*r2[2];
+  // prograde about the ecliptic pole (the game frame is equatorial)
+  const cx = r1[1]*r2[2] - r1[2]*r2[1], cy = r1[2]*r2[0] - r1[0]*r2[2], cz = r1[0]*r2[1] - r1[1]*r2[0];
+  const kz = -cy*Math.sin(OBLIQ) + cz*Math.cos(OBLIQ);
+  let dnu = Math.acos(clamp(dot/(R1*R2), -1, 1));
+  if (kz < 0) dnu = 2*Math.PI - dnu;
+  const A = Math.sin(dnu)*Math.sqrt(R1*R2/(1 - Math.cos(dnu)));
+  const C2 = z => z > 1e-6 ? (1 - Math.cos(Math.sqrt(z)))/z : z < -1e-6 ? (Math.cosh(Math.sqrt(-z)) - 1)/(-z) : 0.5;
+  const C3 = z => z > 1e-6 ? (Math.sqrt(z) - Math.sin(Math.sqrt(z)))/Math.sqrt(z)**3 : z < -1e-6 ? (Math.sinh(Math.sqrt(-z)) - Math.sqrt(-z))/Math.sqrt(-z)**3 : 1/6;
+  const y = z => R1 + R2 + A*(z*C3(z) - 1)/Math.sqrt(C2(z));
+  const F = z => { const yy = y(z); return (yy/C2(z))**1.5*C3(z) + A*Math.sqrt(yy) - Math.sqrt(mu)*tof; };
+  let lo = -4*Math.PI*Math.PI, hi = 4*Math.PI*Math.PI;
+  while (y(lo) < 0) lo += 0.1;
+  for (let i = 0; i < 200; i++) { const m = (lo + hi)/2; if (F(m) > 0) hi = m; else lo = m; }
+  const z = (lo + hi)/2, yy = y(z), f = 1 - yy/R1, g = A*Math.sqrt(yy/mu), gd = 1 - yy/R2;
+  return [[0, 1, 2].map(i => (r2[i] - f*r1[i])/g), [0, 1, 2].map(i => (gd*r2[i] - r1[i])/g)];
+}
+const V3 = a => new THREE.Vector3(a[0], a[1], a[2]);
+// Mars' north pole (IAU: RA 317.68 deg, Dec 52.89 deg; the game frame is Earth-equatorial)
+const MARS_POLE = (() => { const ra = 317.68*Math.PI/180, de = 52.89*Math.PI/180; return new THREE.Vector3(Math.cos(de)*Math.cos(ra), Math.cos(de)*Math.sin(ra), Math.sin(de)); })();
+
+/* ---------- Stage autopilot (Operation Cataclysm) ----------
+   After hard dock the BS-90 takes the stack: it waits BA_HOLD s, picks the next pass of the departure point in
+   the parking orbit, solves the departure burn by shooting (a fixed inertial thrust direction and a cutoff delta-v,
+   flown in full gravity to the aim point APPROACH_T before Mars arrival), slews, fires, and later flies two course
+   corrections from its remaining propellant. While it is turning or firing the pilot's controls are locked out.
+   After the second correction the stage is the pilot's: the main engine key fires it until it is empty. */
+const BA_HOLD = 60, BA_SLEW = 0.6*Math.PI/180, APPROACH_T = 3*86400, BPLANE_T = 0.4*86400;   // B-plane read well inside Mars' sphere
+let BA = null;
+function stageMdot() { return BOOSTER.thrust/(BOOSTER.isp*G0); }
+// Fly a burn from state s at time tb along dir until dvCut (stage engines, mass m0), then coast to time t1
+function simBurnCoast(s, tb, dir, dvCut, m0, t1) {
+  const st = { ...s }, mdot = stageMdot(), hB = 1;
+  let t = tb, m = m0, dv = 0;
+  while (dv < dvCut) {
+    const h = Math.min(hB, (dvCut - dv)*m/BOOSTER.thrust + 1e-9), a = BOOSTER.thrust/m;
+    const sv = simT; simT = t; rk4(st, h, dir.x*a, dir.y*a, dir.z*a); simT = sv;
+    dv += a*h; m -= mdot*h; t += h;
+  }
+  return { s: integrateTo(st, t, t1, 60), tEnd: t, mEnd: m };
+}
+const aimAt = (P, t) => { const mp = marsPos(t); return V3(mp).addScaledVector(P.vinfArr, -(P.tA - t)).addScaledVector(P.bHat, P.B); };
+/* Miss at the approach point T1 measured in Mars' B-plane: the approach hyperbola (two-body about Mars from the
+   state at T1) gives the incoming asymptote S and the B vector (offset of the asymptote from Mars' centre); the
+   first two components are B minus the wanted B (bHat * B), the third is the timing along S against the aim
+   point. All in metres. */
+function bPlaneMiss(P, s1, T1) {
+  const mp = marsPos(T1), mv = marsVel(T1);
+  const r = V3([s1.x - mp[0], s1.y - mp[1], s1.z - mp[2]]), v = V3([s1.vx - mv[0], s1.vy - mv[1], s1.vz - mv[2]]);
+  const hv = new THREE.Vector3().crossVectors(r, v), hm = hv.length(), hh = hv.clone().divideScalar(hm);
+  const ev = new THREE.Vector3().crossVectors(v, hv).divideScalar(GM_MARS).addScaledVector(r, -1/r.length()), e = ev.length();
+  const vinf = Math.sqrt(Math.max(1, v.lengthSq() - 2*GM_MARS/r.length()));
+  const S = e > 1 ? ev.clone().divideScalar(e*e).addScaledVector(new THREE.Vector3().crossVectors(hh, ev).divideScalar(e), Math.sqrt(1 - 1/(e*e))).normalize() : v.clone().normalize();
+  const Bv = new THREE.Vector3().crossVectors(S, hh).multiplyScalar(hm/vinf);
+  const dB = Bv.sub(P.bHat.clone().multiplyScalar(P.B));
+  const T = P.bHat, Rr = new THREE.Vector3().crossVectors(S, T).normalize();
+  const along = V3([s1.x, s1.y, s1.z]).sub(aimAt(P, T1)).dot(S);
+  return new THREE.Vector3(dB.dot(T), dB.dot(Rr), along);
+}
+// Newton on 3 unknowns with a finite-difference Jacobian; f returns a 3-vector miss (m)
+function newton3(f, x, dx, iters = 6, tol = 2e5) {
+  let r = f(x);
+  for (let it = 0; it < iters && r.length() > tol; it++) {
+    const J = [0, 1, 2].map(k => { const x2 = [...x]; x2[k] += dx[k]; return f(x2).sub(r).divideScalar(dx[k]); });
+    // solve J * d = -r (columns J[k])
+    const M = [[J[0].x, J[1].x, J[2].x], [J[0].y, J[1].y, J[2].y], [J[0].z, J[1].z, J[2].z]], b = [-r.x, -r.y, -r.z];
+    const det = m => m[0][0]*(m[1][1]*m[2][2] - m[1][2]*m[2][1]) - m[0][1]*(m[1][0]*m[2][2] - m[1][2]*m[2][0]) + m[0][2]*(m[1][0]*m[2][1] - m[1][1]*m[2][0]);
+    const D = det(M); if (!isFinite(D) || Math.abs(D) < 1e-30) break;
+    const d = [0, 1, 2].map(k => det(M.map((row, i) => row.map((v, j) => j === k ? b[i] : v)))/D);
+    x = x.map((v, k) => v + d[k]); r = f(x);
+  }
+  return { x, miss: r.length() };
+}
+// Departure burn for the next pass of the departure point that leaves time to turn
+function solveDeparture(P) {
+  const nrm = V3([ship.y*ship.vz - ship.z*ship.vy, ship.z*ship.vx - ship.x*ship.vz, ship.x*ship.vy - ship.y*ship.vx]).normalize();
+  const r0 = Math.hypot(ship.x, ship.y, ship.z), nOrb = Math.sqrt(GM_E/r0**3);
+  const m0 = shipMass(), ve = BOOSTER.isp*G0;
+  const passAfter = tMin => {
+    // periapsis direction for this pass: Lambert v-infinity, projected into the orbit plane
+    let guess = tMin;
+    for (let k = 0; k < 6; k++) {
+      const [v1] = lambert(helioPos('earth', guess), helioPos('mars', P.tA), P.tA - guess, GM_SUN);
+      const ve0 = dVel(t => helioPos('earth', t))(guess), vinf = V3(v1).sub(V3(ve0));
+      const vp = vinf.clone().addScaledVector(nrm, -vinf.dot(nrm)).normalize(), vm = vinf.length();
+      const e = 1 + r0*vm*vm/GM_E, nu = Math.acos(-1/e);
+      const pHat = vp.clone().multiplyScalar(Math.cos(nu)).addScaledVector(new THREE.Vector3().crossVectors(nrm, vp), -Math.sin(nu));
+      const rH = V3([ship.x, ship.y, ship.z]).normalize();
+      let ang = Math.atan2(new THREE.Vector3().crossVectors(rH, pHat).dot(nrm), rH.dot(pHat)); if (ang < 0) ang += 2*Math.PI;
+      let tP = simT + ang/nOrb; while (tP < tMin) tP += 2*Math.PI/nOrb;
+      if (Math.abs(tP - guess) < 30) return { tP, pHat, vm };
+      guess = tP;                                     // the pass time moves the asymptote a little: iterate
+    }
+    return null;
+  };
+  const dvImp = v => Math.sqrt(v*v + 2*GM_E/r0) - Math.sqrt(GM_E/r0);
+  const firstPass = passAfter(simT + 420);
+  if (!firstPass) return null;
+  const { tP, pHat } = firstPass;
+  const qHat = new THREE.Vector3().crossVectors(nrm, pHat), dv0 = dvImp(firstPass.vm)*1.03;
+  const tBurn = m0*(1 - Math.exp(-dv0/ve))/stageMdot(), tb = tP - 0.5*tBurn;
+  const s0 = integrateTo(ship, simT, tb, 10), T1 = P.tA - BPLANE_T;
+  const dirOf = x => qHat.clone().addScaledVector(pHat, x[0]).addScaledVector(nrm, x[1]).normalize();
+  const f = x => bPlaneMiss(P, simBurnCoast(s0, tb, dirOf(x), x[2], m0, T1).s, T1);
+  const sol = newton3(f, [0.15, 0, dv0], [1e-4, 1e-4, 0.5]);
+  return { tb, dir: dirOf(sol.x), dvCut: sol.x[2], miss: sol.miss, tBurn };
+}
+// Course correction: an impulse at time tc (flown as a short stage burn) that puts the ship on the aim point
+function solveCorrection(P, tc) {
+  const s0 = integrateTo(ship, simT, tc, 60), T1 = P.tA - BPLANE_T;
+  const f = x => bPlaneMiss(P, integrateTo({ ...s0, vx: s0.vx + x[0], vy: s0.vy + x[1], vz: s0.vz + x[2] }, tc, T1, 60), T1);
+  const sol = newton3(f, [0, 0, 0], [0.5, 0.5, 0.5], 4, 5e4);
+  const dv = V3(sol.x);
+  return { tb: tc, dir: dv.clone().normalize(), dvCut: dv.length(), miss: sol.miss };
+}
+// After a burn (or a correction not needed): the next correction, or hand over (corrections at +2 days and
+// 10 days before the approach point)
+function baNext(P) {
+  const T1 = P.tA - APPROACH_T, n = BA.done.length;
+  const next = n === 1 ? ['TCM-1', simT + 2*86400] : n === 2 ? ['TCM-2', T1 - 10*86400] : null;
+  if (next) { BA.phase = 'COAST'; BA.name = next[0]; BA.t = next[1]; BA.nextT = next[1]; log(`${next[0]} AT T+${fmtTime(next[1] - mission.t0)}`); }
+  else { BA.phase = 'DONE'; BA.nextT = null; if (mission) mission.stageLeft = dock.prop; log('STAGE AUTOPILOT COMPLETE · YOU HAVE CONTROL');
+    log(`MAIN ENGINE KEY FIRES THE STAGE · ${(dock.prop/1e3).toFixed(0)} T LEFT`); }
+}
+function boosterAutoStep(h) {
+  if (!BA) return;
+  const P = missionPlan;
+  if (dock.state !== 'DOCKED' || !P) { if (BA.phase !== 'OFF') { BA.phase = 'OFF'; BA.locked = BA.firing = false; } return; }
+  BA.locked = ['SLEW', 'WAIT', 'BURN'].includes(BA.phase); BA.firing = false;
+  const slewTo = dir => {                            // turn the nose toward dir at the stage's slew rate
+    const f = new THREE.Vector3(0, 0, -1).applyQuaternion(shipQ), ang = Math.acos(clamp(f.dot(dir), -1, 1));
+    if (ang > 1e-6) {
+      const ax = new THREE.Vector3().crossVectors(f, dir); if (ax.lengthSq() < 1e-12) ax.set(0, 1, 0).applyQuaternion(shipQ);
+      shipQ.copy(new THREE.Quaternion().setFromAxisAngle(ax.normalize(), Math.min(ang, BA_SLEW*h)).multiply(shipQ)).normalize();
+    }
+    omega.set(0, 0, 0);
+    return ang;
+  };
+  switch (BA.phase) {
+    case 'HOLD':
+      if (simT >= BA.t) {
+        log('STAGE AUTOPILOT · COMPUTING DEPARTURE');
+        const S = solveDeparture(P);
+        if (!S) { BA.t = simT + 60; break; }
+        BA.burn = S; BA.phase = 'SLEW'; BA.name = 'DEPARTURE';
+        log(`STAGE HAS CONTROL · DEPARTURE BURN IN ${fmtTime(S.tb - simT)} · ${(S.dvCut/1e3).toFixed(2)} KM/S`);
+      }
+      break;
+    case 'SLEW': if (slewTo(BA.burn.dir) < 0.05*D2R) { BA.phase = 'WAIT'; log(`STACK ALIGNED · IGNITION IN ${fmtTime(BA.burn.tb - simT)}`); } break;
+    case 'WAIT':
+      slewTo(BA.burn.dir);
+      if (simT >= BA.burn.tb) { BA.phase = 'BURN'; BA.dvAcc = 0; log(`${BA.name} BURN · IGNITION`); }
+      break;
+    case 'BURN':
+      shipQ.setFromUnitVectors(new THREE.Vector3(0, 0, -1), BA.burn.dir); omega.set(0, 0, 0);
+      if (BA.dvAcc < BA.burn.dvCut && dock.prop > 0) { BA.firing = true; break; }
+      log(`${BA.name} CUTOFF · ${BA.dvAcc.toFixed(0)} M/S · STAGE PROP ${(dock.prop/1e3).toFixed(0)} T`);
+      BA.done.push(BA.name); baNext(P);
+      break;
+    case 'COAST':
+      if (simT >= BA.t - 300) {
+        const S = solveCorrection(P, BA.t);
+        if (S.dvCut < 0.3) { log(`${BA.name} NOT NEEDED · MISS ${(S.miss/1e3).toFixed(0)} KM`); BA.done.push(BA.name); baNext(P); break; }
+        BA.burn = S; BA.phase = 'SLEW'; BA.nextT = null;
+        log(`${BA.name} · ${S.dvCut.toFixed(1)} M/S · STAGE HAS CONTROL`);
+      }
+      break;
+  }
 }
 
 /* ================= MISSIONS ================= */
@@ -1292,6 +1476,39 @@ function planMission1(t0) {
     ],
   };
 }
+
+/* Operation Cataclysm (DD-84). Phase 1, the voyage: dock with the BS-90 in a 400 km parking orbit, the stage flies
+   the departure burn and two corrections, the pilot brakes into Mars orbit (stage first, then the DD-84's own
+   drive after separation). The parking orbit is chosen so the departure asymptote lies in its plane; the aim point
+   is APPROACH_T before arrival on the approach asymptote, offset (B) for a 600 km periapsis as close to Mars' equator as the approach allows. */
+const CAT = { TOF: 125*86400, DEPART: 40*60, PERI_ALT: 600e3, GAP: 150 };
+function planCataclysm(t0) {
+  const tD = t0 + CAT.DEPART, tA = tD + CAT.TOF;
+  const [v1, v2] = lambert(helioPos('earth', tD), helioPos('mars', tA), CAT.TOF, GM_SUN);
+  const vinfD = V3(v1).sub(V3(dVel(t => helioPos('earth', t))(tD)));
+  const vinfArr = V3(v2).sub(V3(dVel(t => helioPos('mars', t))(tA)));
+  // Parking orbit: normal near Earth's pole, square to the departure asymptote
+  const vd = vinfD.clone().normalize(), z = new THREE.Vector3(0, 0, 1);
+  const nrm = z.clone().addScaledVector(vd, -z.dot(vd)).normalize();
+  const e = 1 + LEO_R*vinfD.lengthSq()/GM_E, nu = Math.acos(-1/e);
+  const pHat = vd.clone().multiplyScalar(Math.cos(nu)).addScaledVector(new THREE.Vector3().crossVectors(nrm, vd), -Math.sin(nu));
+  const qHat = new THREE.Vector3().crossVectors(nrm, pHat), nOrb = Math.sqrt(GM_E/LEO_R**3), vc = Math.sqrt(GM_E/LEO_R);
+  const at = th => ({ r: pHat.clone().multiplyScalar(Math.cos(th)).addScaledVector(qHat, Math.sin(th)),
+                      v: pHat.clone().multiplyScalar(-Math.sin(th)).addScaledVector(qHat, Math.cos(th)) });
+  const th0 = -nOrb*(tD - t0), S = at(th0);
+  const ship = { x: S.r.x*LEO_R, y: S.r.y*LEO_R, z: S.r.z*LEO_R, vx: S.v.x*vc, vy: S.v.y*vc, vz: S.v.z*vc };
+  // Nose prograde, top away from Earth
+  const fwd = S.v.clone(), up = S.r.clone();
+  const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, -1), fwd);
+  // Booster: GAP m behind the stern ring on the same orbit, collar toward the ship
+  const dB = HULLS.dd84.dockZ + CAT.GAP + BOOSTER.center, Sb = at(th0 - dB/LEO_R);
+  const bState = { x: Sb.r.x*LEO_R, y: Sb.r.y*LEO_R, z: Sb.r.z*LEO_R, vx: Sb.v.x*vc, vy: Sb.v.y*vc, vz: Sb.v.z*vc };
+  // Arrival geometry: periapsis in Mars' equator, prograde
+  const va = vinfArr.clone().normalize(), na = MARS_POLE.clone().addScaledVector(va, -MARS_POLE.dot(va)).normalize();
+  const rp = R_MARS + CAT.PERI_ALT, B = rp*Math.sqrt(1 + 2*GM_MARS/(rp*vinfArr.lengthSq()));
+  return { ship, q, arrive: tA, tD, tA, vinfArr, bHat: new THREE.Vector3().crossVectors(va, na), B,
+    targets: () => [mkBooster(bState, q)] };
+}
 const MISSIONS = {
   m1: { id: 'm1', name: 'OPERATION LANTERN', title: 'HELIUM-3 DEPOT STRIKE', plan: planMission1,
     // Briefing transmission: [text, typing speed in chars/s, pause after in s]; 'ANIM' is the transfer diagram
@@ -1324,6 +1541,64 @@ const MISSIONS = {
       'Stowed radiators keep you hidden but the ship heats up. A civilian ore hauler is',
       'docked near the depot: avoid hitting it.',
     ] },
+  cat: { id: 'cat', name: 'OPERATION CATACLYSM', title: 'MARS · PHASE 1: THE VOYAGE', plan: planCataclysm, hull: 'dd84', stageAuto: true, max: 11000,
+    scoring: 'SCORE: +1000 hard dock, +500 clean capture (no rebound), +5000 Mars orbit, up to +3000 for DD-84 propellant left, ' +
+      'up to +1500 for using the stage\'s last propellant before separation; −450 per hull hit. S for a clean run.',
+    orders: [
+      ['// LASER LINK ESTABLISHED - FLEET COMMAND, CHEYENNE //', 38, 1.4],
+      ['ORDERS RECEIVED. STAND BY FOR FILE TRANSMISSION.', 32, 1.6],
+      ['', 0, 0.2],
+      ['FILE 0412-CT // CLASSIFIED // COMMANDING OFFICER EYES ONLY', 160, 0.12],
+      ['OPERATION CATACLYSM', 160, 0.12],
+      ['THEATRE ......... MARS. ENEMY FLEET, ORBITAL STATIONS, SPACE ELEVATOR', 170, 0.08],
+      ['YOUR VESSEL ..... DD-84, 400 KM PARKING ORBIT', 170, 0.08],
+      ['TRANSPORT ....... BS-90 HEAVY STAGE, HOLDING 150 M AFT OF YOU', 170, 0.25],
+      ['1. DOCK STERN-FIRST WITH THE BS-90. ARM THE CAPTURE LATCHES.', 170, 0.06],
+      ['2. THE STAGE FLIES THE DEPARTURE BURN AND TWO CORRECTIONS.', 170, 0.06],
+      ['   TRANSIT 125 DAYS. USE TIME WARP.', 170, 0.06],
+      ['3. AT MARS, BRAKE RETROGRADE FROM 10 MIN BEFORE PERIAPSIS.', 170, 0.06],
+      ['   BURN THE STAGE DRY FIRST, THEN SEPARATE AND FINISH', 170, 0.06],
+      ['   ON YOUR OWN DRIVE. KEEP PERIAPSIS ABOVE 100 KM.', 170, 0.2],
+      ['CONTACT LIMITS: 0.15 M/S, 0.3 M OFFSET, 3 DEG.', 120, 0.1],
+      ['PHASE 2 ORDERS FOLLOW ON ARRIVAL.', 140, 0.4],
+      ['// END OF TRANSMISSION //', 60, 0],
+    ],
+    brief: [
+      'The enemy holds Mars: a fleet in orbit, defence stations, and a space elevator.',
+      'Phase 1: your DD-84 waits in a 400 km Earth orbit with the BS-90 heavy stage 150 m',
+      'behind it. Back in stern-first on the DOCK camera (CAM key), with CAPT armed. Once',
+      'docked, the stage turns the stack and flies a brute-force departure (about 3.8 km/s),',
+      'then two small corrections; warp through the 125-day transit. At Mars, start braking',
+      'retrograde about 10 minutes before periapsis (ORBIT page: PE IN): the main engine fires',
+      'the stage while docked; when it runs dry, SEP twice and finish on the DD-84 drive.',
+      'Any closed orbit with periapsis above 100 km completes phase 1. The battle at Mars is',
+      'phase 2 (next update).',
+    ],
+    start() {
+      log('OPERATION CATACLYSM · PHASE 1');
+      log(`DOCK WITH ${BOOSTER.name} · ${CAT.GAP} M AFT · DEPARTURE WINDOW IN ~${Math.round(CAT.DEPART/60)} MIN`);
+    },
+    onDock() { scoreAdd('HARD DOCK', 1000); if (!mission.rebounds) scoreAdd('CLEAN CAPTURE', 500); },
+    onSep(prop) { mission.sepProp = prop; },
+    step(h) {
+      const pn = primaryName(ship, simT);
+      if (pn === 'MARS') {
+        if (!mission.inMars) { mission.inMars = true; log('MARS SPHERE OF INFLUENCE · CHECK PERIAPSIS ON THE ORBIT PAGE'); }
+        const el = elementsAt(ship, bodyAt('MARS', simT));
+        if (el.e < 1 && el.pe > 100e3 && thrustFrac === 0) { mission.boundT = (mission.boundT || 0) + h; if (mission.boundT > 30) endMission('SUCCESS'); }
+        else mission.boundT = 0;
+      } else if (mission.inMars && pn === 'SUN') endMission('ABANDONED', 'MISSED MARS ORBIT');
+      if (pn === 'SUN' && simT > missionPlan.tA + 20*86400) endMission('ABANDONED', 'MISSED MARS');
+    },
+    bonus(result) {
+      if (result !== 'SUCCESS') return;
+      scoreAdd('MARS ORBIT', 5000);
+      scoreAdd('PROPELLANT LEFT', Math.round(3000*clamp((mainProp + podProp)/(SHIP.mainProp0 + tankProp0Total()), 0, 1)));
+      const left = mission.stageLeft || BOOSTER.prop0*0.1, wasted = mission.sepProp ?? (dock.state === 'DOCKED' ? dock.prop : left);
+      scoreAdd('STAGE PROPELLANT USED', Math.round(1500*clamp(1 - wasted/left, 0, 1)));
+    },
+    perfect: () => hullHits === 0 && !anyDamage() && !mission.rebounds,
+  },
 };
 
 /* ================= MANEUVER PLANNER =================
@@ -1472,6 +1747,7 @@ function startMission() {
   mission = { id: scenario, t0: simT, alert: false, alertT: null, undetT: 0, events: {}, stationDown: false,
     stationBeforeAlert: false, neutrals: 0, ended: false, result: null, prop0: mainProp + rcsProp + podProp };
   const M = MISSIONS[scenario];
+  if (M.start) { M.start(); return; }
   log(`${M.name} · ${M.title}`);
   const st = targets.find(t => t.objective);
   log(`OBJECTIVE · DESTROY ${st.name} · TRK ${st.trk}`);
@@ -1491,6 +1767,7 @@ function raiseAlert(reason) {
 }
 function missionStep(h) {
   if (!mission || mission.ended || dead) return;
+  if (MISSIONS[mission.id].step) { MISSIONS[mission.id].step(h); return; }
   if (!mission.alert) {
     mission.undetT += h;
     const dr = detectionRange();
@@ -1511,8 +1788,9 @@ function missionStep(h) {
 // End of a run: bonuses (success only), rank, save, and the debrief (after the death screen for KIA)
 function endMission(result, cause = '') {
   if (!mission || mission.ended) return;
-  const T = simT - mission.t0;
-  if (result === 'SUCCESS') {
+  const T = simT - mission.t0, MM = MISSIONS[mission.id];
+  if (MM.bonus) MM.bonus(result);
+  else if (result === 'SUCCESS') {
     const tf = clamp((SCORE.timeZero - T)/(SCORE.timeZero - SCORE.timeFull), 0, 1);
     scoreAdd('MISSION TIME', Math.round(SCORE.time*tf));
     scoreAdd('PROPELLANT LEFT', Math.round(SCORE.prop*clamp((mainProp + rcsProp + podProp)/mission.prop0, 0, 1)));
@@ -1522,9 +1800,9 @@ function endMission(result, cause = '') {
     scoreAdd('TIME UNDETECTED', Math.round(SCORE.unseen*clamp(mission.undetT/T, 0, 1)));
   }
   mission.ended = true; mission.result = result; mission.cause = cause; mission.T = T;
-  const score = missionScore(), pct = Math.max(0, score)/MISSION_MAX;
+  const score = missionScore(), pct = Math.max(0, score)/(MM.max || MISSION_MAX);
   let rank = RANKS[clamp(Math.floor(pct/0.85*RANKS.length), 0, RANKS.length - 1)];
-  const perfect = result === 'SUCCESS' && hullHits === 0 && !anyDamage() && !mission.alert && mission.neutrals === 0;
+  const perfect = result === 'SUCCESS' && (MM.perfect ? MM.perfect() : hullHits === 0 && !anyDamage() && !mission.alert && mission.neutrals === 0);
   if (perfect) rank = 'S';
   if (result === 'KIA') rank = 'F-';
   if (result === 'ABANDONED') rank = RANKS[Math.min(RANKS.indexOf(rank), 1)];
@@ -1716,6 +1994,17 @@ function orbitInfo() {
   const a = energy < 0 ? -GM/(2*energy) : Infinity;
   const period = energy < 0 ? 2*Math.PI*Math.sqrt(a*a*a/GM) : Infinity;
   return { r, v, h, ev, e, energy, a, rm, period, body, rv: r.dot(v) };
+}
+// Time to the next periapsis on the osculating orbit (null when already past it on an open path)
+function timeToPeri(o) {
+  const mu = o.body.GM, r = o.rm, rv = o.rv, e = o.e;
+  if (e < 1) {
+    const a = o.a, E = Math.atan2(rv/Math.sqrt(mu*a), 1 - r/a), M = E - e*Math.sin(E), n = Math.sqrt(mu/(a*a*a));
+    return ((2*Math.PI - M) % (2*Math.PI))/n;
+  }
+  if (rv >= 0) return null;
+  const a = -mu/(2*o.energy), F = -Math.acosh(Math.max(1, (1 - r/a)/e)), M = e*Math.sinh(F) - F;
+  return -M/Math.sqrt(mu/(-a)**3);
 }
 // Long distances: k km, then millions of km
 const fmtFar = d => d >= 1e9 ? `${(d/1e9).toFixed(1)} M km` : `${(d/1e6).toFixed(0)} k km`;
@@ -1973,8 +2262,10 @@ function physicsStep(h) {
   updateSunDir();
   const c = controlState();
 
+  /* --- stage autopilot: holds or slews the stack and fires the stage on its own schedule --- */
+  boosterAutoStep(h);
   /* --- attitude: RCS torque, rate damping, body-frame integration --- */
-  const cmd = [c.pitch, c.yaw, c.roll];
+  const cmd = BA && BA.locked ? [0, 0, 0] : [c.pitch, c.yaw, c.roll];
   if (leadHold) {
     // Manual input on an axis overrides the hold on that axis
     const hc = leadHoldCmd(h);
@@ -2012,14 +2303,29 @@ function physicsStep(h) {
   if (wm > 1e-12) shipQ.multiply(new THREE.Quaternion().setFromAxisAngle(omega.clone().divideScalar(wm), wm*h)).normalize();
 
   /* --- translation: RCS and main drive (body -Z is forward) --- */
-  const F = [c.tx*SHIP.rcsThrust, c.ty*SHIP.rcsThrust, -c.tz*SHIP.rcsThrust];
+  const F = BA && BA.locked ? [0, 0, 0] : [c.tx*SHIP.rcsThrust, c.ty*SHIP.rcsThrust, -c.tz*SHIP.rcsThrust];
   let fr = Math.hypot(F[0], F[1], F[2]);
   rcsActive = fr > 0 || tauMag > 1;   // threshold: damping decays asymptotically and never hits 0
   if (rcsProp <= 0) { F[0] = F[1] = F[2] = 0; fr = 0; }
   rcsProp = Math.max(0, rcsProp - fr/(SHIP.rcsIsp*G0)*h);
   thrustFrac = 0;
   let engineAccW = null;
-  if (c.main && mainProp + podProp > 0 && damage.main > 0) {
+  // Docked: the main engine key fires the stage (the DD-84's bells sit inside its truss); the stage autopilot
+  // fires and holds it on its own while it flies a burn
+  const wantMain = BA && BA.locked ? BA.firing : c.main;
+  if (wantMain && dock.state === 'DOCKED') {
+    if (dock.prop > 0) {
+      const m0 = shipMass(), ve = BOOSTER.isp*G0;
+      let dm = Math.min(dock.prop, BOOSTER.thrust/ve*h);
+      if (BA && BA.firing) dm = Math.min(dm, Math.max(0, BA.burn.dvCut - BA.dvAcc)*m0/ve);   // cut off on the exact delta-v
+      const Fe = dm/h*ve;
+      F[2] -= Fe; thrustFrac = 1;
+      engineAccW = new THREE.Vector3(0, 0, -Fe/m0).applyQuaternion(shipQ);
+      dock.prop -= dm; dock.dvUsed = (dock.dvUsed || 0) + Fe/m0*h;
+      if (BA) BA.dvAcc += Fe/m0*h;
+      if (dock.prop <= 0) log('STAGE PROPELLANT DEPLETED · SEPARATE TO USE THE MAIN DRIVE');
+    } else if (!dock.emptyLog || simT - dock.emptyLog > 10) { dock.emptyLog = simT; log('STAGE EMPTY · SEP TWICE TO SEPARATE'); }
+  } else if (wantMain && mainProp + podProp > 0 && damage.main > 0) {
     F[2] -= SHIP.mainThrust*damage.main; thrustFrac = damage.main;
     engineAccW = new THREE.Vector3(0, 0, -SHIP.mainThrust*damage.main/shipMass()).applyQuaternion(shipQ);
     const dm = SHIP.mainThrust*damage.main/(SHIP.mainIsp*G0)*h;
@@ -3149,11 +3455,15 @@ function drawTactical(g, W, H, idx) {
     const k = (R-4)/len;
     txt(g, cx + b.x*k - 30, cy - b.y*k + 6, label, AMB, '20px monospace');
   };
-  const dE = toB(-ship.x, -ship.y, -ship.z);
-  edgeMark(dE, `EARTH ${fmtDist(Math.hypot(ship.x,ship.y,ship.z)-R_E)}`);
-  const mp = moonPos(simT);
-  const dM = toB(mp[0]-ship.x, mp[1]-ship.y, mp[2]-ship.z);
-  edgeMark(dM, `MOON ${fmtDist(Math.hypot(mp[0]-ship.x, mp[1]-ship.y, mp[2]-ship.z))}`);
+  // The body being orbited (Earth, the Moon, Mars; the Sun between planets is not marked)
+  const pb = primary();
+  if (pb.name !== 'SUN') { const dE = toB(pb.c[0]-ship.x, pb.c[1]-ship.y, pb.c[2]-ship.z);
+    edgeMark(dE, `${pb.name} ${fmtDist(Math.hypot(ship.x-pb.c[0], ship.y-pb.c[1], ship.z-pb.c[2]) - pb.R)}`); }
+  // In the Earth-Moon system the other of the two is marked too
+  if (pb.name === 'EARTH' || pb.name === 'MOON') {
+    const oc = bodyC(pb.other, simT), dM = toB(oc[0]-ship.x, oc[1]-ship.y, oc[2]-ship.z);
+    edgeMark(dM, `${pb.other} ${fmtDist(Math.hypot(oc[0]-ship.x, oc[1]-ship.y, oc[2]-ship.z))}`);
+  }
 
   g.fillStyle = AMB;
   for (const p of projectiles) {
@@ -3260,7 +3570,8 @@ function drawTactical(g, W, H, idx) {
   const RX = 455;
   let y = 76;
   const line = (s, col = PH) => { txt(g, RX, y, s, col, '24px monospace'); y += 31; };
-  line(`ALT ${((Math.hypot(ship.x,ship.y,ship.z)-R_E)/1e3).toFixed(1)} km`);
+  { const pb = primary(), d = Math.hypot(ship.x-pb.c[0], ship.y-pb.c[1], ship.z-pb.c[2]);
+    line(pb.name === 'SUN' ? `SUN ${(d/AU).toFixed(3)} AU` : `ALT ${((d - pb.R)/1e3).toFixed(1)} km${pb.name !== 'EARTH' ? ' ' + pb.name : ''}`); }
   line(`DV  ${dvRemaining().toFixed(0)} m/s`);
   if (hasRole('torpedo')) line(roleDamage('torpedo') <= 0 ? 'TORP OFFLINE' : `TORP ${spinalAmmo} ${spinalReload > 0 ? 'RLD ' + spinalReload.toFixed(0) + 's' : spinalAmmo ? 'READY' : 'EMPTY'}`, roleDamage('torpedo') <= 0 ? RED : PH);
   else if (!hasRole('railgun')) line('SPINAL EMPTY', DIM); else line(roleDamage('railgun') <= 0 ? 'RAIL OFFLINE' : `RAIL ${railCD > 0 ? 'CYC ' + railCD.toFixed(1) + 's' : 'READY'}`, roleDamage('railgun') <= 0 ? RED : PH);
@@ -3331,6 +3642,8 @@ function drawOrbit(g, W, H, idx) {
     line(`PERIOD ${o.period > 3*86400 ? (o.period/86400).toFixed(1) + ' d' : (o.period/60).toFixed(1) + ' min'}`);
   } else line(`V∞ ${(Math.sqrt(2*o.energy)/1e3).toFixed(2)} km/s`, AMB);
   line(`ECC ${o.e.toFixed(4)}`);
+  const tpe = timeToPeri(o);
+  if (tpe !== null) line(`PE IN ${fmtTime(tpe)}`, o.e >= 1 && tpe < 1200 ? AMB : PH);
   line(`SPD ${(o.v.length()/1e3).toFixed(3)} km/s`);
   y += 10;
   if (o.body.name === 'MOON') line(`EXIT SOI ${((MOON_SOI - moonDist(ship))/1e3).toFixed(0)} km`);
@@ -5637,14 +5950,14 @@ function renderMissions() {
   const best = scores[sel.id] && scores[sel.id].best;
   document.getElementById('missionDetail').innerHTML = `<p style="letter-spacing:.2em;color:#d9e4cc">${sel.name} · ${sel.title}</p>` +
     sel.brief.map(l => `<p>${l}</p>`).join('') +
-    (sel.id !== 'sandbox' ? `<p style="opacity:.7;margin-top:12px">SCORE: +5000 depot, +1500 per corvette, +25 per torpedo destroyed, −450 per hull hit,
+    (sel.id !== 'sandbox' ? `<p style="opacity:.7;margin-top:12px">${sel.scoring ? sel.scoring + (best ? `<br>BEST: ${best.rank} · ${best.score}` : '') + '</p><p style="display:none">' : ''}SCORE: +5000 depot, +1500 per corvette, +25 per torpedo destroyed, −450 per hull hit,
       −150 per system lost, −2000 per neutral destroyed. On success: time, propellant, ammunition and stealth bonuses.
       Ranks F− to A by score; S for a perfect run (undetected, undamaged, no neutral hit).${best ? `<br>BEST: ${best.rank} · ${best.score}` : ''}</p>` : '');
 }
 document.getElementById('manualBtn').addEventListener('click', () => toggleManual(true));
 document.getElementById('missionGo').addEventListener('click', () => {
   scenario = missionSel; missionsEl.style.display = 'none'; uiOverlay = false;
-  if (scenario !== 'sandbox') setHull('og1');        // the missions are flown in the OG-1 for now
+  if (scenario !== 'sandbox') setHull(MISSIONS[scenario].hull || 'og1');   // each mission has its ship
   if (scenario === 'sandbox') { mission = null; openHangar(); return; }
   playBriefing(MISSIONS[scenario], openHangar);     // orders first, then the loadout editor
 });
@@ -5828,7 +6141,7 @@ function openDebrief() {
   uiOverlay = true; debriefEl.style.display = 'flex';
   if (actx && actx.state === 'running') actx.suspend();
   const M = MISSIONS[mission.id], all = loadScores()[mission.id] || { runs: [] };
-  const resultText = { SUCCESS: 'MISSION COMPLETE', KIA: 'SHIP LOST', ABANDONED: 'OBJECTIVE NOT DESTROYED' }[mission.result];
+  const resultText = { SUCCESS: 'MISSION COMPLETE', KIA: 'SHIP LOST', ABANDONED: mission.id === 'm1' ? 'OBJECTIVE NOT DESTROYED' : 'MISSION FAILED' }[mission.result];
   document.getElementById('debriefSub').textContent = `${M.name} · ${M.title} · T+ ${fmtTime(mission.T)}`;
   const rk = document.getElementById('debriefRank');
   rk.textContent = mission.rank; rk.className = 'rank' + (mission.rank === 'S' ? ' s' : mission.rank.startsWith('F') ? ' f' : '');
@@ -6933,13 +7246,19 @@ function coastBlock() {
   if (torpedoes.some(t => !t.dead) || ordnance.length || projectiles.length) return 'WEAPONS IN FLIGHT';
   if (thrustFrac > 0 || (plan && plan.frozen)) return 'BURN IN PROGRESS';
   if (plan && plan.t - simT < 1200) return 'MANEUVER NODE';
-  if (dock.state === 'CAPTURE') return 'DOCKING';
-  if (typeof boosterBurning === 'function' && boosterBurning()) return 'STAGE BURNING';
+  if (dock.state === 'CAPTURE' || (dock.capArmed && dock.state === 'FREE' && boosterTarget() && rangeTo(boosterTarget()) < 2000)) return 'DOCKING';
+  if (BA && ['SLEW', 'WAIT', 'BURN', 'HOLD'].includes(BA.phase)) return 'STAGE AUTOPILOT';
+  if (BA && BA.nextT && BA.nextT - simT < 660) return `${BA.name} SOON`;
   if (targets.some(t => t.hostile && !t.gone && isSeen(t) && rangeTo(t) < 2000e3)) return 'HOSTILES WITHIN 2000 KM';
   return null;
 }
 let coastNote = 0;
 function coastRun(T) {
+  // Stop short of a scheduled stage event (course correction): x1000 from there
+  if (BA && BA.nextT && simT + T > BA.nextT - 600) {
+    T = Math.max(0, BA.nextT - 600 - simT);
+    if (T <= 0) { warpIdx = WARP_FULL; log(`${BA.name} IN 10 MIN · WARP x1000`); return; }
+  }
   const p0 = primaryName(ship, simT), tStart = simT;
   let left = T, n = 0, changed = null;
   while (left > 1e-6 && n < COAST_STEPS) {
