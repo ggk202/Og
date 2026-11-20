@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OG — Cockpit prototype v0.6.0</title>
+<title>OG — Cockpit prototype v0.7.0</title>
 <style>
   html, body { margin:0; height:100%; background:#000; overflow:hidden;
     font-family: ui-monospace, Menlo, Consolas, monospace; color:#cfd8c0; }
@@ -24,6 +24,9 @@
   #hangar .hp.off { color:#7d8a78; } #hangar .hp.off .st { color:#c8a050; }
   #hangar .hp:hover, #hangar .hp.hover { background:#18261b; }
   #hangar #hpList { overflow-y:auto; min-height:0; flex:0 1 auto; }
+  #hullSel { display:flex; gap:5px; margin:6px 0 4px; } #hullSel:empty { display:none; }
+  #hullSel button { flex:1; padding:5px 0; font:inherit; font-size:12px; letter-spacing:.12em; background:#0c140e; color:#9fb59a; border:1px solid #2d4a33; cursor:pointer; }
+  #hullSel button.cur { color:#7dff9a; border-color:#7dff9a; background:#132218; }
   #hangar .hp .slot { font-size:10.5px; letter-spacing:.18em; opacity:.6; display:block; }
   #hangar .hp.sel { border-color:#ffb020; background:#1d1a10; }
   #hangar .pick { margin:-2px 0 8px 12px; border-left:2px solid #ffb020; padding-left:8px; }
@@ -90,10 +93,10 @@
 </head>
 <body>
 <canvas id="gl"></canvas>
-<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.6.0</span></div>
+<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.7.0</span></div>
 <div id="hangar"><div class="load" id="hangarLoad">LOADING SHIP</div>
   <div class="hint">DRAG TO ORBIT · WHEEL TO ZOOM · CLICK A HARDPOINT TO CHOOSE ITS MODULE</div>
-  <div class="panel"><h2>HANGAR</h2><div class="sub">LOADOUT · SELECT A HARDPOINT, THEN A MODULE</div>
+  <div class="panel"><h2>HANGAR</h2><div class="sub" id="hullName"></div><div id="hullSel"></div><div class="sub">LOADOUT · SELECT A HARDPOINT, THEN A MODULE</div>
     <div id="hpList"></div><div class="stats" id="hangarStats"></div><button id="launchBtn">LAUNCH</button></div></div>
 <div id="missions" class="ovl"><div class="box"><h2>MISSIONS</h2><div class="sub">SELECT AN OPERATION · BEST RESULTS ARE SAVED IN THIS BROWSER</div>
   <div class="cols"><div class="list" id="missionList"></div><div class="detail" id="missionDetail"></div></div>
@@ -136,7 +139,8 @@ const SHIP = { hullDry: 4070, mainProp0: 1067.6, rcsProp0: 360,
 // RCS torque per axis [pitch, yaw, roll]. Pitch and yaw thrusters act on a ~10.5 m arm; roll on ~1.9 m with fewer
 // thrusters, scaled so the ship rolls about 1.5x faster than it pitches. RCS_K keeps the full-loadout pitch
 // acceleration of the earlier model (6.5 deg/s^2).
-const RCS_K = 51602, RCS_ROLL = 0.08, RCS_ARM = [10.5, 10.5, 1.9];
+let RCS_K = 51602, RCS_ARM = [10.5, 10.5, 1.9];
+const RCS_ROLL = 0.08;
 const rcsTorqueAxis = i => RCS_K*(i === 2 ? RCS_ROLL : 1);
 // Reaction wheels: the fallback once the RCS tanks are dry. They turn the ship (no translation) with WHEEL.torque of
 // the RCS torque, and draw up to WHEEL.power from the battery in proportion to the torque they apply; no power,
@@ -151,7 +155,7 @@ let wheelLoadE = 0, wheelsOn = false;
    Axes: hardpoint positions are in body axes (x right, y up, z aft). Module points (com, muzzle, emitter,
    barrel) are in the module file's own axes, as the model was built (+Y up, +Z toward the nose); hpToBody()
    maps them through the hardpoint, including the bottom ones that are mounted upside down (flip). */
-const HARDPOINTS = {
+const OG1_HARDPOINTS = {
   spinal:  { name: 'SPINAL MOUNT',   tag: 'SPINAL', node: 'HP_Spinal_Railgun', type: 'spinal', pos: [0, -0.86, -10.24] },
   nose:    { name: 'NOSE GIMBAL',    tag: 'NOSE',   node: 'HP_Gimbal_Laser',   type: 'gimbal', pos: [-0.96, -0.05, -10.24] },
   pdcTop:  { name: 'DORSAL TURRET',  tag: 'TOP',    node: 'HP_PDC_Top',        type: 'turret', pos: [0, 1.64, -0.15] },
@@ -197,6 +201,127 @@ const MODULE_CATALOG = {
                mass: 260, com: [0, 0.65, -0.02],
                stats: { decoys: 16, range: 4000, pSeduce: 0.45, warnRange: 30e3 }, desc: '16 decoy salvos break torpedo locks · ELINT warning to 30 km' },
 };
+
+// The OG-1's own figures: the flight manual describes this ship whatever hull is selected in the hangar
+const OG1_SHIP = { ...SHIP };
+/* ---------- Modules for the DD-84, CM-32 and CS-17 hulls ----------
+   Points (com, muzzle, emitter, barrel, launch) are in the module file's own axes (+Y up out of the mount);
+   hpToBody() maps them through the hardpoint frame read from the hull file. launchDir: missile exit direction
+   in module axes (default straight up out of the cell). Roles without gameplay yet (telescope, comms) add only
+   mass and inertia; radiator wings add radiator area. */
+Object.assign(MODULE_CATALOG, {
+  mod_spinal_railgun: { name: 'MK-9 SPINAL RAILGUN', short: 'RAIL', role: 'railgun', fits: ['spinal_weapon'], file: 'mod_spinal_railgun.glb',
+    mass: 40000, com: [0, 0.6, -0.8], muzzle: [0, 0, -13.6],
+    stats: { railMass: 10, railV: 2000, railCooldown: 6, railEnergy: 40e6, railHeat: 20e6 }, desc: '10 kg slug at 2000 m/s · 6 s cycle · 40 MJ' },
+  mod_bow_heavy_laser: { name: 'HL-12 HEAVY LASER', short: 'HLASER', role: 'laser', fits: ['heavy_turret'], file: 'mod_bow_heavy_laser.glb',
+    mass: 9000, com: [0, 0.9, 0], emitter: [0, 1.6, -1.24],
+    stats: { laserElec: 1.2e6, laserDmgRate: 40, laserRange: 15000 }, desc: '1.2 MW beam · 15 km · ±2° director' },
+  mod_ciws_rotary: { name: 'CIWS ROTARY CANNON', short: 'CIWS', role: 'pdc', fits: ['pd_turret', 'sensor_turret', 'heavy_turret'], file: 'mod_ciws_rotary.glb',
+    mass: 2500, com: [0, 0.8, -0.5], barrel: [0, 1.2, 0], stats: { rounds: 6000 }, desc: 'Rotary point defence · 6000 rds · 5 km' },
+  mod_stealth_ciws: { name: 'LO CIWS', short: 'CIWS', role: 'pdc', fits: ['stealth_pd_turret'], file: 'mod_stealth_ciws.glb',
+    mass: 2000, com: [0, 0.6, -0.5], barrel: [0, 0.9, 0], stats: { rounds: 4000 }, desc: 'Low-signature point defence · 4000 rds · 5 km' },
+  mod_lpd60_laser_turret: { name: 'LPD-60 LASER PD', short: 'LPD', role: 'laserpd', fits: ['pd_turret', 'sensor_turret', 'heavy_turret'], file: 'mod_lpd60_laser_turret.glb',
+    mass: 2000, com: [0, 0.6, 0], emitter: [0, 1.1, 0], stats: { range: 10000, dwell: 0.5, elec: 600e3 }, desc: 'Burns torpedoes in 0.5 s at 10 km · 600 kW while lasing' },
+  mod_stealth_lpd_turret: { name: 'LO LASER PD', short: 'LPD', role: 'laserpd', fits: ['stealth_pd_turret'], file: 'mod_stealth_lpd_turret.glb',
+    mass: 1800, com: [0, 0.5, 0], emitter: [0, 0.9, 0], stats: { range: 9000, dwell: 0.6, elec: 500e3 }, desc: 'Low-signature laser PD · 9 km · 500 kW while lasing' },
+  mod_vls_8cell: { name: 'VLS 8-CELL', short: 'VLS', role: 'vls', fits: ['vls_8cell_bay', 'utility_pod_mount'], file: 'mod_vls_8cell.glb',
+    mass: 7000, com: [0, 0.15, 0], launch: [0, 0.6, 0], stats: { cells: 8 }, desc: '8 guided anti-ship missiles' },
+  mod_vls_16cell: { name: 'VLS 16-CELL', short: 'VLS', role: 'vls', fits: ['vls_16cell_bay'], file: 'mod_vls_16cell.glb',
+    mass: 14000, com: [0, 0.15, 0], launch: [0, 0.6, 0], stats: { cells: 16 }, desc: '16 guided anti-ship missiles' },
+  mod_stealth_vls_12cell: { name: 'LO VLS 12-CELL', short: 'VLS', role: 'vls', fits: ['stealth_vls_bay'], file: 'mod_stealth_vls_12cell.glb',
+    mass: 10000, com: [0, 0.05, 0], launch: [0, 0.5, 0], stats: { cells: 12 }, desc: '12 missiles under flush doors' },
+  mod_slava_quad_canister_pod: { name: 'QUAD CANISTER POD', short: 'QUAD', role: 'vls', fits: ['heavy_canister_pylon', 'external_tank_pylon'], file: 'mod_slava_quad_canister_pod.glb',
+    mass: 12000, com: [-0.7, 0, 0.5], launch: [-0.7, 0, -5.6], launchDir: [0, 0, -1], stats: { cells: 4, ord: 'torpedo' }, desc: '4 heavy anti-ship torpedoes, fired forward' },
+  mod_external_drop_tank: { name: 'EXTERNAL DROP TANK', short: 'TANK', role: 'tank', fits: ['external_tank_pylon', 'heavy_canister_pylon'], file: 'mod_external_drop_tank.glb',
+    mass: 3000, prop: 30000, com: [-0.6, 0, 0], desc: '30 t propellant · jettisonable' },
+  mod_aux_capacitor_pod: { name: 'AUX CAPACITOR POD', short: 'CAP', role: 'capacitor', fits: ['utility_pod_mount'], file: 'mod_aux_capacitor_pod.glb',
+    mass: 4000, com: [0, 0.3, 0], stats: { battery: 40e6, railCycle: 0.9 }, desc: '+40 MJ capacitor bank · railgun cycles 10% faster' },
+  mod_countermeasure_rack: { name: 'COUNTERMEASURE RACK', short: 'CM', role: 'ecm', fits: ['countermeasure_mount'], file: 'mod_countermeasure_rack.glb',
+    mass: 400, com: [0, 0.3, 0], stats: { decoys: 6, range: 4000, pSeduce: 0.45 }, desc: '6 decoy salvos break torpedo locks' },
+  mod_geodesic_ew_emitter: { name: 'GEODESIC EW EMITTER', short: 'EW', role: 'ecm', fits: ['bow_emitter_bay'], file: 'mod_geodesic_ew_emitter.glb',
+    mass: 8000, com: [0.6, 0, 3], stats: { decoys: 24, range: 6000, pSeduce: 0.6, warnRange: 60e3 }, desc: '24 decoy salvos · strong jamming · ELINT warning to 60 km' },
+  mod_dorsal_search_radar: { name: 'SEARCH RADAR', short: 'RADAR', role: 'radar', fits: ['dorsal_radar_mast'], file: 'mod_dorsal_search_radar.glb',
+    mass: 4000, com: [0, 2.2, 0], stats: { sensorRange: 1000e3, warnRange: 40e3 }, desc: 'Sensors and fire control to 1000 km · torpedo warning to 40 km' },
+  mod_radial_combat_telescope: { name: 'COMBAT TELESCOPE', short: 'SCOPE', role: 'telescope', fits: ['sensor_turret', 'pd_turret', 'comms_dish_mount'], file: 'mod_radial_combat_telescope.glb',
+    mass: 1200, com: [0, 1.1, 0], desc: 'Turreted wide-field telescope' },
+  mod_bow_primary_telescope: { name: 'PRIMARY TELESCOPE', short: 'SCOPE', role: 'telescope', fits: ['bow_optical_mount'], file: 'mod_bow_primary_telescope.glb',
+    mass: 3000, com: [0, 0, -1], desc: 'Main bow telescope' },
+  mod_parabolic_comms_dish: { name: 'COMMS DISH', short: 'DISH', role: 'comms', fits: ['comms_dish_mount'], file: 'mod_parabolic_comms_dish.glb',
+    mass: 800, com: [0, 1.1, 0], desc: 'Long-range datalink and comms' },
+  mod_radiator_wing_large: { name: 'RADIATOR WING L', short: 'RAD', role: 'radiator', fits: ['radiator_hinge'], file: 'mod_radiator_wing_large.glb',
+    mass: 3000, com: [6, 0, 0], stats: { area: 230 }, desc: '+230 m² radiator area' },
+  mod_radiator_wing_compact: { name: 'RADIATOR WING S', short: 'RAD', role: 'radiator', fits: ['radiator_hinge'], file: 'mod_radiator_wing_compact.glb',
+    mass: 1800, com: [3.3, 0, 0], stats: { area: 95 }, desc: '+95 m² radiator area' },
+  mod_stealth_radiator_wing: { name: 'LO RADIATOR WING', short: 'RAD', role: 'radiator', fits: ['stealth_radiator_hinge'], file: 'mod_stealth_radiator_wing.glb',
+    mass: 2500, com: [4.8, 0, 2], stats: { area: 260 }, desc: '+260 m² radiator area, shielded' },
+});
+// Generated from the hull and module files (tools/gen_hulls.py): hardpoint frames (position, and the 3x3
+// rotation as columns: the module's x, y and z axes in body axes), bounding boxes and side outlines [z, y].
+const HULL_GEOM = {"dd84":{"box":[-4.38,-5.057,-37.4,4.38,4.366,37.8],"hp":[["HP_AuxCap_DorsalPort","AUX CAP DORSAL PORT","utility_pod_mount",[-2.63,2.63,3.6],[0.707,0.707,0,-0.707,0.707,0,0,0,1]],["HP_AuxCap_DorsalStbd","AUX CAP DORSAL STBD","utility_pod_mount",[2.63,2.63,3.6],[0.707,-0.707,0,0.707,0.707,0,0,0,1]],["HP_AuxCap_VentralPort","AUX CAP VENTRAL PORT","utility_pod_mount",[-2.63,-2.63,3.6],[-0.707,0.707,0,-0.707,-0.707,0,0,0,1]],["HP_AuxCap_VentralStbd","AUX CAP VENTRAL STBD","utility_pod_mount",[2.63,-2.63,3.6],[-0.707,-0.707,0,0.707,-0.707,0,0,0,1]],["HP_Bow_HeavyLaser","BOW HEAVY LASER","heavy_turret",[0,2.95,-30.4],[1,0,0,0,1,0,0,0,1]],["HP_Bow_Primary_Telescope","BOW PRIMARY TELESCOPE","bow_optical_mount",[0,0,-37.3],[1,0,0,0,1,0,0,0,1]],["HP_CIWS_AftDorsal","CIWS AFT DORSAL","pd_turret",[0,3.88,13.4],[1,0,0,0,1,0,0,0,1]],["HP_CIWS_AftVentral","CIWS AFT VENTRAL","pd_turret",[0,-3.88,13.4],[-1,-0.0,0,0,-1,0,0,0,1]],["HP_CIWS_FwdPort","CIWS FWD PORT","pd_turret",[-3.58,0,-19.8],[-0.0,1,0,-1,-0.0,0,0,0,1]],["HP_CIWS_FwdStbd","CIWS FWD STBD","pd_turret",[3.58,0,-19.8],[-0.0,-1,0,1,-0.0,0,0,0,1]],["HP_CommsDish_DorsalPort","COMMS DISH DORSAL PORT","comms_dish_mount",[-3.25,2.85,-5.2],[0.669,0.743,0,-0.743,0.669,0,0,0,1]],["HP_CommsDish_DorsalStbd","COMMS DISH DORSAL STBD","comms_dish_mount",[3.25,2.85,-5.2],[0.669,-0.743,0,0.743,0.669,0,0,0,1]],["HP_Countermeasure_DorsalPort","COUNTERMEASURE DORSAL PORT","countermeasure_mount",[-2.772,2.772,15.6],[0.707,0.707,0,-0.707,0.707,0,0,0,1]],["HP_Countermeasure_DorsalStbd","COUNTERMEASURE DORSAL STBD","countermeasure_mount",[2.772,2.772,15.6],[0.707,-0.707,0,0.707,0.707,0,0,0,1]],["HP_Countermeasure_VentralPort","COUNTERMEASURE VENTRAL PORT","countermeasure_mount",[-2.772,-2.772,15.6],[-0.707,0.707,0,-0.707,-0.707,0,0,0,1]],["HP_Countermeasure_VentralStbd","COUNTERMEASURE VENTRAL STBD","countermeasure_mount",[2.772,-2.772,15.6],[-0.707,-0.707,0,0.707,-0.707,0,0,0,1]],["HP_Dorsal_SearchRadar","DORSAL SEARCH RADAR","dorsal_radar_mast",[0,4.22,-13.2],[1,0,0,0,1,0,0,0,1]],["HP_DropTank_Port","DROP TANK PORT","external_tank_pylon",[-6.75,0,13],[-1,0,0,0,1,0,-0.0,0,-1]],["HP_DropTank_Starboard","DROP TANK STBD","external_tank_pylon",[6.75,0,13],[1,0,0,0,1,0,0,0,1]],["HP_LPD_AftDorsal","LPD AFT DORSAL","pd_turret",[0,3.88,21.2],[1,0,0,0,1,0,0,0,1]],["HP_LPD_AftVentral","LPD AFT VENTRAL","pd_turret",[0,-3.88,21.2],[-1,-0.0,0,0,-1,0,0,0,1]],["HP_LPD_MidPort","LPD MID PORT","pd_turret",[-4.2,0,-10.5],[-0.0,1,0,-1,-0.0,0,0,0,1]],["HP_LPD_MidStbd","LPD MID STBD","pd_turret",[4.2,0,-10.5],[-0.0,-1,0,1,-0.0,0,0,0,1]],["HP_Radiator_Dorsal_Port","RADIATOR DORSAL PORT","radiator_hinge",[-2.843,2.843,25.4],[-0.707,0.707,0,-0.707,-0.707,0,0,0,1]],["HP_Radiator_Dorsal_Stbd","RADIATOR DORSAL STBD","radiator_hinge",[2.843,2.843,25.4],[0.707,0.707,0,-0.707,0.707,0,0,0,1]],["HP_Radiator_Ventral_Port","RADIATOR VENTRAL PORT","radiator_hinge",[-2.843,-2.843,25.4],[-0.707,-0.707,0,0.707,-0.707,0,0,0,1]],["HP_Radiator_Ventral_Stbd","RADIATOR VENTRAL STBD","radiator_hinge",[2.843,-2.843,25.4],[0.707,-0.707,0,0.707,0.707,0,0,0,1]],["HP_Spinal_Railgun","SPINAL RAILGUN","spinal_weapon",[0,-4.15,-29],[1,0,0,0,1,0,0,0,1]],["HP_Telescope_DorsalPort","TELESCOPE DORSAL PORT","sensor_turret",[-2.517,2.517,-22.2],[0.707,0.707,0,-0.707,0.707,0,0,0,1]],["HP_Telescope_DorsalStbd","TELESCOPE DORSAL STBD","sensor_turret",[2.517,2.517,-22.2],[0.707,-0.707,0,0.707,0.707,0,0,0,1]],["HP_Telescope_VentralPort","TELESCOPE VENTRAL PORT","sensor_turret",[-2.517,-2.517,-22.2],[-0.707,0.707,0,-0.707,-0.707,0,0,0,1]],["HP_Telescope_VentralStbd","TELESCOPE VENTRAL STBD","sensor_turret",[2.517,-2.517,-22.2],[-0.707,-0.707,0,0.707,-0.707,0,0,0,1]],["HP_VLS_Aft_Dorsal","VLS AFT DORSAL","vls_8cell_bay",[0,3.74,3.8],[1,0,0,0,1,0,0,0,1]],["HP_VLS_Aft_Ventral","VLS AFT VENTRAL","vls_8cell_bay",[0,-3.74,3.8],[-1,-0.0,0,0,-1,0,0,0,1]],["HP_VLS_Mid_DorsalPort","VLS MID DORSAL PORT","vls_8cell_bay",[-2.956,2.956,-10.5],[0.707,0.707,0,-0.707,0.707,0,0,0,1]],["HP_VLS_Mid_DorsalStbd","VLS MID DORSAL STBD","vls_8cell_bay",[2.956,2.956,-10.5],[0.707,-0.707,0,0.707,0.707,0,0,0,1]],["HP_VLS_Mid_VentralPort","VLS MID VENTRAL PORT","vls_8cell_bay",[-2.956,-2.956,-10.5],[-0.707,0.707,0,-0.707,-0.707,0,0,0,1]],["HP_VLS_Mid_VentralStbd","VLS MID VENTRAL STBD","vls_8cell_bay",[2.956,-2.956,-10.5],[-0.707,-0.707,0,0.707,-0.707,0,0,0,1]]],"sil":[[[37.81,1.38],[37.01,1.38],[37.01,3.58],[33.13,3.2],[32.31,4.28],[-3.59,3.8],[-15.17,4.32],[-17.43,3.54],[-26.27,4.24],[-27.05,3.54],[-28.17,3.78],[-37.39,1.38],[-37.39,-1.38],[-28.17,-3.8],[-17.41,-3.56],[-15.19,-4.32],[-11.67,-4.32],[-11.19,-5.06],[-3.59,-3.82],[32.31,-4.28],[33.13,-3.22],[37.01,-3.6]]]},"cs17":{"box":[-13.603,-5.407,-38.156,13.603,6.21,44.23],"hp":[["HP_Bow_Geodesic_Emitter","BOW GEODESIC EMITTER","bow_emitter_bay",[0,0,-38.4],[1,0,0,0,1,0,0,0,1]],["HP_Stealth_CIWS_Dorsal","STEALTH CIWS DORSAL","stealth_pd_turret",[0,3.85,28],[1,0,0,0,1,0,0,0,1]],["HP_Stealth_CIWS_Ventral","STEALTH CIWS VENTRAL","stealth_pd_turret",[0,-3.52,-18],[1,0,0,0,-1,-0.0,0,0,-1]],["HP_Stealth_LPD_Dorsal","STEALTH LPD DORSAL","stealth_pd_turret",[0,4.35,17.5],[1,0,0,0,1,0,0,0,1]],["HP_Stealth_LPD_Ventral","STEALTH LPD VENTRAL","stealth_pd_turret",[0,-3.9,-4],[1,0,0,0,-1,-0.0,0,0,-1]],["HP_Stealth_Radiator_Dorsal_Port","STEALTH RADIATOR DORSAL PORT","stealth_radiator_hinge",[-10.65,2.05,28],[-0.927,0.375,0,-0.375,-0.927,0,0,0,1]],["HP_Stealth_Radiator_Dorsal_Stbd","STEALTH RADIATOR DORSAL STBD","stealth_radiator_hinge",[10.65,2.05,28],[0.927,0.375,0,-0.375,0.927,0,0,0,1]],["HP_Stealth_Radiator_Ventral_Port","STEALTH RADIATOR VENTRAL PORT","stealth_radiator_hinge",[-10.65,-1.85,28],[-0.927,-0.375,0,0.375,-0.927,0,0,0,1]],["HP_Stealth_Radiator_Ventral_Stbd","STEALTH RADIATOR VENTRAL STBD","stealth_radiator_hinge",[10.65,-1.85,28],[0.927,-0.375,0,0.375,0.927,0,0,0,1]],["HP_Stealth_VLS_Port","STEALTH VLS PORT","stealth_vls_bay",[-6.82,2.22,8],[0.619,0.782,0.08,-0.775,0.624,-0.101,-0.129,-0.0,0.992]],["HP_Stealth_VLS_Stbd","STEALTH VLS STBD","stealth_vls_bay",[6.82,2.22,8],[0.619,-0.782,-0.08,0.775,0.624,-0.101,0.129,-0.0,0.992]]],"sil":[[[-37.97,5.64],[-34.49,3.06],[-34.51,1.86],[-37.39,0.96],[-38.15,-0.0],[-34.49,-1.88],[-34.49,-2.76],[-37.93,-5.4],[-34.37,-2.8],[-18.93,-3.42],[-19.97,-4.14],[31.97,-4.14],[19.97,-3.58],[40.79,-2.42],[41.01,-1.08],[44.23,-1.06],[44.23,1.06],[41.01,1.06],[40.79,2.82],[14.67,4.82],[-1.99,4.78],[-2.03,6.04],[-11.03,6.2],[-23.51,4.0],[-34.49,3.2]]]},"cm32":{"box":[-6.418,-4.766,-30.525,6.418,7.575,29.8],"hp":[["HP_CIWS_AftDorsal","CIWS AFT DORSAL","pd_turret",[0,4.12,16.2],[1,0,0,0,1,0,0,0,1]],["HP_CIWS_AftVentral","CIWS AFT VENTRAL","pd_turret",[0,-4.12,16.2],[-1,-0.0,0,0,-1,0,0,0,1]],["HP_CIWS_BowDorsal","CIWS BOW DORSAL","pd_turret",[0,3.88,-21.8],[1,0,0,0,1,0,0,0,1]],["HP_CIWS_BowVentral","CIWS BOW VENTRAL","pd_turret",[0,-3.88,-21.8],[-1,-0.0,0,0,-1,0,0,0,1]],["HP_GuidanceDish_Port","GUIDANCE DISH PORT","comms_dish_mount",[-1.65,5.45,-17.8],[0.423,0.906,0,-0.906,0.423,0,0,0,1]],["HP_GuidanceDish_Stbd","GUIDANCE DISH STBD","comms_dish_mount",[1.65,5.45,-17.8],[0.423,-0.906,0,0.906,0.423,0,0,0,1]],["HP_LPD_AftDorsal","LPD AFT DORSAL","pd_turret",[0,4.12,20.8],[1,0,0,0,1,0,0,0,1]],["HP_LPD_FwdVentral","LPD FWD VENTRAL","pd_turret",[0,-3.9,-15.8],[-1,-0.0,0,0,-1,0,0,0,1]],["HP_Mast_SearchRadar","MAST SEARCH RADAR","dorsal_radar_mast",[0,7.6,-15.8],[1,0,0,0,1,0,0,0,1]],["HP_Radiator_Dorsal_Port","RADIATOR DORSAL PORT","radiator_hinge",[-2.956,2.956,19.2],[-0.707,0.707,0,-0.707,-0.707,0,0,0,1]],["HP_Radiator_Dorsal_Stbd","RADIATOR DORSAL STBD","radiator_hinge",[2.956,2.956,19.2],[0.707,0.707,0,-0.707,0.707,0,0,0,1]],["HP_Radiator_Ventral_Port","RADIATOR VENTRAL PORT","radiator_hinge",[-2.956,-2.956,19.2],[-0.707,-0.707,0,0.707,-0.707,0,0,0,1]],["HP_Radiator_Ventral_Stbd","RADIATOR VENTRAL STBD","radiator_hinge",[2.956,-2.956,19.2],[0.707,-0.707,0,0.707,0.707,0,0,0,1]],["HP_SlavaPod_PortAft","SLAVA POD PORT AFT","heavy_canister_pylon",[-5.65,-0.45,3.2],[0.97,0,-0.242,0,1,0,0.242,0,0.97]],["HP_SlavaPod_PortFwd","SLAVA POD PORT FWD","heavy_canister_pylon",[-5.65,0.45,-8],[0.97,0,-0.242,0,1,0,0.242,0,0.97]],["HP_SlavaPod_StbdAft","SLAVA POD STBD AFT","heavy_canister_pylon",[5.65,-0.45,3.2],[0.97,0,0.242,0,1,0,-0.242,0,0.97]],["HP_SlavaPod_StbdFwd","SLAVA POD STBD FWD","heavy_canister_pylon",[5.65,0.45,-8],[0.97,0,0.242,0,1,0,-0.242,0,0.97]],["HP_Telescope_Port","TELESCOPE PORT","sensor_turret",[-3.88,0,-20.2],[-0.0,1,0,-1,-0.0,0,0,0,1]],["HP_Telescope_Stbd","TELESCOPE STBD","sensor_turret",[3.88,0,-20.2],[-0.0,-1,0,1,-0.0,0,0,0,1]],["HP_VLS16_DorsalPort_16Cell","VLS16 DORSAL PORT","vls_16cell_bay",[-3.253,3.253,-2.5],[0.707,0.707,0,-0.707,0.707,0,0,0,1]],["HP_VLS16_DorsalStbd_16Cell","VLS16 DORSAL STBD","vls_16cell_bay",[3.253,3.253,-2.5],[0.707,-0.707,0,0.707,0.707,0,0,0,1]],["HP_VLS16_Dorsal_16Cell","VLS16 DORSAL","vls_16cell_bay",[0,4.6,-2.5],[1,0,0,0,1,0,0,0,1]],["HP_VLS16_VentralPort_16Cell","VLS16 VENTRAL PORT","vls_16cell_bay",[-3.253,-3.253,-2.5],[-0.707,0.707,0,-0.707,-0.707,0,0,0,1]],["HP_VLS16_VentralStbd_16Cell","VLS16 VENTRAL STBD","vls_16cell_bay",[3.253,-3.253,-2.5],[-0.707,-0.707,0,0.707,-0.707,0,0,0,1]],["HP_VLS16_Ventral_16Cell","VLS16 VENTRAL","vls_16cell_bay",[0,-4.6,-2.5],[-1,-0.0,0,0,-1,0,0,0,1]]],"sil":[[[-30.51,0.82],[-30.31,-1.34],[-22.97,-4.14],[-12.97,-3.86],[-9.87,-4.78],[4.89,-4.78],[6.65,-4.1],[22.71,-4.64],[22.55,-4.28],[25.71,-4.46],[26.21,-2.68],[29.81,-3.1],[29.81,-0.3],[26.01,-0.76],[26.03,0.74],[29.81,0.26],[29.81,3.08],[26.15,2.66],[25.71,4.42],[6.65,4.08],[4.91,4.74],[-9.87,4.74],[-13.19,3.82],[-13.21,5.16],[-14.01,5.2],[-14.41,7.56],[-17.17,7.56],[-18.37,6.46],[-18.51,5.2],[-19.79,5.14],[-19.81,3.82],[-22.97,4.1]]]}};
+const MOD_GEOM = {"mod_spinal_railgun":{"box":[-0.71,-0.525,-13.625,0.71,2.676,12.1],"sil":[[[-13.62,0.22],[-13.26,-0.37],[12.1,-0.52],[12.1,0.85],[10.98,0.86],[10.96,1.49],[10.04,1.49],[10.02,0.86],[7.69,0.86],[7.65,1.49],[6.75,1.49],[6.72,0.86],[4.28,0.86],[4.26,1.49],[3.34,1.49],[3.31,0.86],[1.52,0.86],[1.48,0.35],[1.07,0.43],[1.06,1.49],[0.15,1.49],[0.12,0.35],[-1.81,0.35],[-1.89,1.65],[-2.28,0.35],[-5.02,0.37],[-4.44,2.21],[-5.25,0.35],[-7.99,0.35],[-7.06,2.67],[-8.21,0.35]]]},"mod_bow_heavy_laser":{"box":[-1.18,-0.405,-1.239,1.18,2.317,1.18],"sil":[[[-1.11,1.95],[-1.14,1.73],[-1.01,1.7],[-1.05,1.38],[-1.19,1.4],[-1.22,1.17],[-0.89,0.98],[-0.48,0.92],[-0.47,0.77],[-0.89,0.74],[-0.95,0.45],[-1.02,0.44],[-1.18,-0.41],[1.18,-0.41],[1.02,0.44],[0.95,0.45],[0.9,0.69],[1.1,0.74],[1.1,1.52],[0.68,1.53],[0.67,1.64],[0.57,1.65],[0.6,1.88],[0.15,1.94],[0.16,2.14],[-0.46,2.22],[-0.49,2.02],[-0.74,2.05]]]},"mod_geodesic_ew_emitter":{"box":[-2.209,-2.734,-5.833,3.491,2.734,12.2],"sil":[[[-5.07,0.3],[-4.87,-1.01],[-4.03,-1.96],[-3.55,-1.99],[-4.23,-2.55],[-3.86,-2.73],[-0.16,-2.64],[0.32,-0.93],[12.19,-0.93],[10.44,-0.71],[10.49,-0.43],[9.44,-0.02],[10.49,0.44],[10.44,0.71],[12.19,0.93],[0.32,0.93],[-0.16,2.64],[-3.69,2.72],[-4.23,2.05],[-3.83,1.99],[-4.66,1.36],[-4.62,0.76]]]},"mod_slava_quad_canister_pod":{"box":[-2.775,-1.325,-5.23,1.325,1.325,6.348],"sil":[[[-5.23,1.05],[-5.23,0.19],[-4.51,0.04],[-5.23,-0.19],[-5.23,-1.05],[-4.89,-1.18],[6.35,-1.2],[6.33,1.22],[4.9,1.08],[2.9,1.32],[-2.9,1.32]]]},"mod_vls_8cell":{"box":[-1.26,-0.04,-2.9,1.26,0.305,2.9],"sil":[[[-2.9,0.17],[-2.89,-0.04],[2.9,-0.03],[2.9,0.17],[2.57,0.3],[-2.47,0.3]]]},"mod_vls_16cell":{"box":[-1.42,-0.04,-6.1,1.42,0.305,6.1],"sil":[[[-6.1,0.16],[-6.09,-0.04],[6.09,-0.04],[5.77,0.3]]]},"mod_stealth_vls_12cell":{"box":[-1.425,-0.12,-5.7,1.425,0.19,5.7],"sil":[[[-5.7,0.11],[-5.7,-0.12],[5.7,-0.12],[5.7,0.11],[5.19,0.19]]]},"mod_ciws_rotary":{"box":[-0.72,-0.04,-2.655,0.72,1.96,0.96],"sil":[[[0.72,-0.04],[0.56,0.44],[0.6,0.56],[0.91,0.73],[0.95,0.99],[0.79,1.19],[0.53,1.23],[0.5,1.74],[0.34,1.95],[0.14,1.96],[-0.01,1.78],[-0.04,1.41],[-1.3,1.58],[-1.36,1.52],[-2.59,1.79],[-2.5,1.71],[-2.61,1.71],[-2.52,1.62],[-2.64,1.59],[-1.39,1.32],[-1.38,1.25],[-0.44,1.0],[-0.46,0.43],[-0.64,0.32],[-0.72,-0.04]]]},"mod_stealth_ciws":{"box":[-0.909,-0.03,-2.401,0.909,1.54,0.909],"sil":[[[0.84,0.37],[0.84,0.99],[0.75,1.02],[0.56,1.54],[0.12,1.53],[-0.05,1.02],[-2.36,1.34],[-2.27,1.26],[-2.37,1.27],[-2.28,1.18],[-2.4,1.15],[-1.7,1.01],[-1.7,0.91],[-0.64,0.65],[-0.61,0.34]],[[-0.91,-0.02],[0.91,-0.02],[0.76,0.31],[-0.76,0.31]]]},"mod_lpd60_laser_turret":{"box":[-0.68,-0.03,-0.68,0.68,1.478,0.68],"sil":[[[-0.51,1.26],[-0.61,0.86],[-0.59,0.81],[-0.29,0.71],[-0.23,0.64],[-0.23,0.5],[-0.52,0.49],[-0.55,0.28],[0.55,0.28],[0.52,0.49],[0.31,0.5],[0.36,0.98],[0.27,1.16],[0.14,1.25],[0.15,1.32],[-0.18,1.41],[-0.21,1.27],[-0.16,1.24],[-0.47,1.29]],[[-0.68,-0.03],[0.68,-0.03],[0.6,0.27],[-0.6,0.27]]]},"mod_stealth_lpd_turret":{"box":[-0.898,-0.04,-1.033,0.898,1.202,1.033],"sil":[[[-0.89,1.15],[-1.01,0.67],[-0.78,0.58],[-0.84,0.31],[-1.02,-0.04],[1.03,-0.03],[0.84,0.31],[0.87,0.34],[0.61,1.03],[-0.24,1.04]]]},"mod_countermeasure_rack":{"box":[-0.39,-0.042,-0.404,0.39,0.702,0.304],"sil":[[[-0.09,0.7],[-0.17,0.64],[-0.03,0.43],[-0.06,0.41],[-0.2,0.62],[-0.29,0.56],[-0.14,0.35],[-0.17,0.33],[-0.32,0.54],[-0.4,0.48],[-0.26,0.27],[-0.3,0.22],[-0.11,-0.04],[0.3,0.25],[0.12,0.51],[0.06,0.49]]]},"mod_radial_combat_telescope":{"box":[-0.58,-0.02,-1.417,0.58,2.178,1.369],"sil":[[[-0.87,2.11],[-1.24,1.63],[-1.19,1.61],[-1.1,0.96],[-0.14,0.69],[-0.17,0.42],[-0.42,0.41],[-0.56,-0.02],[0.56,-0.02],[0.42,0.42],[0.17,0.42],[0.14,0.6],[0.33,0.52],[0.53,0.54],[0.8,0.43],[0.84,0.58],[1.09,0.51],[1.17,0.8],[0.93,0.87],[0.96,1.03],[0.68,1.07],[0.53,1.19],[-1.16,1.64],[-0.84,2.08]]]},"mod_bow_primary_telescope":{"box":[-1.42,-1.26,-1.95,1.42,1.26,0],"sil":[[[-1.95,1.16],[-1.95,-1.16],[-1.6,-1.17],[-1.6,-1.25],[-1.45,-1.26],[-1.44,-1.18],[-0.0,-1.24],[-0.0,1.24],[-1.44,1.18],[-1.45,1.26],[-1.6,1.25],[-1.6,1.17]]]},"mod_dorsal_search_radar":{"box":[-3.987,-0.06,-1.425,3.987,4.48,1.425],"sil":[[[-0.27,4.18],[-0.37,3.82],[-0.59,3.8],[-0.59,3.2],[-0.37,3.18],[-0.37,3.01],[-0.54,2.98],[-0.61,2.28],[-0.95,2.25],[-0.95,1.02],[-1.12,0.66],[-1.42,0.65],[-1.42,-0.04],[1.4,-0.06],[1.42,0.63],[1.15,0.66],[1.15,2.25],[0.61,2.27],[0.54,2.98],[0.37,3.01],[0.37,3.24],[0.59,3.3],[0.59,3.71],[0.37,3.76],[0.3,4.17]]]},"mod_parabolic_comms_dish":{"box":[-1.15,-0.105,-1.221,1.15,2.271,0.445],"sil":[[[0.09,2.27],[-0.17,1.55],[-0.59,1.44],[-0.88,1.5],[-0.94,1.33],[-0.77,1.23],[-0.56,0.48],[-0.69,0.11],[-0.64,0.09],[-0.3,0.44],[-0.33,0.13],[-0.38,0.13],[-0.44,-0.09],[0.44,-0.09],[0.38,0.13],[0.33,0.13],[0.23,0.95],[0.33,1.23],[0.12,1.28],[0.18,1.93],[0.14,2.25]]]},"mod_external_drop_tank":{"box":[-3.125,-1.955,-7.925,1.955,1.955,7.925],"sil":[[[-7.92,0.35],[-7.92,-0.35],[-7.48,-0.23],[-6.92,-1.33],[-5.63,-1.96],[5.63,-1.96],[6.92,-1.33],[7.48,-0.23],[7.92,-0.35],[7.92,0.35],[7.48,0.22],[6.92,1.32],[5.63,1.95],[-5.63,1.95],[-6.92,1.32],[-7.48,0.22]]]},"mod_aux_capacitor_pod":{"box":[-0.62,-0.165,-2.825,0.62,0.74,2.825],"sil":[[[-2.82,0.59],[-2.82,0.07],[-2.2,-0.0],[-2.15,-0.17],[-1.85,-0.17],[-1.76,-0.0],[-0.16,-0.0],[-0.15,-0.17],[0.15,-0.17],[0.16,-0.0],[1.76,-0.0],[1.85,-0.17],[2.16,-0.17],[2.21,-0.0],[2.83,0.08],[2.82,0.61],[2.2,0.74],[-2.19,0.74]]]},"mod_radiator_wing_large":{"box":[-0.225,-0.29,-4.9,11.99,0.29,4.9],"sil":[[[-4.9,0.27],[-4.88,-0.29],[4.9,-0.28],[4.88,0.29]]]},"mod_radiator_wing_compact":{"box":[-0.175,-0.26,-3.5,6.79,0.26,3.5],"sil":[[[-3.5,0.24],[-3.48,-0.26],[3.5,-0.25],[3.48,0.26]]]},"mod_stealth_radiator_wing":{"box":[-1.772,-0.36,-4.3,11.391,0.36,8.288],"sil":[[[-4.3,0.33],[-4.29,-0.36],[4.29,-0.36],[4.31,-0.12],[8.29,-0.1],[8.28,0.11],[4.31,0.11],[4.29,0.35]]]}};
+
+/* ---------- Hulls ----------
+   og1 is the original ship. The others are built from their hull files: every hardpoint node with its frame,
+   the slot type that decides which modules fit, and a default loadout. Masses and thrust are derived from the
+   hulls' size and engines (same drive technology: Isp 3200 s). turn: pitch acceleration (deg/s^2) with the
+   default loadout and full tanks, which sets the RCS torque. sys: body z ranges of the internal systems for
+   the ship view. */
+const NEW_HULLS = {
+  dd84: { name: 'DD-84 DESTROYER', short: 'DD-84', file: 'dd84_destroyer_bare.glb', length: 80,
+    ship: { hullDry: 210000, mainProp0: 60000, rcsProp0: 4000, rcsThrust: 8000, rcsIsp: 250, mainThrust: 300000, mainIsp: 3200 },
+    power: { reactor: 1.5e6, reactorWaste: 1.0e6, avionics: 120e3, battCap: 200e6 }, therm: { capacity: 5e6, radArea: 300, radStowedArea: 300 },
+    turn: 0.35, inertiaBox: [8.8, 9.4, 75], sys: { scope: [-35, -31], capacitors: [-25, -14], reactor: [0, 14], radiators: [22, 28], main: [30, 37.5] }, plume: 3 },
+  cm32: { name: 'CM-32 MISSILE CRUISER', short: 'CM-32', file: 'cm32_missile_cruiser_bare.glb', length: 60,
+    ship: { hullDry: 120000, mainProp0: 70000, rcsProp0: 2500, rcsThrust: 5000, rcsIsp: 250, mainThrust: 200000, mainIsp: 3200 },
+    power: { reactor: 0.8e6, reactorWaste: 0.6e6, avionics: 100e3, battCap: 80e6 }, therm: { capacity: 3e6, radArea: 250, radStowedArea: 250 },
+    turn: 0.5, inertiaBox: [9, 9, 60], sys: { scope: [-29, -25], capacitors: [-21, -13], reactor: [4, 14], radiators: [16, 21], main: [23, 29.5] }, plume: 2.5 },
+  cs17: { name: 'CS-17 STEALTH CRUISER', short: 'CS-17', file: 'cs17_stealth_cruiser_bare.glb', length: 82,
+    ship: { hullDry: 160000, mainProp0: 45000, rcsProp0: 3000, rcsThrust: 6000, rcsIsp: 250, mainThrust: 200000, mainIsp: 3200 },
+    power: { reactor: 0.9e6, reactorWaste: 0.7e6, avionics: 100e3, battCap: 100e6 }, therm: { capacity: 4e6, radArea: 200, radStowedArea: 200 },
+    turn: 0.45, inertiaBox: [20, 9, 82], sys: { scope: [-34, -30], capacitors: [-22, -12], reactor: [4, 18], radiators: [22, 30], main: [34, 43] }, plume: 2 },
+};
+// Default module per slot type (LPD slots carry laser point defence)
+const DEFAULT_FOR_TYPE = { utility_pod_mount: 'mod_aux_capacitor_pod', heavy_turret: 'mod_bow_heavy_laser', bow_optical_mount: 'mod_bow_primary_telescope',
+  pd_turret: 'mod_ciws_rotary', sensor_turret: 'mod_radial_combat_telescope', comms_dish_mount: 'mod_parabolic_comms_dish',
+  countermeasure_mount: 'mod_countermeasure_rack', dorsal_radar_mast: 'mod_dorsal_search_radar', external_tank_pylon: 'mod_external_drop_tank',
+  heavy_canister_pylon: 'mod_slava_quad_canister_pod', radiator_hinge: 'mod_radiator_wing_large', spinal_weapon: 'mod_spinal_railgun',
+  vls_8cell_bay: 'mod_vls_8cell', vls_16cell_bay: 'mod_vls_16cell', stealth_vls_bay: 'mod_stealth_vls_12cell',
+  stealth_radiator_hinge: 'mod_stealth_radiator_wing', stealth_pd_turret: 'mod_stealth_ciws', bow_emitter_bay: 'mod_geodesic_ew_emitter' };
+const LPD_FOR_TYPE = { pd_turret: 'mod_lpd60_laser_turret', stealth_pd_turret: 'mod_stealth_lpd_turret' };
+// Module point -> body axes through a frame (position + rotation columns), and a direction without the position
+const frameApply = (hp, v) => { const m = hp.m, [x, y, z] = v;
+  return [hp.pos[0] + m[0]*x + m[3]*y + m[6]*z, hp.pos[1] + m[1]*x + m[4]*y + m[7]*z, hp.pos[2] + m[2]*x + m[5]*y + m[8]*z]; };
+const frameDir = (hp, v) => { const m = hp.m, [x, y, z] = v; return [m[0]*x + m[3]*y + m[6]*z, m[1]*x + m[4]*y + m[7]*z, m[2]*x + m[5]*y + m[8]*z]; };
+const HULLS = {
+  og1: { id: 'og1', name: 'OG-1 COMBAT SPACECRAFT', short: 'OG-1', file: 'ship_bare.glb', length: 24, box: [-1.9, -1.9, -12.5, 1.9, 1.9, 12.5],
+    hardpoints: OG1_HARDPOINTS, defaultLoadout: { spinal: 'rail_mk1', nose: 'laser_mk1', pdcTop: 'pdc_mk1', pdcBot: 'pdc_mk1', tankTop: 'tank_mk1', tankBot: 'tank_mk1' },
+    loadoutKey: 'og-loadout-v2', ship: { ...OG1_SHIP }, power: {}, therm: {}, rcsK: 51602, rcsArm: [10.5, 10.5, 1.9],
+    inertiaBox: [3.6, 3.8, 23.7], fins: true },
+};
+for (const [id, H] of Object.entries(NEW_HULLS)) {
+  const G = HULL_GEOM[id], hardpoints = {}, defaultLoadout = {};
+  for (const [node, words, type, pos, m] of G.hp) {
+    const tag = words.replace(/^(CIWS|LPD|VLS|VLS16|TELESCOPE|AUX CAP|COMMS DISH|GUIDANCE DISH|COUNTERMEASURE|RADIATOR|DROP TANK|SLAVA POD|STEALTH \w+|STEALTH)\s+/, '') || words;
+    hardpoints[node] = { name: words, tag, node, type, pos, m, flip: m[4] < -0.5 };
+    defaultLoadout[node] = (/LPD/.test(node) && LPD_FOR_TYPE[type]) || DEFAULT_FOR_TYPE[type] || null;
+  }
+  HULLS[id] = { id, ...H, box: G.box, hardpoints, defaultLoadout, loadoutKey: `og-loadout-${id}`, sil: { hull: G.sil, radiators: [] },
+    rcsArm: [0.42*H.length, 0.42*H.length, H.inertiaBox[0]/2] };
+  // RCS torque from the target pitch acceleration with the default loadout and full tanks
+  const ship = H.ship, mh = ship.hullDry + ship.mainProp0 + ship.rcsProp0, [bw, bh, bl] = H.inertiaBox;
+  let Ip = mh*(bh*bh + bl*bl)/12;
+  for (const [slot, mid] of Object.entries(defaultLoadout)) {
+    const mod = MODULE_CATALOG[mid]; if (!mod) continue;
+    const [, y, z] = frameApply(hardpoints[slot], mod.com), mass = mod.mass + (mod.prop || 0);
+    Ip += mass*(y*y + z*z);
+  }
+  HULLS[id].rcsK = H.turn*Math.PI/180*Ip;
+}
+const HULL_KEY = 'og-hull';
+let HULL = HULLS.og1;
+try { HULL = HULLS[localStorage.getItem(HULL_KEY)] || HULLS.og1; } catch (e) {}
+let HARDPOINTS = HULL.hardpoints;
+Object.assign(SHIP, HULL.ship); RCS_K = HULL.rcsK; RCS_ARM = HULL.rcsArm;
 // Player ordnance. Each flies with the supplied computeTorpedoGuidance (unchanged): these values are only the
 // inputs it takes (thrust limit, burn seconds) plus launch speed, lifetime, proximity fuse and warhead.
 const ORD = {
@@ -228,8 +353,7 @@ const statOf = (role, key) => { const sl = roleSlot(role); return sl && modAt(sl
 const sensorRange = () => (roleDamage('radar') > 0 && statOf('radar', 'sensorRange')) || LOCAL_R;
 const warnRange = () => Math.max(TORP_WARN_R, roleDamage('radar') > 0 ? statOf('radar', 'warnRange') || 0 : 0,
   roleDamage('ecm') > 0 ? statOf('ecm', 'warnRange') || 0 : 0);
-const DEFAULT_LOADOUT = { spinal: 'rail_mk1', nose: 'laser_mk1', pdcTop: 'pdc_mk1', pdcBot: 'pdc_mk1', tankTop: 'tank_mk1', tankBot: 'tank_mk1' };
-const LOADOUT_KEY = 'og-loadout-v2';
+let DEFAULT_LOADOUT = HULL.defaultLoadout, LOADOUT_KEY = HULL.loadoutKey;
 // Modules that can go on a hardpoint
 const modulesFor = slot => Object.keys(MODULE_CATALOG).filter(id => MODULE_CATALOG[id].fits.includes(HARDPOINTS[slot].type));
 // A saved loadout is kept only where its module still exists and fits; the old v1 format (one fixed module per
@@ -238,7 +362,7 @@ function loadLoadout() {
   const lo = { ...DEFAULT_LOADOUT };
   try {
     const v2 = JSON.parse(localStorage.getItem(LOADOUT_KEY) || 'null');
-    const v1 = v2 ? null : JSON.parse(localStorage.getItem('og-loadout-v1') || 'null');
+    const v1 = v2 || HULL.id !== 'og1' ? null : JSON.parse(localStorage.getItem('og-loadout-v1') || 'null');
     const src = v2 || (v1 && { spinal: v1.railgun === false ? null : 'rail_mk1', nose: v1.laser === false ? null : 'laser_mk1',
       pdcTop: v1.pdcTop === false ? null : 'pdc_mk1', pdcBot: v1.pdcBot === false ? null : 'pdc_mk1',
       tankTop: v1.tankTop === false ? null : 'tank_mk1', tankBot: v1.tankBot === false ? null : 'tank_mk1' }) || {};
@@ -261,10 +385,14 @@ const slotLabel = slot => `${modAt(slot) ? modAt(slot).short : 'EMPTY'} ${HARDPO
 // Module-file point -> body axes, through its hardpoint
 function hpToBody(slot, v) {
   const hp = HARDPOINTS[slot];
+  if (hp.m) return frameApply(hp, v);                // hull-file hardpoint: its own frame
   let [x, y, z] = v;
   if (hp.flip) { x = -x; y = -y; }                   // mounted upside down (rotated 180 deg about the long axis)
   return [hp.pos[0] - x, hp.pos[1] + y, hp.pos[2] - z];
 }
+// Outward (module +Y) or another module-axis direction, in body axes
+const hpDir = (slot, v = [0, 1, 0]) => { const hp = HARDPOINTS[slot]; if (hp.m) return frameDir(hp, v);
+  return v[2] ? [0, 0, -v[2]] : [0, hp.flip ? -1 : 1, 0]; };
 const tankCount = () => slotsWithRole('tank').length;
 const tankProp0Total = () => slotsWithRole('tank').reduce((a, s) => a + modAt(s).prop, 0);
 const tankDryTotal = () => slotsWithRole('tank').reduce((a, s) => a + modAt(s).mass, 0);
@@ -299,19 +427,19 @@ function resetPdcMounts() {
   for (const slot of slotsWithRole('pdc')) {
     const mod = modAt(slot), hp = HARDPOINTS[slot];
     PDC_MOUNTS.push({ name: `${mod.short} ${hp.tag}`, tag: hp.tag[0], sys: slot, pos: hpToBody(slot, mod.barrel),
-      dir: [0, hp.flip ? -1 : 1, 0], cd: 0, rounds: (mod.stats && mod.stats.rounds) || PDC_ROUNDS, heat: 0, hot: false });
+      dir: hpDir(slot), cd: 0, rounds: (mod.stats && mod.stats.rounds) || PDC_ROUNDS, heat: 0, hot: false });
   }
   // Interceptor and laser point-defence turrets, torpedo tube, VLS cells and ECM decoys
   INT_MOUNTS.length = 0; LPD_MOUNTS.length = 0;
   for (const slot of slotsWithRole('interceptor')) {
     const mod = modAt(slot), hp = HARDPOINTS[slot];
     INT_MOUNTS.push({ name: `${mod.short} ${hp.tag}`, tag: hp.tag[0], sys: slot, pos: hpToBody(slot, mod.launch),
-      dir: [0, hp.flip ? -1 : 1, 0], rounds: mod.stats.rounds, cd: 0 });
+      dir: hpDir(slot), rounds: mod.stats.rounds, cd: 0 });
   }
   for (const slot of slotsWithRole('laserpd')) {
     const mod = modAt(slot), hp = HARDPOINTS[slot];
     LPD_MOUNTS.push({ name: `${mod.short} ${hp.tag}`, tag: hp.tag[0], sys: slot, pos: hpToBody(slot, mod.emitter),
-      dir: [0, hp.flip ? -1 : 1, 0], target: null, ...mod.stats });
+      dir: hpDir(slot), target: null, ...mod.stats });
   }
   spinalAmmo = statOf('torpedo', 'magazine') || 0; spinalReload = 0;
   vlsCells = Object.fromEntries(slotsWithRole('vls').map(sl => [sl, modAt(sl).stats.cells]));
@@ -380,7 +508,9 @@ const anyDamage = () => hullInt < 1 || DMG_SYSTEMS.some(s => damage[s.id] < 1);
 const reactorOut = () => POWER.reactor*damage.reactor;
 const battCapEff = () => POWER.battCap*(0.3 + 0.7*damage.capacitors)
   + slotsWithRole('capacitor').reduce((a, sl) => a + modAt(sl).stats.battery*(damage[sl] ?? 1), 0);   // aux capacitor pods
-const radAreaEff = () => radDeployed ? THERM.radArea*Math.max(0.1, damage.radiators) : THERM.radStowedArea;
+// Deployed: the hull's radiators (damage limited) plus any radiator wing modules; stowed: the hull skin only
+const radAreaEff = () => radDeployed ? THERM.radArea*Math.max(0.1, damage.radiators)
+  + slotsWithRole('radiator').reduce((a, sl) => a + modAt(sl).stats.area*Math.max(0.1, damage[sl] ?? 1), 0) : THERM.radStowedArea;
 const rcsK = () => 0.2 + 0.8*damage.rcs;
 // Returns true when the hit destroyed the ship (the caller stops processing this step)
 function applyTorpedoHit(tp) {
@@ -559,9 +689,10 @@ function computeTorpedoGuidance(tp, target, h, opts = {}) {
   tp.burn = Math.max(0, burnLeft - (Math.min(aMag, cfg.maxAccel) / cfg.maxAccel) * h);
   return [ax, ay, az];
 }
-const POWER = { reactor: 200e3, reactorWaste: 200e3, avionics: 40e3, battCap: 5e6 };
-const THERM = { capacity: 2e5, radArea: 600, radStowedArea: 40, eps: 0.9, sigma: 5.670374e-8,
+const OG1_POWER = { reactor: 200e3, reactorWaste: 200e3, avionics: 40e3, battCap: 5e6 };
+const OG1_THERM = { capacity: 2e5, radArea: 600, radStowedArea: 40, eps: 0.9, sigma: 5.670374e-8,
   tSpace: 3, tMax: 400, tWarn: 380, tStart: 297 };
+const POWER = { ...OG1_POWER, ...HULL.power }, THERM = { ...OG1_THERM, ...HULL.therm };
 const PHYS_DT = 0.25;
 const WARPS = [1, 10, 100, 1000];
 const RANGES = [2000, 10000, 50000, 250000, 1000000];
@@ -637,9 +768,9 @@ function shipMass() { return dryMass() + mainProp + rcsProp + (podsOn ? tankDryT
 // the hull with its internal propellant as a 3.6 x 3.8 x 23.7 m box, the radiator fins (300 kg, 9.8 m aft,
 // 11.6 m tall), and each fitted module as a point mass at its centre (com). A spinal gun, far forward, dominates.
 function shipI() {
-  const mh = SHIP.hullDry + mainProp + rcsProp;
-  const I = [mh*(3.8*3.8 + 23.7*23.7)/12, mh*(3.6*3.6 + 23.7*23.7)/12, mh*(3.6*3.6 + 3.8*3.8)/12];
-  I[0] += 300*(5.8*5.8/3 + 9.8*9.8); I[1] += 300*9.8*9.8; I[2] += 300*5.8*5.8/3;
+  const mh = SHIP.hullDry + mainProp + rcsProp, [bw, bh, bl] = HULL.inertiaBox;
+  const I = [mh*(bh*bh + bl*bl)/12, mh*(bw*bw + bl*bl)/12, mh*(bw*bw + bh*bh)/12];
+  if (HULL.fins) { I[0] += 300*(5.8*5.8/3 + 9.8*9.8); I[1] += 300*9.8*9.8; I[2] += 300*5.8*5.8/3; }
   const p0 = tankProp0Total();
   for (const slot of Object.keys(HARDPOINTS)) {
     const m = modAt(slot);
@@ -1649,10 +1780,12 @@ function fireSpinalTorpedo() {
 }
 function fireMissile() {
   if (masterMode === 'OFF') { log('VLS · MASTER ARM OFF'); return; }
-  const sl = slotsWithRole('vls').find(s2 => vlsCells[s2] > 0 && (damage[s2] ?? 1) > 0);
+  // Ordinary cells first; heavy canister pods (torpedoes) once those are empty
+  const ready = s2 => vlsCells[s2] > 0 && (damage[s2] ?? 1) > 0;
+  const sl = slotsWithRole('vls').find(s2 => ready(s2) && !modAt(s2).stats.ord) || slotsWithRole('vls').find(ready);
   if (!sl) { log(hasRole('vls') ? 'VLS EMPTY OR OFFLINE' : 'VLS NOT FITTED'); return; }
   const t = ordnanceTarget('VLS'); if (!t) return;
-  launchOrdnance('missile', hpToBody(sl, modAt(sl).launch), [0, HARDPOINTS[sl].flip ? -1 : 1, 0], t, sl);
+  launchOrdnance(modAt(sl).stats.ord || 'missile', hpToBody(sl, modAt(sl).launch), hpDir(sl, modAt(sl).launchDir), t, sl);
   vlsCells[sl]--;
   log(`MISSILE AWAY · ${t.name} · VLS ${Object.values(vlsCells).reduce((a, b) => a + b, 0)} LEFT`); sfx.missileLaunch();
 }
@@ -3280,9 +3413,23 @@ function drawDamage(g, W, H, idx) {
   mfdHeader(g, W, 'DAMAGE CONTROL', idx);
   const hc = hullInt > 0.5 ? PH : hullInt > 0.25 ? AMB : RED;
   bar(g, 40, 84, 690, 22, hullInt, 'HULL INTEGRITY', `${(hullInt*100).toFixed(0)}%   HITS ${hullHits}`, hc);
-  DMG_SYSTEMS.forEach((s, i) => {
-    const x = i < 5 ? 40 : 400, y = 160 + (i % 5)*58;
-    const v = damage[s.id], st = dmgState(v);
+  // More than ten systems (the larger hulls): modules are grouped by type, with the group's mean state and count offline
+  let rows = DMG_SYSTEMS.map(s => ({ name: s.name, v: damage[s.id] }));
+  if (rows.length > 10) {
+    const grp = {};
+    for (const s of DMG_SYSTEMS) {
+      const m = modAt(s.id), key = !m ? s.id : ['telescope', 'comms'].includes(m.role) ? 'SENSORS' : m.short;
+      if (!m) { grp[key] = { name: s.name, v: damage[s.id] }; continue; }
+      const g0 = grp[key] || (grp[key] = { name: '', v: 1, n: 0, off: 0, sum: 0 });
+      g0.n++; g0.sum += damage[s.id]; g0.v = g0.sum/g0.n; if (damage[s.id] <= 0) g0.off++;   // mean state of the group
+      g0.name = `${key} x${g0.n}${g0.off ? ` · ${g0.off} OFF` : ''}`;
+    }
+    rows = Object.values(grp).slice(0, 16);
+  }
+  const per = Math.ceil(rows.length/2), dy = per > 5 ? Math.min(58, 315/(per - 1)) : 58, y0 = per > 5 ? 135 : 160;
+  rows.forEach((s, i) => {
+    const x = i < per ? 40 : 400, y = y0 + (i % per)*dy;
+    const v = s.v, st = dmgState(v);
     const c = st === 'OK' ? PH : st === 'DEGR' ? AMB : RED;
     bar(g, x, y, 330, 18, v, s.name, st === 'OK' ? 'OK' : st === 'OFF' ? 'OFFLINE' : `${(v*100).toFixed(0)}%`, c);
   });
@@ -3345,13 +3492,23 @@ const pointInPoly = (x, y, poly) => {
   }
   return inside;
 };
+// Layout of the ship view for the current hull: scale, outline, system boxes and markers (body z, y in metres)
+function shipView(W) {
+  if (HULL.id === 'og1') return { k: 26, ox: W/2 + 1.2*26, zc: 0, hull: SHIP_SIL.hull, rads: SHIP_SIL.radiators, uh: 0.95, arcR: 52, march: 14,
+    sys: { scope: [-9.7, -7.7], capacitors: [-7.3, -2.6], reactor: [0.6, 5.8], radiators: [6.2, 8.2], main: [9.0, 11.4] },
+    exhaust: 12.1, plume: 0.55, plumeLen: 2.2, rcs: [[-9.4, 9.6], [1.75, -1.75]], radStripe: [8, 12] };
+  const b = HULL.box, L = b[5] - b[2], zc = (b[2] + b[5])/2, k = Math.min(600/L, 150/(b[4] - b[1]));
+  return { k, ox: W/2 - zc*k, zc, hull: HULL.sil.hull, rads: [], uh: 0.33*(b[4] - b[1])/2, arcR: 34, march: L,
+    sys: HULL.sys, exhaust: b[5], plume: HULL.plume, plumeLen: 0.08*L, rcs: [[b[2] + 0.12*L, b[5] - 0.18*L], [0.75*b[4], 0.75*b[1]]], radStripe: [0, 0] };
+}
 /* Ship view: the hull and radiators as traced from the model, every fitted module on its hardpoint (coloured by
    state), turret coverage, internal systems as boxes inside the hull, torpedo impacts on the outline.
    Screen: nose left, aft right, top of the ship up. */
 function drawShip(g, W, H, idx) {
   mfdHeader(g, W, `SHIP  HULL ${(hullInt*100).toFixed(0)}%  ${hullT.toFixed(0)} K`, idx);   // tank levels are on the tanks
   if (hullInt < 1) { g.fillStyle = hullInt <= 0.25 ? 'rgba(255,60,50,0.25)' : 'rgba(255,176,32,0.18)'; g.fillRect(0, 0, W, 40); }
-  const k = 26, ox = W/2 + 1.2*k, oy = 252;                // px per metre; screen position of the body origin
+  const V = shipView(W);
+  const k = V.k, ox = V.ox, oy = 252;                      // px per metre; screen position of the body origin
   const X = v => ox + v*k, Y = u => oy - u*k;
   const stCol = e => e === undefined ? PH : e <= 0 ? RED : e < 0.999 ? AMB : PH;
   const stFill = e => e === undefined || e >= 0.999 ? 'rgba(125,255,154,0.13)' : e > 0 ? 'rgba(255,176,32,0.3)' : 'rgba(255,60,50,0.25)';
@@ -3362,34 +3519,36 @@ function drawShip(g, W, H, idx) {
     g.restore();
   };
   // Radiators: solid when deployed, dashed when stowed; tinted by damage
-  for (const pts of SHIP_SIL.radiators) {
+  for (const pts of V.rads) {
     path(pts);
     g.fillStyle = radDeployed ? stFill(damage.radiators) : 'rgba(125,255,154,0.04)'; g.fill();
     g.strokeStyle = radDeployed ? stCol(damage.radiators) : DIM; g.lineWidth = 1.5; g.setLineDash(radDeployed ? [] : [5, 5]); g.stroke(); g.setLineDash([]);
     if (radDeployed) { g.save(); path(pts); g.clip(); g.strokeStyle = 'rgba(125,255,154,0.18)'; g.lineWidth = 1;
-      for (let u = -6; u <= 6; u += 0.5) { g.beginPath(); g.moveTo(X(8), Y(u)); g.lineTo(X(12), Y(u)); g.stroke(); } g.restore(); }
+      for (let u = -6; u <= 6; u += 0.5) { g.beginPath(); g.moveTo(X(V.radStripe[0]), Y(u)); g.lineTo(X(V.radStripe[1]), Y(u)); g.stroke(); } g.restore(); }
     if (damage.radiators <= 0) hatch(pts, RED);
   }
   // Hull
-  for (const pts of SHIP_SIL.hull) { path(pts); g.fillStyle = '#04200e'; g.fill(); g.strokeStyle = PH; g.lineWidth = 2; g.stroke(); }
+  for (const pts of V.hull) { path(pts); g.fillStyle = '#04200e'; g.fill(); g.strokeStyle = PH; g.lineWidth = 2; g.stroke(); }
   // Internal systems: boxes along the centreline (body z ranges), coloured by damage
-  const box = (id, label, v0, v1, uh = 0.95) => {
+  const box = (id, label, v0, v1, uh = V.uh) => {
     const e = damage[id]; g.fillStyle = stFill(e); g.fillRect(X(v0), Y(uh), (v1 - v0)*k, 2*uh*k);
     g.strokeStyle = stCol(e); g.lineWidth = 1.5; g.strokeRect(X(v0), Y(uh), (v1 - v0)*k, 2*uh*k);
     if (e !== undefined && e <= 0) hatch([[v0, -uh], [v1, -uh], [v1, uh], [v0, uh]], RED);
     txt(g, X((v0 + v1)/2), oy + 6, label, stCol(e), '15px monospace', 'center');
   };
-  box('scope', 'SCOPE', -9.7, -7.7);                      // clear of the nose modules
-  box('capacitors', `CAP ${(battery/battCapEff()*100).toFixed(0)}%`, -7.3, -2.6);
-  box('reactor', `REACTOR ${(telem.loadE/1e3).toFixed(0)}kW`, 0.6, 5.8);
-  box('radiators', 'COOLANT', 6.2, 8.2, 0.7);
-  box('main', damage.main <= 0 ? 'DRIVE OFF' : thrustFrac > 0 ? 'BURN' : 'DRIVE', 9.0, 11.4, 0.8);
+  const S = V.sys, kw = v => v >= 1e6 ? `${(v/1e6).toFixed(1)}MW` : `${(v/1e3).toFixed(0)}kW`;
+  box('scope', 'SCOPE', ...S.scope);                       // clear of the nose modules
+  box('capacitors', `CAP ${(battery/battCapEff()*100).toFixed(0)}%`, ...S.capacitors);
+  box('reactor', `REACTOR ${kw(telem.loadE)}`, ...S.reactor);
+  box('radiators', 'COOLANT', ...S.radiators, V.uh*0.74);
+  box('main', damage.main <= 0 ? 'DRIVE OFF' : thrustFrac > 0 ? 'BURN' : 'DRIVE', ...S.main, V.uh*0.84);
   if (thrustFrac > 0) {                                    // exhaust plume while burning
     g.fillStyle = `rgba(255,176,32,${0.35 + 0.25*Math.random()})`;
-    g.beginPath(); g.moveTo(X(12.1), Y(0.55)); g.lineTo(X(12.1 + 2.2 + Math.random()), Y(0)); g.lineTo(X(12.1), Y(-0.55)); g.closePath(); g.fill();
+    const e = V.exhaust, pl = V.plume;
+    g.beginPath(); g.moveTo(X(e), Y(pl)); g.lineTo(X(e + V.plumeLen*(1 + 0.45*Math.random())), Y(0)); g.lineTo(X(e), Y(-pl)); g.closePath(); g.fill();
   }
   // RCS quads at the hull corners (shown when damaged)
-  if (damage.rcs < 1) { g.fillStyle = damage.rcs <= 0 ? RED : AMB; for (const v of [-9.4, 9.6]) for (const u of [1.75, -1.75]) g.fillRect(X(v) - 4, Y(u) - 4, 8, 8); }
+  if (damage.rcs < 1) { g.fillStyle = damage.rcs <= 0 ? RED : AMB; for (const v of V.rcs[0]) for (const u of V.rcs[1]) g.fillRect(X(v) - 4, Y(u) - 4, 8, 8); }
   // Modules on their hardpoints
   const p0 = tankProp0Total();
   for (const [slot, hp] of Object.entries(HARDPOINTS)) {
@@ -3398,7 +3557,7 @@ function drawShip(g, W, H, idx) {
       g.strokeStyle = DIM; g.lineWidth = 1.5; g.beginPath(); g.arc(X(hp.pos[2]), Y(hp.pos[1]), 5, 0, Math.PI*2); g.stroke(); continue;
     }
     if (m.role === 'tank' && !podsOn) continue;           // jettisoned
-    const key = m.file.replace('.glb', ''), polys = SHIP_SIL[key] || [];
+    const key = m.file.replace('.glb', ''), polys = SHIP_SIL[key] || (MOD_GEOM[key] && MOD_GEOM[key].sil) || [];
     const e = m.role === 'tank' ? undefined : damage[slot];
     for (const poly of polys) {
       const pts = poly.map(([zf, yf]) => { const b = hpToBody(slot, [0, yf, zf]); return [b[2], b[1]]; });
@@ -3415,10 +3574,11 @@ function drawShip(g, W, H, idx) {
   // Turret coverage: PDC_ARC either side of each turret's outward axis; PDC barrels follow the last shot
   for (const m of [...PDC_MOUNTS, ...INT_MOUNTS, ...LPD_MOUNTS]) {
     const s = m.dir[1] >= 0 ? 1 : -1, x0 = X(m.pos[2]), y0 = Y(m.pos[1]), e = damage[m.sys] ?? 1;
+    if (Math.abs(m.dir[1]) < 0.3 && m.dir[0] < 0) continue;  // port-side mounts: their starboard twins show the arc
     const live = m.lastFire !== undefined && simT - m.lastFire < 0.3 || !!m.target;
     const a0 = s > 0 ? -Math.PI/2 : Math.PI/2;               // screen angle of the outward axis
     g.fillStyle = e <= 0 ? 'rgba(255,60,50,0.07)' : live ? 'rgba(255,176,32,0.10)' : 'rgba(125,255,154,0.05)';
-    g.beginPath(); g.moveTo(x0, y0); g.arc(x0, y0, 52, a0 - PDC_ARC, a0 + PDC_ARC); g.closePath(); g.fill();
+    g.beginPath(); g.moveTo(x0, y0); g.arc(x0, y0, V.arcR, a0 - PDC_ARC, a0 + PDC_ARC); g.closePath(); g.fill();
     g.strokeStyle = DIM; g.lineWidth = 1; g.setLineDash([4, 4]); g.stroke(); g.setLineDash([]);
     if (m.aimW && simT - m.lastFire < 1.5) {
       const b = m.aimW.clone().applyQuaternion(toBodyQ()), L = Math.hypot(b.y, b.z);
@@ -3426,13 +3586,13 @@ function drawShip(g, W, H, idx) {
     }
   }
   // Torpedo impacts: from the direction they came in, onto the hull outline (marched outward from the centre)
-  const hullPts = SHIP_SIL.hull[0];
+  const hullPts = V.hull[0];
   hullImpacts.forEach((im, i) => {
     let du = im.y, dv = im.z, L = Math.hypot(du, dv);
     if (L < 0.05) { const a = i*2.4; du = Math.cos(a); dv = Math.sin(a)*0.3; L = Math.hypot(du, dv); }
     du /= L; dv /= L;
-    let r = 0; while (r < 14 && pointInPoly(dv*r, du*r, hullPts)) r += 0.05;
-    const x = X(dv*r), y = Y(du*r), age = simT - im.t, fresh = age < 3, rr = fresh ? 9 + 5*Math.abs(Math.sin(age*8)) : 8;
+    let r = 0; while (r < V.march && pointInPoly(dv*r + V.zc, du*r, hullPts)) r += V.march/280;
+    const x = X(dv*r + V.zc), y = Y(du*r), age = simT - im.t, fresh = age < 3, rr = fresh ? 9 + 5*Math.abs(Math.sin(age*8)) : 8;
     g.strokeStyle = RED; g.lineWidth = fresh ? 3 : 2; g.beginPath();
     for (let q = 0; q < 8; q++) { const a = q*Math.PI/4, l = q % 2 ? rr*0.45 : rr; g.moveTo(x, y); g.lineTo(x + l*Math.cos(a), y + l*Math.sin(a)); }
     g.stroke(); g.fillStyle = fresh ? '#fff' : RED; g.beginPath(); g.arc(x, y, 3, 0, Math.PI*2); g.fill();
@@ -3459,8 +3619,21 @@ function drawShip(g, W, H, idx) {
     g.strokeStyle = DIM; g.lineWidth = 1; g.beginPath(); g.moveTo(x, ay); g.lineTo(X(hp.pos[2]), Y(hp.pos[1])); g.stroke();
     txt(g, x, ty, t, col, '18px monospace', 'center');
   };
-  lbl('nose', 'top'); lbl('pdcTop', 'top'); lbl('tankTop', 'top');
-  lbl('spinal', 'bottom'); lbl('pdcBot', 'bottom'); lbl('tankBot', 'bottom');
+  if (HULL.id === 'og1') { lbl('nose', 'top'); lbl('pdcTop', 'top'); lbl('tankTop', 'top');
+    lbl('spinal', 'bottom'); lbl('pdcBot', 'bottom'); lbl('tankBot', 'bottom'); }
+  else {                                                   // larger hulls: one summary line per weapon group
+    const grp = {};
+    for (const slot of Object.keys(HARDPOINTS)) {
+      const m = modAt(slot); if (!m || ['telescope', 'comms', 'radiator'].includes(m.role)) continue;
+      const g0 = grp[m.short] || (grp[m.short] = { n: 0, off: 0, st: modState(slot)[0].slice(m.short.length + 1), role: m.role });
+      g0.n++; if ((damage[slot] ?? 1) <= 0) g0.off++;
+      if (m.role === 'vls') g0.st = String(slotsWithRole('vls').filter(s2 => modAt(s2).short === m.short).reduce((a, s2) => a + (vlsCells[s2] || 0), 0));
+      if (m.role === 'pdc') g0.st = String(PDC_MOUNTS.filter(q => modAt(q.sys).short === m.short).reduce((a, q) => a + q.rounds, 0));
+    }
+    const items = Object.entries(grp).map(([k, g0]) => [`${k}${g0.n > 1 ? ' x' + g0.n : ''} ${g0.st}${g0.off ? ` (${g0.off} OFF)` : ''}`, g0.off ? (g0.off === g0.n ? RED : AMB) : PH]);
+    const half = Math.ceil(items.length/2);
+    items.forEach(([t, col], i) => txt(g, 20 + (i % half)*(W - 40)/half + (W - 40)/half/2, i < half ? 72 : 446, t, col, '16px monospace', 'center'));
+  }
   // Laser, RCS and radiator states without a label of their own: a compact line when not nominal
   const notes = [];
   if (!radDeployed) notes.push('RAD STOWED');
@@ -4992,6 +5165,7 @@ function renderMissions() {
 document.getElementById('manualBtn').addEventListener('click', () => toggleManual(true));
 document.getElementById('missionGo').addEventListener('click', () => {
   scenario = missionSel; missionsEl.style.display = 'none'; uiOverlay = false;
+  if (scenario !== 'sandbox') setHull('og1');        // the missions are flown in the OG-1 for now
   if (scenario === 'sandbox') { mission = null; openHangar(); return; }
   playBriefing(MISSIONS[scenario], openHangar);     // orders first, then the loadout editor
 });
@@ -5199,7 +5373,7 @@ const MODEL_DIR = 'models/';
 const hangarEl = document.getElementById('hangar'), hangarLoadEl = document.getElementById('hangarLoad');
 let hangarOpen = false;
 const hangar = { scene: null, cam: null, ship: null, slotObj: {}, markers: {}, files: {}, hullPromise: null, loaded: false,
-  yaw: 0.9, pitch: 0.28, dist: 36, drag: null, hover: null, sel: null, idle: 0 };
+  yaw: 0.9, pitch: 0.28, dist: 1.5*HULL.length, drag: null, hover: null, sel: null, idle: 0 };
 function buildHangarScene() {
   const sc = new THREE.Scene();
   sc.background = new THREE.Color(0x05070a);
@@ -5207,7 +5381,7 @@ function buildHangarScene() {
   const sun = new THREE.DirectionalLight(0xfff1dc, 2.6); sun.position.set(-20, 25, 18); sc.add(sun);
   const rim = new THREE.DirectionalLight(0x88aaff, 0.9); rim.position.set(25, -8, -20); sc.add(rim);
   sc.add(new THREE.HemisphereLight(0x9fb0c0, 0x101010, 0.35));
-  const grid = new THREE.GridHelper(80, 40, 0x2a4a33, 0x16241a); grid.position.y = -6.6; sc.add(grid);
+  const grid = new THREE.GridHelper(80, 40, 0x2a4a33, 0x16241a); grid.position.y = -6.6; sc.add(grid); hangar.grid = grid;
   hangar.scene = sc;
   hangar.cam = new THREE.PerspectiveCamera(38, window.innerWidth/window.innerHeight, 0.1, 500);
 }
@@ -5233,18 +5407,24 @@ function loadHangar() {
   if (hangar.hullPromise) return;
   hangarLoadEl.style.display = ''; hangarLoadEl.textContent = 'LOADING SHIP';
   let failed = false;
-  const fitted = [...new Set(Object.keys(HARDPOINTS).map(modAt).filter(Boolean).map(m => m.file))];
+  const H = HULL, fitted = [...new Set(Object.keys(HARDPOINTS).map(modAt).filter(Boolean).map(m => m.file))];
+  // Grid, view distance and marker size follow the hull's size
+  const sz = H.length/24;
+  hangar.grid.scale.setScalar(Math.max(1, sz)); hangar.grid.position.y = H.box[1] - 0.2*H.length;
+  hangar.dist = clamp(hangar.dist, 0.58*H.length, 3.3*H.length);
   hangar.hullPromise = Promise.all([
-    loadModel('ship_bare.glb', e => { if (!failed && e.total) hangarLoadEl.textContent = `LOADING SHIP ${Math.round(100*e.loaded/e.total)}%`; }),
+    loadModel(H.file, e => { if (!failed && e.total) hangarLoadEl.textContent = `LOADING SHIP ${Math.round(100*e.loaded/e.total)}%`; }),
     ...fitted.map(f => loadModel(f)),
-  ]).then(([hull]) => {
+  ]).then(([tpl]) => {
+    if (HULL !== H) return;                            // another hull was chosen while this one loaded
+    const hull = tpl.clone(true);                      // a copy, so each hull keeps a clean template
     hangar.ship = hull; hangar.scene.add(hull);
     for (const [slot, hp] of Object.entries(HARDPOINTS)) {
       const node = hull.getObjectByName(hp.node);
       if (!node) { console.warn('missing hardpoint node', hp.node); continue; }
       hp.obj = node;
       // Hardpoint marker: a ring flat on the mount, and an invisible sphere to make it easy to click
-      const mk = new THREE.Group();
+      const mk = new THREE.Group(); mk.scale.setScalar(Math.max(1, 0.6*sz));
       const ring = new THREE.Mesh(new THREE.TorusGeometry(0.65, 0.06, 8, 48),
         new THREE.MeshBasicMaterial({ color: 0x7dff9a, transparent: true, opacity: 0.85, toneMapped: false }));
       ring.rotation.x = Math.PI/2; mk.add(ring); mk.userData.ring = ring;
@@ -5261,6 +5441,20 @@ function loadHangar() {
     failed = true; hangar.hullPromise = null;          // opening the hangar again retries
     hangarLoadEl.textContent = 'SHIP MODEL FAILED TO LOAD · LAUNCH STILL WORKS';
   });
+}
+// Hull choice (sandbox): the new hull's saved loadout, figures and model
+function setHull(id) {
+  if (!HULLS[id] || HULL.id === id) return;
+  HULL = HULLS[id]; try { localStorage.setItem(HULL_KEY, id); } catch (e) {}
+  HARDPOINTS = HULL.hardpoints; DEFAULT_LOADOUT = HULL.defaultLoadout; LOADOUT_KEY = HULL.loadoutKey;
+  Object.assign(SHIP, HULL.ship); RCS_K = HULL.rcsK; RCS_ARM = HULL.rcsArm;
+  Object.assign(POWER, OG1_POWER, HULL.power); Object.assign(THERM, OG1_THERM, HULL.therm);
+  loadout = loadLoadout();
+  applyModuleStats(); resetDamage(); resetPdcMounts(); applyLoadoutToShip(); battery = battCapEff();
+  if (hangar.ship) hangar.scene.remove(hangar.ship);
+  hangar.ship = null; hangar.slotObj = {}; hangar.markers = {}; hangar.loaded = false; hangar.hullPromise = null;
+  hangar.sel = hangar.hover = null; hangar.dist = 1.5*HULL.length;
+  if (hangarOpen) { loadHangar(); refreshHangar(); }
 }
 // Put the module currently fitted on a hardpoint onto the 3D hull (loading its file if needed)
 function showSlotModel(slot) {
@@ -5296,9 +5490,20 @@ function selectSlot(slot) {
   refreshHangar();
 }
 const moduleKg = m => Math.round(m.mass + (m.prop || 0));
+const fmtKg = kg => kg >= 1e5 ? `${(kg/1e3).toFixed(1)} t` : `${kg.toFixed(0)} kg`;
 function refreshHangar() {
   applyLoadoutToShip();
   refreshMarkers();
+  // Hull selector: sandbox only (the missions are flown in the OG-1 for now)
+  const hs = document.getElementById('hullSel');
+  hs.innerHTML = '';
+  if (scenario === 'sandbox') for (const H of Object.values(HULLS)) {
+    const b = document.createElement('button');
+    b.textContent = H.short; b.className = H === HULL ? 'cur' : '';
+    b.addEventListener('click', () => { sfx.click(); setHull(H.id); refreshHangar(); });
+    hs.appendChild(b);
+  }
+  document.getElementById('hullName').textContent = HULL.name;
   const list = document.getElementById('hpList');
   list.innerHTML = '';
   for (const [slot, hp] of Object.entries(HARDPOINTS)) {
@@ -5307,7 +5512,7 @@ function refreshHangar() {
     row.className = 'hp ' + (mod ? 'on' : 'off') + (hangar.sel === slot ? ' sel' : '') + (hangar.hover === slot ? ' hover' : '');
     row.dataset.slot = slot;
     row.innerHTML = `<span><span class="slot">${hp.name}</span>${mod ? mod.name : '— EMPTY —'}</span>` +
-      `<span class="st">${mod ? moduleKg(mod) + ' KG' : ''} ${hangar.sel === slot ? '▾' : '▸'}</span>`;
+      `<span class="st">${mod ? fmtKg(moduleKg(mod)).toUpperCase() : ''} ${hangar.sel === slot ? '▾' : '▸'}</span>`;
     row.addEventListener('click', () => selectSlot(slot));
     row.addEventListener('mouseenter', () => { hangar.hover = slot; refreshMarkers(); });
     row.addEventListener('mouseleave', () => { hangar.hover = null; refreshMarkers(); });
@@ -5320,7 +5525,7 @@ function refreshHangar() {
       const m = id && MODULE_CATALOG[id];
       const opt = document.createElement('div');
       opt.className = 'opt' + (loadout[slot] === id ? ' cur' : '');
-      opt.innerHTML = m ? `${m.name} · ${moduleKg(m)} KG<span class="d">${m.desc || ''}</span>` : 'EMPTY<span class="d">leave the hardpoint free</span>';
+      opt.innerHTML = m ? `${m.name} · ${fmtKg(moduleKg(m)).toUpperCase()}<span class="d">${m.desc || ''}</span>` : 'EMPTY<span class="d">leave the hardpoint free</span>';
       opt.addEventListener('click', ev => { ev.stopPropagation(); fitModule(slot, id); });
       pick.appendChild(opt);
     }
@@ -5329,12 +5534,16 @@ function refreshHangar() {
   const ta = turnAccel();
   const counts = {};
   for (const slot of Object.keys(HARDPOINTS)) { const m = modAt(slot); if (m && m.role !== 'tank') counts[m.short] = (counts[m.short] || 0) + 1; }
-  const weapons = Object.entries(counts).map(([k, n]) => n > 1 ? `${k} x${n}` : k).join(' · ') || 'NONE';
+  // Module summary, wrapped to the panel width
+  const parts = Object.entries(counts).map(([k, n]) => n > 1 ? `${k} x${n}` : k), lines = [''];
+  for (const t of parts) { const cur = lines[lines.length - 1]; if (cur && cur.length + t.length > 24) lines.push(t); else lines[lines.length - 1] = cur ? `${cur} · ${t}` : t; }
+  const weapons = lines.join('\n           ') || 'NONE';
   document.getElementById('hangarStats').textContent =
-    `MASS       ${shipMass().toFixed(0)} kg\n` +
+    `MASS       ${fmtKg(shipMass())}\n` +
     `DELTA-V    ${dvRemaining().toFixed(0)} m/s${tankCount() ? `  (TANKS ${podDv().toFixed(0)})` : ''}\n` +
-    `TURN P/Y   ${ta[0].toFixed(1)} / ${ta[1].toFixed(1)} °/s²\n` +
-    `TURN ROLL  ${ta[2].toFixed(1)} °/s²\n` +
+    `THRUST     ${(SHIP.mainThrust/1e3).toFixed(0)} kN · ${(SHIP.mainThrust/shipMass()).toFixed(2)} m/s²\n` +
+    `TURN P/Y   ${ta[0].toFixed(2)} / ${ta[1].toFixed(2)} °/s²\n` +
+    `TURN ROLL  ${ta[2].toFixed(2)} °/s²\n` +
     `MODULES    ${weapons}`;
 }
 // Rings: green on empty hardpoints, amber on the selected one, shown on hover too; the rows follow the hover
@@ -5362,7 +5571,10 @@ function launch() {
   if (scenario === 'sandbox') { mission = null; log('ORBIT NOMINAL · LEO 400 KM · PROGRADE'); log('GROUND LINK ESTABLISHED'); }
   else startMission();
   const fit = Object.keys(HARDPOINTS).filter(modAt).map(slotLabel);
-  log(`LOADOUT · ${fit.length ? fit.join(' · ') : 'BARE HULL'}`);
+  if (fit.length > 8) {                              // larger hulls: counts per module type
+    const n = {}; for (const sl of Object.keys(HARDPOINTS)) { const m = modAt(sl); if (m) n[m.short] = (n[m.short] || 0) + 1; }
+    log(`${HULL.short} · ${Object.entries(n).map(([k, c]) => c > 1 ? `${k} x${c}` : k).join(' · ')}`);
+  } else log(`LOADOUT · ${fit.length ? fit.join(' · ') : 'BARE HULL'}`);
 }
 document.getElementById('launchBtn').addEventListener('click', launch);
 // Clickable things in the hangar: fitted modules, and every hardpoint's pick sphere
@@ -5403,7 +5615,7 @@ window.addEventListener('pointerup', e => {
 canvas.addEventListener('wheel', e => {
   if (!hangarOpen) return;
   e.preventDefault();
-  hangar.dist = clamp(hangar.dist*Math.exp(e.deltaY*0.001), 14, 80); hangar.idle = 0;
+  hangar.dist = clamp(hangar.dist*Math.exp(e.deltaY*0.001), 0.58*HULL.length, 3.3*HULL.length); hangar.idle = 0;
 }, { passive: false });
 window.addEventListener('resize', () => {
   if (hangar.cam) { hangar.cam.aspect = window.innerWidth/window.innerHeight; hangar.cam.updateProjectionMatrix(); }
@@ -5572,9 +5784,9 @@ const MAN_PAGES = [
   () => [{ h: 'SECTION I - THE SHIP' },
     'THE OG-1 IS A SINGLE-SEAT COMBAT SPACECRAFT. A FUSION REACTOR SUPPLIES THE POWER.',
     { gap: 1 },
-    { kv: [['LENGTH', '24 M'], ['HULL MASS', `${SHIP.hullDry} KG (NO MODULES)`], ['MAIN PROP', `${SHIP.mainProp0.toFixed(0)} KG`],
-      ['RCS PROP', `${SHIP.rcsProp0} KG`], ['MAIN THRUST', `${SHIP.mainThrust/1e3} KN`], ['DELTA-V', '7500 M/S WITH 2 DROP TANKS'],
-      ['REACTOR', `${POWER.reactor/1e3} KW ELECTRICAL`], ['CAPACITOR', `${POWER.battCap/1e6} MJ`], ['HULL TEMP', `${THERM.tMax} K MAXIMUM`]] },
+    { kv: [['LENGTH', '24 M'], ['HULL MASS', `${OG1_SHIP.hullDry} KG (NO MODULES)`], ['MAIN PROP', `${OG1_SHIP.mainProp0.toFixed(0)} KG`],
+      ['RCS PROP', `${OG1_SHIP.rcsProp0} KG`], ['MAIN THRUST', `${OG1_SHIP.mainThrust/1e3} KN`], ['DELTA-V', '7500 M/S WITH 2 DROP TANKS'],
+      ['REACTOR', `${OG1_POWER.reactor/1e3} KW ELECTRICAL`], ['CAPACITOR', `${OG1_POWER.battCap/1e6} MJ`], ['HULL TEMP', `${THERM.tMax} K MAXIMUM`]] },
     { gap: 1 }, { h: 'AXES AND THRUST' },
     { b: 'THE NOSE IS THE FRONT OF THE SHIP. PITCH, YAW AND ROLL TURN THE SHIP ABOUT ITS OWN AXES.' },
     { b: 'THE MAIN DRIVE PUSHES THE SHIP IN THE DIRECTION OF THE NOSE ONLY. TURN THE SHIP FIRST. THEN START THE BURN.' },
@@ -5800,7 +6012,7 @@ const MAN_PAGES = [
     { gap: 1 }, { warn: 'KEEP MASTER ARM ON NEAR THE ENEMY. IF THE HULL GETS TO 0 PERCENT, THE SHIP IS LOST.' }],
   // 19 power and thermal
   () => [{ h: 'SECTION VII - SYSTEMS' }, { h: 'POWER' },
-    `THE REACTOR SUPPLIES ${POWER.reactor/1e3} KW. IT CHARGES THE ${POWER.battCap/1e6} MJ CAPACITOR.`,
+    `THE REACTOR SUPPLIES ${OG1_POWER.reactor/1e3} KW. IT CHARGES THE ${OG1_POWER.battCap/1e6} MJ CAPACITOR.`,
     { kv: [['AVIONICS', '40 KW'], ['LASER', '300 KW'], ['LASER PD', '400 KW'], ['WHEELS', '30 KW MAXIMUM'], ['RAILGUN', '2.5 MJ PER SHOT']] },
     'IF THE CAPACITOR IS EMPTY, THE PDCS AND THE RAILGUN CANNOT FIRE. IF THE LOAD IS ALSO MORE THAN THE REACTOR POWER, THE LASERS AND THE WHEELS STOP.',
     { gap: 1 }, { h: 'HEAT' },
