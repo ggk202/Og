@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OG — Cockpit prototype v0.11.1</title>
+<title>OG — Cockpit prototype v0.12.0</title>
 <style>
   html, body { margin:0; height:100%; background:#000; overflow:hidden;
     font-family: ui-monospace, Menlo, Consolas, monospace; color:#cfd8c0; }
@@ -93,7 +93,7 @@
 </head>
 <body>
 <canvas id="gl"></canvas>
-<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.11.1</span></div>
+<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.12.0</span></div>
 <div id="hangar"><div class="load" id="hangarLoad">LOADING SHIP</div>
   <div class="hint">DRAG TO ORBIT · WHEEL TO ZOOM · CLICK A HARDPOINT TO CHOOSE ITS MODULE</div>
   <div class="panel"><h2>HANGAR</h2><div class="sub" id="hullName"></div><div id="hullSel"></div><div class="sub">LOADOUT · SELECT A HARDPOINT, THEN A MODULE</div>
@@ -471,6 +471,9 @@ let scopeHold = null;                                // after a railgun kill the
 const FRAG_MAX = 160;
 // Enemy ships: thrust (m/s^2) and delta-v budget for manoeuvring; point defence against player ordnance
 const AI_DEF = { acc: 4, dv: 1500 };
+// Range keeping only inside AI_ENGAGE_R and below AI_MATCH_V of relative speed (a fast flyby is not chased out
+// of orbit); no burn may leave periapsis below AI_MIN_PE
+const AI_ENGAGE_R = 400e3, AI_MATCH_V = 700, AI_MIN_PE = 80e3;
 // range, muzzle speed, rounds/s per mount, per-round scatter, fire-control tracking error (one per step, shared
 // by that step's rounds), time to acquire a new track, minimum range (the turret cannot slew fast enough inside
 // it), chance that a round striking a weapon kills it
@@ -571,7 +574,7 @@ function restartAfterDeath() {
   battery = battCapEff(); hullT = THERM.tStart; railCD = 0; warpIdx = 0;
   telem.qout = 0; lastRailShotT = lastLaunchT = -1e9;   // no heat or weapon signature carried over from the last run
   mainProp = SHIP.mainProp0; rcsProp = SHIP.rcsProp0; podProp = tankProp0Total(); podsOn = tankCount() > 0;
-  leadHold = false; leadPrev = null; hullHits = 0;
+  leadHold = false; attHold = null; leadPrev = null; hullHits = 0;
   dock = { state: 'FREE', capArmed: false, lights: true, t: 0, sepArmT: -1e9, prop: 0, g: null };
   BA = null; ELEV = null;
   updateSunDir();
@@ -704,6 +707,7 @@ const POWER = { ...OG1_POWER, ...HULL.power }, THERM = { ...OG1_THERM, ...HULL.t
 const PHYS_DT = 0.25;
 const WARPS = [1, 10, 100, 1000, 1e4, 1e5, 1e6];
 const WARP_FULL = 3;                                 // above WARPS[3] the ship coasts (coastRun)
+const WARP_THRUST = 2;                               // thrust warp limit (x100) while burning or holding an attitude
 const RANGES = [2000, 10000, 50000, 250000, 1000000];
 const PREVENT = new Set(['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','PageUp','PageDown','Period','Comma']);
 const MFD_PAGES = ['TACTICAL', 'ORBIT', 'POWER / THERMAL', 'WEAPONS', 'PROPULSION', 'COMMS', 'SHIP', 'SCOPE', 'DAMAGE', 'CONTROLS', 'DOCK'];
@@ -727,6 +731,8 @@ const ACTIONS = [
   { id:'mainEngine', label:'Main drive (hold)',        def:'Space' },
   { id:'rcsStab',    label:'RCS rate damping (toggle)',def:'KeyX', edge:true },
   { id:'leadHold',   label:'Lead hold: point nose at lead (toggle)', def:'KeyL', edge:true },
+  { id:'retroHold',  label:'Retrograde hold (toggle)', def:'KeyR', edge:true },
+  { id:'proHold',    label:'Prograde hold (toggle)',   def:'KeyY', edge:true },
   { id:'fireRail',   label:'Fire spinal weapon (railgun / torpedo)', def:'Mouse0', edge:true },
   { id:'fireMissile',label:'Fire VLS missile',         def:'KeyF', edge:true },
   { id:'planNode',   label:'Planner: set/clear node',  def:'Digit0', edge:true },
@@ -869,8 +875,9 @@ function enemyAI(t, h) {
     const opening = rel.dot(relV)/r;                 // the ship's speed away from us
     if (opening < 300) { dir = rel.clone().normalize().negate(); why = 'RETREAT'; }   // then coast away
     if (!t.retreating) { t.retreating = true; if (isLocal(t)) log(`${t.name} DISENGAGING`); }
-  } else {
-    // 3. Range keeping: wanted closing speed from the range band, steer the relative velocity onto it
+  } else if (r < AI_ENGAGE_R && relV.length() < AI_MATCH_V) {
+    // 3. Range keeping (only near, and only when the speeds can be matched): wanted closing speed from the
+    //    range band, steer the relative velocity onto it
     const u = rel.clone().normalize(), want = t.fireRange ? 0.8*t.fireRange : 40e3;
     const vc = r > want ? Math.min(250, (r - want)/60) : r < 8e3 ? -60 : 0;
     const err = u.clone().multiplyScalar(vc).sub(relV.clone().negate());   // wanted minus actual (own velocity rel. to ship)
@@ -878,6 +885,13 @@ function enemyAI(t, h) {
     if (e > 20 || (was === 'MANEUVER' && e > 3)) { dir = err.normalize(); why = 'MANEUVER'; }
   }
   if (!dir) return null;
+  // Orbit safety: a burn that would leave the orbit open or bring periapsis near the surface (looking 5 s of
+  // thrust ahead) is not made, except to dodge a weapon
+  if (why !== 'EVADE') {
+    const b = primaryAtState(t, simT), k = ai.acc*5;
+    const el = elementsAt({ x: t.x, y: t.y, z: t.z, vx: t.vx + dir.x*k, vy: t.vy + dir.y*k, vz: t.vz + dir.z*k }, b);
+    if (el.e >= 0.9 || el.pe < AI_MIN_PE) return null;
+  }
   t.burning = true; t.aiState = why;
   ai.dv = Math.max(0, ai.dv - ai.acc*h);
   t.thrA = [dir.x*ai.acc, dir.y*ai.acc, dir.z*ai.acc];
@@ -1204,7 +1218,7 @@ function dockStep(h) {
   if (ok) {
     dock.state = 'CAPTURE'; dock.t = 0;
     ship.vx = b.vx; ship.vy = b.vy; ship.vz = b.vz;
-    log(`CONTACT ${G.closing.toFixed(2)} M/S · SOFT CAPTURE · LATCHES CLOSING`); sfx.click();
+    log(`CONTACT ${G.closing.toFixed(2)} M/S · SOFT CAPTURE · LATCHES CLOSING`); sfx.dockContact(); sfx.dockMotors(DOCK_HARD_T);
     return;
   }
   // Rebound: the axial closing rate reverses at 30 %; the ring is pushed back clear of the collar
@@ -1213,7 +1227,7 @@ function dockStep(h) {
   const dv = 1.3*G.closing;
   ship.vx += G.a.x*dv; ship.vy += G.a.y*dv; ship.vz += G.a.z*dv;
   ship.x += G.a.x*(0.06 - G.s); ship.y += G.a.y*(0.06 - G.s); ship.z += G.a.z*(0.06 - G.s);
-  log(`CONTACT · NO CAPTURE · ${why}`); hullHitShake();
+  log(`CONTACT · NO CAPTURE · ${why}`); hullHitShake(); sfx.dockContact(true);
   if (mission) mission.rebounds = (mission.rebounds || 0) + 1;
   if (G.closing > 0.6) {                             // a hard hit damages the drive bells against the truss
     hullInt = Math.max(0.05, hullInt - 0.04*G.closing); damage.main = Math.max(0, damage.main - 0.25*G.closing);
@@ -1225,7 +1239,7 @@ function hardDock(b) {
   dock.state = 'DOCKED'; dock.prop = b.prop ?? BOOSTER.prop0;
   const i = targets.indexOf(b), cur = targets[curTarget];
   targets.splice(i, 1); curTarget = Math.max(0, targets.indexOf(cur));
-  log(`HARD DOCK · STACK ${((shipMass())/1e3).toFixed(0)} T`);
+  log(`HARD DOCK · STACK ${((shipMass())/1e3).toFixed(0)} T`); sfx.clampLock();
   if (mission && MISSIONS[mission.id].stageAuto && !BA) {
     BA = { phase: 'HOLD', t: simT + BA_HOLD, done: [], dvAcc: 0, locked: false, firing: false, nextT: null };
     log(`STAGE AUTOPILOT ENGAGED · DEPARTURE SEQUENCE IN ${BA_HOLD} S`);
@@ -1244,7 +1258,7 @@ function stageSep() {
   targets.push(b); dock.state = 'FREE'; dock.capArmed = false;
   if (BA) { BA.phase = 'OFF'; BA.locked = BA.firing = false; }
   if (mission && MISSIONS[mission.id].onSep) MISSIONS[mission.id].onSep(b.prop);
-  log('STAGE SEPARATION · BOOSTER CLEAR AFT');
+  log('STAGE SEPARATION · BOOSTER CLEAR AFT'); sfx.stageSep();
 }
 resetTargets();                                      // after the booster definitions: a saved DD-84 hull places one at load
 
@@ -1679,7 +1693,7 @@ const SURF = [['ELEVATOR ANCHOR', 0, 300, 1500], ['SPACEPORT THARSIS', 3.0, 400,
 function marsOOB(t) {
   const hostile = (extra) => ({ hostile: true, needsAlert: true, req: true, side: 'HOSTILE', ...extra });
   const ship = (name, cls, radius, integ, alt, ph, inc, extra) => mkTargetAt(name, marsOrbitState(alt, ph*D2R, inc*D2R, t), radius, integ, 'HOSTILE',
-    hostile({ cls, intel: true, ...extra }));
+    hostile({ cls, intel: true, ...extra, ai: extra.ai ? { ...extra.ai } : undefined }));   // each ship its own delta-v budget
   const out = [];
   const cv = { score: 600, sensor: 1.5, salvo: 3, salvoT: 20, fireRange: 80e3, sig: 20, ai: { ...AI_DEF }, pd: 2, laser: true };
   [['CORVETTE TALON', 450, 20, 8], ['CORVETTE SPUR', 520, 140, 12], ['CORVETTE HALBERD', 600, 250, 25],
@@ -2400,10 +2414,16 @@ let leadAxisPrev = new THREE.Vector3(0, 1, 0);
 // Commanded body rate = feed-forward (how fast the lead direction turns, so the nose keeps up with a moving
 // target) + proportional correction of the angle error. There is no deadband: a deadband switches the RCS
 // on and off at its edge, which is itself a source of sway.
+// Attitude hold on the velocity relative to the body being orbited: prograde or retrograde (null: off)
+let attHold = null;
+function holdDir() {
+  const b = primary(), v = new THREE.Vector3(ship.vx - b.v[0], ship.vy - b.v[1], ship.vz - b.v[2]).normalize();
+  return attHold === 'RETRO' ? v.negate() : v;
+}
 function leadHoldCmd(h) {
-  const bd = plan && (plan.frozen || plan.t - simT < 900) ? planBurnDir() : null;   // near a node: hold the burn direction
+  const bd = attHold ? holdDir() : plan && (plan.frozen || plan.t - simT < 900) ? planBurnDir() : null;   // near a node: hold the burn direction
   const L = bd ? bd.multiplyScalar(1e6) : leadVector();
-  const tgt = bd ? true : targets[curTarget];
+  const tgt = attHold || (bd ? true : targets[curTarget]);
   if (!L || !tgt) {
     // Lead lost: keep turning at the last line-of-sight rate for up to MEM_TIME s, so the nose is still near the
     // lead when the contact comes back
@@ -2501,7 +2521,7 @@ function physicsStep(h) {
   boosterAutoStep(h);
   /* --- attitude: RCS torque, rate damping, body-frame integration --- */
   const cmd = BA && BA.locked ? [0, 0, 0] : [c.pitch, c.yaw, c.roll];
-  if (leadHold) {
+  if (leadHold || attHold) {
     // Manual input on an axis overrides the hold on that axis
     const hc = leadHoldCmd(h);
     if (hc) for (let i = 0; i < 3; i++) if (cmd[i] === 0) cmd[i] = hc[i];
@@ -4284,7 +4304,7 @@ function drawControls(g, W, H, idx) {
     ['FLIGHT', [
       ['PITCH UP/DN', K('pitchUp', 'pitchDown')], ['YAW L/R', K('yawLeft', 'yawRight')], ['ROLL L/R', K('rollLeft', 'rollRight')],
       ['TRANS FWD/AFT', K('transFwd', 'transAft')], ['TRANS L/R', K('transLeft', 'transRight')], ['TRANS UP/DN', K('transUp', 'transDown')],
-      ['MAIN ENGINE', K('mainEngine')], ['RCS STAB', K('rcsStab')], ['LEAD HOLD / BURN', K('leadHold')],
+      ['MAIN ENGINE', K('mainEngine')], ['RCS STAB', K('rcsStab')], ['LEAD HOLD / BURN', K('leadHold')], ['PRO / RETRO HOLD', K('proHold', 'retroHold')],
     ]],
     ...(typeof PLAN_HELP !== 'undefined' ? [['MANEUVER PLANNER', PLAN_HELP()]] : []),
     ['WEAPONS', [
@@ -5883,6 +5903,61 @@ const sfx = {
   // Decoy mortars: a quick ripple of pops
   pageTurn(open = false) { if (!actx) return; burst(intBus, 'bandpass', open ? 900 : 1500, 0.7, open ? 0.3 : 0.22, 0.1); burst(intBus, 'highpass', 3200, 0.6, 0.07, 0.05, open ? 0.2 : 0.14); },
   decoy() { if (actx) for (let i = 0; i < 4; i++) thump(hullBus, 95, 0.09, 0.45, i*0.07); },
+  /* Docking, heard through the structure (hull bus) and faintly in the cabin. Contact: a deep thud and a muffled
+     metallic ring (a scrape too when the ring rebounds). Capture: the latch motors run up, whir while they draw the
+     ship in (two motors, slightly detuned, with gear whine), and run down. Hard dock: four clamps lock in turn, then
+     the umbilicals mate with a hiss. Separation: pyrotechnic bolts, then the stage's retro motors. */
+  dockContact(rebound = false) {
+    if (!actx) return;
+    thump(hullBus, 30, 1.6, 0.9); thump(hullBus, 72, 0.5, 0.4, 0.02);
+    burst(hullBus, 'lowpass', 220, 0.8, 0.9, 0.7);
+    burst(hullBus, 'bandpass', 860, 9, 1.4, 0.18, 0.01);          // ringing collar
+    burst(intBus, 'bandpass', 420, 2, 0.25, 0.08, 0.02);
+    if (rebound) burst(hullBus, 'bandpass', 1400, 1.5, 0.6, 0.12, 0.05);   // scrape
+  },
+  dockMotors(dur = 4) {
+    if (!actx) return;
+    const t0 = actx.currentTime + 0.25, t1 = t0 + dur - 0.4;
+    for (const [f0, f1, det] of [[48, 92, 0], [51, 97, 0.35]]) {
+      const o = actx.createOscillator(); o.type = 'sawtooth';
+      o.frequency.setValueAtTime(f0*0.4, t0); o.frequency.exponentialRampToValueAtTime(f1, t0 + 0.6);
+      o.frequency.setValueAtTime(f1, t1); o.frequency.exponentialRampToValueAtTime(f0*0.3, t1 + 0.7);
+      const lfo = actx.createOscillator(); lfo.frequency.value = 6 + det*4; const la = actx.createGain(); la.gain.value = 2.5; lfo.connect(la).connect(o.frequency);
+      const lp = actx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 420;
+      const g = actx.createGain();
+      g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(0.16, t0 + 0.5);
+      g.gain.setValueAtTime(0.16, t1); g.gain.exponentialRampToValueAtTime(0.0001, t1 + 0.75);
+      o.connect(lp).connect(g).connect(hullBus); o.start(t0 + det*0.1); o.stop(t1 + 0.8); lfo.start(t0); lfo.stop(t1 + 0.8);
+      // gear whine, an octave set above the motor, faint
+      const w = actx.createOscillator(); w.type = 'triangle';
+      w.frequency.setValueAtTime(f0*3, t0); w.frequency.exponentialRampToValueAtTime(f1*7.5, t0 + 0.6);
+      w.frequency.setValueAtTime(f1*7.5, t1); w.frequency.exponentialRampToValueAtTime(f0*2, t1 + 0.7);
+      const wg = actx.createGain();
+      wg.gain.setValueAtTime(0.0001, t0); wg.gain.exponentialRampToValueAtTime(0.018, t0 + 0.6);
+      wg.gain.setValueAtTime(0.018, t1); wg.gain.exponentialRampToValueAtTime(0.0001, t1 + 0.7);
+      w.connect(wg).connect(intBus); w.start(t0); w.stop(t1 + 0.75);
+    }
+    // the ship being drawn in: a slow creak and a soft second contact near the end
+    burst(hullBus, 'bandpass', 300, 6, 1.6, 0.06, 1.2);
+    thump(hullBus, 40, 0.8, 0.45, dur - 0.5);
+  },
+  clampLock() {
+    if (!actx) return;
+    for (let i = 0; i < 4; i++) {
+      const d = 0.05 + i*0.28 + Math.random()*0.06;
+      thump(hullBus, 52 + i*3, 0.35, 0.85, d);
+      burst(hullBus, 'bandpass', 650 + i*40, 5, 0.3, 0.3, d);       // steel on steel
+      burst(intBus, 'bandpass', 2400, 3, 0.03, 0.12, d + 0.01);     // the latch click
+    }
+    burst(hullBus, 'highpass', 1800, 0.7, 1.4, 0.06, 1.35);           // umbilicals mate: pressure hiss
+    burst(hullBus, 'lowpass', 160, 0.8, 0.9, 0.4, 1.3);
+  },
+  stageSep() {
+    if (!actx) return;
+    for (let i = 0; i < 4; i++) { thump(hullBus, 70, 0.25, 1.0, i*0.04); burst(hullBus, 'bandpass', 2600, 0.9, 0.05, 0.45, i*0.04); }
+    burst(hullBus, 'lowpass', 120, 0.7, 2.2, 0.5, 0.25);              // retro motors, fading as the stage falls away
+    burst(intBus, 'bandpass', 500, 0.8, 0.5, 0.06, 0.05);
+  },
   rcsPuff() { if (actx) burst(intBus, 'bandpass', 1500, 1.2, 0.06, 0.03); },
   click() { if (actx) burst(intBus, 'bandpass', 2800, 2, 0.02, 0.35); },
   // Detection alarm: a two-tone klaxon, four cycles
@@ -6100,7 +6175,12 @@ function onAction(id) {
     case 'planNode': case 'planRetro': case 'planPro': case 'planRadIn': case 'planRadOut': case 'planAnti': case 'planNrm':
     case 'planEarlier': case 'planLater': case 'planStep': planAction(id); break;
     case 'rcsStab': rcsStab = !rcsStab; sfx.click(); break;
-    case 'leadHold': leadHold = !leadHold; leadPrev = null; sfx.click();
+    case 'retroHold': case 'proHold': {
+      const m = id === 'retroHold' ? 'RETRO' : 'PRO';
+      attHold = attHold === m ? null : m; leadHold = false; leadPrev = null; sfx.click();
+      log(attHold ? `${attHold === 'RETRO' ? 'RETROGRADE' : 'PROGRADE'} HOLD ON` : 'ATTITUDE HOLD OFF'); break;
+    }
+    case 'leadHold': leadHold = !leadHold; attHold = null; leadPrev = null; sfx.click();
       log(leadHold ? 'LEAD HOLD ON' : 'LEAD HOLD OFF'); break;
     case 'guardLaser': guardOpen = !guardOpen; sfx.click(); break;
     case 'armLaser':
@@ -6122,6 +6202,7 @@ function onAction(id) {
     case 'jettison': jettisonPods(); break;
     case 'toggleIR': irOn = !irOn; sfx.click(); mfds.forEach(m => drawMFD(m)); break;
     case 'warpUp': {
+      if (warpIdx >= WARP_THRUST && (held.has(bindings.mainEngine) || attHold)) { log(`THRUST WARP MAX x${WARPS[WARP_THRUST]}`); break; }
       if (warpIdx >= WARP_FULL) { const why = coastBlock(); if (why) { log(`NO COAST WARP · ${why}`); break; } }
       warpIdx = Math.min(warpIdx+1, WARPS.length-1); break;
     }
@@ -7557,7 +7638,11 @@ function coastRun(T) {
 /* ================= MAIN LOOP ================= */
 function step(dt) {
   const c = controlState();
-  if (anyFlightInput(c) || leadHold) warpIdx = 0;   // no time warp while flying or holding a lead
+  // Time warp: flying by hand (turning, translating, laser) or holding a lead stops it; holding only the main
+  // engine, or a prograde/retrograde hold, or a stage autopilot burn allow thrust warp up to WARPS[WARP_THRUST]
+  const thrustOnly = c.main && !(c.pitch || c.yaw || c.roll || c.tx || c.ty || c.tz || c.laser);
+  if (leadHold || (anyFlightInput(c) && !thrustOnly)) warpIdx = 0;
+  else if ((thrustOnly || attHold || (BA && BA.firing)) && warpIdx > WARP_THRUST) warpIdx = WARP_THRUST;
   if (warpIdx > WARP_FULL) {
     const why = coastBlock();
     if (!why) { coastRun(dt*WARPS[warpIdx]); return; }
