@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OG — Cockpit prototype v0.3.0</title>
+<title>OG — Cockpit prototype v0.4.0</title>
 <style>
   html, body { margin:0; height:100%; background:#000; overflow:hidden;
     font-family: ui-monospace, Menlo, Consolas, monospace; color:#cfd8c0; }
@@ -90,14 +90,14 @@
 </head>
 <body>
 <canvas id="gl"></canvas>
-<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.3.0</span></div>
+<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.4.0</span></div>
 <div id="hangar"><div class="load" id="hangarLoad">LOADING SHIP</div>
   <div class="hint">DRAG TO ORBIT · WHEEL TO ZOOM · CLICK A HARDPOINT TO CHOOSE ITS MODULE</div>
   <div class="panel"><h2>HANGAR</h2><div class="sub">LOADOUT · SELECT A HARDPOINT, THEN A MODULE</div>
     <div id="hpList"></div><div class="stats" id="hangarStats"></div><button id="launchBtn">LAUNCH</button></div></div>
 <div id="missions" class="ovl"><div class="box"><h2>MISSIONS</h2><div class="sub">SELECT AN OPERATION · BEST RESULTS ARE SAVED IN THIS BROWSER</div>
   <div class="cols"><div class="list" id="missionList"></div><div class="detail" id="missionDetail"></div></div>
-  <div class="btns"><button class="go" id="missionGo">TO HANGAR</button></div></div></div>
+  <div class="btns"><button id="manualBtn">FLIGHT MANUAL</button> <button class="go" id="missionGo">TO HANGAR</button></div></div></div>
 <div id="debrief" class="ovl"><div class="box"><h2>DEBRIEF</h2><div class="sub" id="debriefSub"></div>
   <div class="cols"><div class="list"><div class="rank" id="debriefRank"></div><div class="res" id="debriefRes"></div>
     <div class="res" id="debriefBest" style="opacity:.7;font-size:12px"></div></div>
@@ -612,6 +612,7 @@ const ACTIONS = [
   { id:'warpUp',     label:'Time warp up',             def:'Period', edge:true },
   { id:'warpDown',   label:'Time warp down',           def:'Comma', edge:true },
   { id:'pause',      label:'Pause',                    def:'KeyP', edge:true },
+  { id:'manual',     label:'Flight manual (open/close)', def:'KeyI', edge:true },
 ];
 const DEFAULT_BINDS = Object.fromEntries(ACTIONS.map(a => [a.id, a.def]));
 let bindings = { ...DEFAULT_BINDS };
@@ -2530,6 +2531,7 @@ makeButton(0.42, -0.43, 'IR', () => onAction('toggleIR'));
 makeButton(0.50, -0.43, 'LEAD', () => onAction('leadHold'));
 const leadLampMat = new THREE.MeshStandardMaterial({ color: '#2a1600', emissive: '#ffb000', emissiveIntensity: 0, roughness: 0.4 });
 add(new THREE.SphereGeometry(0.008, 16, 12), leadLampMat, 0.50, -0.39, PANEL_Z + 0.012);
+makeButton(-0.74, -0.43, 'BOOK', () => { sfx.click(); toggleManual(); });
 makeButton(-0.26, -0.43, 'TEST', () => { lampTestT = 3; sfx.click(); });
 // Torpedo warning: a blinking red lamp with a round mute button underneath
 const torpLampMat = new THREE.MeshStandardMaterial({ color: '#3a0000', emissive: '#ff2a2a', emissiveIntensity: 0, roughness: 0.4 });
@@ -3159,7 +3161,7 @@ function drawControls(g, W, H, idx) {
       ['CYCLE TARGET', K('cycleTarget')], ['TACTICAL RANGE', K('cycleRange')],
     ]],
     ['SYSTEMS', [
-      ['RADIATORS', K('toggleRad')], ['JETTISON TANKS', K('jettison'), has('tank')], ['SCOPE IR', K('toggleIR')], ['SCOPE ZOOM', 'RNG KEY'],
+      ['RADIATORS', K('toggleRad')], ['JETTISON TANKS', K('jettison'), has('tank')], ['SCOPE IR', K('toggleIR')], ['SCOPE ZOOM', 'RNG KEY'], ['FLIGHT MANUAL', K('manual')],
       ['WARP +/-', K('warpUp', 'warpDown')], ['PAUSE', K('pause')], ['MENU / REBIND', 'ESC'],
     ]],
   ];
@@ -4520,6 +4522,7 @@ const sfx = {
     burst(intBus, 'bandpass', 1100, 0.8, small ? 0.25 : 0.5, 0.05);
   },
   // Decoy mortars: a quick ripple of pops
+  pageTurn(open = false) { if (!actx) return; burst(intBus, 'bandpass', open ? 900 : 1500, 0.7, open ? 0.3 : 0.22, 0.1); burst(intBus, 'highpass', 3200, 0.6, 0.07, 0.05, open ? 0.2 : 0.14); },
   decoy() { if (actx) for (let i = 0; i < 4; i++) thump(hullBus, 95, 0.09, 0.45, i*0.07); },
   rcsPuff() { if (actx) burst(intBus, 'bandpass', 1500, 1.2, 0.06, 0.03); },
   click() { if (actx) burst(intBus, 'bandpass', 2800, 2, 0.02, 0.35); },
@@ -4854,6 +4857,7 @@ function renderMissions() {
       −150 per system lost, −2000 per neutral destroyed. On success: time, propellant, ammunition and stealth bonuses.
       Ranks F− to A by score; S for a perfect run (undetected, undamaged, no neutral hit).${best ? `<br>BEST: ${best.rank} · ${best.score}` : ''}</p>` : '');
 }
+document.getElementById('manualBtn').addEventListener('click', () => toggleManual(true));
 document.getElementById('missionGo').addEventListener('click', () => {
   scenario = missionSel; missionsEl.style.display = 'none'; uiOverlay = false;
   if (scenario === 'sandbox') { mission = null; openHangar(); return; }
@@ -5285,6 +5289,718 @@ function renderHangar(dt) {
   renderer.render(hangar.scene, hangar.cam);
 }
 
+
+/* ================= FLIGHT MANUAL ("HOW TO FLY") =================
+   A saddle-stitched booklet held in front of the panel. Pages are printed in a 5x7 dot-matrix face on yellowed
+   paper, laid out on a grid of printer dots and rendered to canvas textures on demand (only the faces in view).
+   Leaves turn about the spine with a stiff curl. Open with the manual key or the BOOK button; tap the right page
+   (or swipe left, or ]) for the next spread, the left page (swipe right, [) for the previous one. The sim keeps
+   running while it is open. */
+const FONT57 = (() => {
+  const G = {
+    A:[14,17,17,31,17,17,17], B:[30,17,17,30,17,17,30], C:[14,17,16,16,16,17,14], D:[28,18,17,17,17,18,28],
+    E:[31,16,16,30,16,16,31], F:[31,16,16,30,16,16,16], G:[14,17,16,23,17,17,15], H:[17,17,17,31,17,17,17],
+    I:[14,4,4,4,4,4,14], J:[7,2,2,2,2,18,12], K:[17,18,20,24,20,18,17], L:[16,16,16,16,16,16,31],
+    M:[17,27,21,21,17,17,17], N:[17,17,25,21,19,17,17], O:[14,17,17,17,17,17,14], P:[30,17,17,30,16,16,16],
+    Q:[14,17,17,17,21,18,13], R:[30,17,17,30,20,18,17], S:[15,16,16,14,1,1,30], T:[31,4,4,4,4,4,4],
+    U:[17,17,17,17,17,17,14], V:[17,17,17,17,17,10,4], W:[17,17,17,21,21,21,10], X:[17,17,10,4,10,17,17],
+    Y:[17,17,10,4,4,4,4], Z:[31,1,2,4,8,16,31],
+    0:[14,17,19,21,25,17,14], 1:[4,12,4,4,4,4,14], 2:[14,17,1,2,4,8,31], 3:[31,2,4,2,1,17,14],
+    4:[2,6,10,18,31,2,2], 5:[31,16,30,1,1,17,14], 6:[6,8,16,30,17,17,14], 7:[31,1,2,4,8,8,8],
+    8:[14,17,17,14,17,17,14], 9:[14,17,17,15,1,2,12],
+    ' ':[0,0,0,0,0,0,0], '.':[0,0,0,0,0,12,12], ',':[0,0,0,0,12,4,8], ':':[0,12,12,0,12,12,0],
+    ';':[0,12,12,0,12,4,8], '-':[0,0,0,14,0,0,0], '=':[0,0,31,0,31,0,0], '+':[0,4,4,31,4,4,0],
+    '/':[0,1,2,4,8,16,0], '(':[2,4,8,8,8,4,2], ')':[8,4,2,2,2,4,8], "'":[12,4,8,0,0,0,0],
+    '"':[10,10,10,0,0,0,0], '!':[4,4,4,4,4,0,4], '?':[14,17,1,2,4,0,4], '%':[24,25,2,4,8,19,3],
+    '<':[2,4,8,16,8,4,2], '>':[8,4,2,1,2,4,8], '*':[0,4,21,14,21,4,0], '#':[10,10,31,10,31,10,10],
+    '&':[12,18,20,8,21,18,13], '_':[0,0,0,0,0,0,31], '[':[14,8,8,8,8,8,14], ']':[14,2,2,2,2,2,14],
+    '°':[12,18,18,12,0,0,0], '·':[0,0,0,4,0,0,0], '^':[4,10,17,0,0,0,0], '|':[4,4,4,4,4,4,4],
+    '~':[0,0,8,21,2,0,0], '±':[4,4,31,4,4,0,31],
+  };
+  return G;
+})();
+// Dot grid of a page and the text cell (5x7 glyph in a 6x9 cell)
+const MAN = { DW: 264, DH: 363, CW: 6, CH: 9, ML: 14, MT: 16, TW: 768, TH: 1056 };
+MAN.COLS = Math.floor((MAN.DW - MAN.ML - 12)/MAN.CW);    // 39
+MAN.ROWS = Math.floor((MAN.DH - MAN.MT - 20)/MAN.CH);    // 36
+
+// A page under construction: a grid of dots (1 = struck, 2 = struck twice) and a line cursor
+function manPage() {
+  const p = { dots: new Uint8Array(MAN.DW*MAN.DH), row: 0, ink: [] };
+  for (let r = 0; r < MAN.ROWS + 6; r++) p.ink.push(0.7 + 0.3*Math.random());   // ribbon wear per printed line
+  return p;
+}
+const manSet = (p, x, y, v = 1) => { if (x >= 0 && y >= 0 && x < MAN.DW && y < MAN.DH) p.dots[y*MAN.DW + x] = Math.max(p.dots[y*MAN.DW + x], v); };
+function manText(p, s, col, row, bold = false) {
+  const x0 = MAN.ML + col*MAN.CW, y0 = MAN.MT + row*MAN.CH;
+  [...String(s).toUpperCase()].forEach((ch, i) => {
+    const gl = FONT57[ch] || FONT57['?'];
+    for (let r = 0; r < 7; r++) for (let c = 0; c < 5; c++) if (gl[r] & (16 >> c)) manSet(p, x0 + i*MAN.CW + c, y0 + r, bold ? 2 : 1);
+  });
+}
+function manWrap(s, width) {
+  const out = []; let line = '';
+  for (const w of String(s).split(/\s+/)) {
+    if (!w) continue;
+    if ((line + ' ' + w).trim().length > width) { out.push(line); line = w; } else line = (line + ' ' + w).trim();
+  }
+  if (line) out.push(line);
+  return out;
+}
+// Diagrams: drawn with canvas lines on a page-sized buffer, then struck as dots wherever the ink covers a cell
+function manFig(p, rows, draw) {
+  const y0 = MAN.MT + p.row*MAN.CH, h = rows*MAN.CH;
+  const cv = document.createElement('canvas'); cv.width = MAN.DW; cv.height = MAN.DH;
+  const g = cv.getContext('2d');
+  g.strokeStyle = g.fillStyle = '#000'; g.lineWidth = 1; g.lineCap = 'round';
+  g.font = '7px monospace';
+  draw(g, MAN.ML, y0, MAN.DW - MAN.ML - 12, h, (s, x, y) => {     // labels in the printer face, at a dot position
+    [...String(s).toUpperCase()].forEach((ch, i) => {
+      const gl = FONT57[ch] || FONT57['?'];
+      for (let r = 0; r < 7; r++) for (let c = 0; c < 5; c++) if (gl[r] & (16 >> c)) manSet(p, Math.round(x) + i*6 + c, Math.round(y) + r);
+    });
+  });
+  const d = g.getImageData(0, 0, MAN.DW, MAN.DH).data;
+  for (let i = 0; i < MAN.DW*MAN.DH; i++) if (d[i*4 + 3] > 110) p.dots[i] = Math.max(p.dots[i], 1);
+  p.row += rows;
+}
+// Layout of one page from a list of items: strings (paragraphs), {h} heading, {b} bullet, {kv} table, {warn},
+// {fig, rows}, {gap}, {pre} preformatted lines
+function manLayout(p, items) {
+  const W = MAN.COLS;
+  for (const it of items) {
+    if (typeof it === 'string') { for (const l of manWrap(it, W)) manText(p, l, 0, p.row++); continue; }
+    if (it.h) {
+      manText(p, it.h, 0, p.row, true);
+      const y = MAN.MT + p.row*MAN.CH + 8, len = it.h.length*MAN.CW - 1;
+      for (let x = 0; x < len; x += 1) manSet(p, MAN.ML + x, y, 2);
+      p.row += 2; continue;
+    }
+    if (it.b) { const ls = manWrap(it.b, W - 2); ls.forEach((l, i) => manText(p, (i ? '  ' : '- ') + l, 0, p.row++)); continue; }
+    if (it.kv) {
+      const kw = it.w || Math.min(16, Math.max(...it.kv.map(([k]) => k.length)) + 1);
+      for (const [k, v] of it.kv) {
+        const ls = manWrap(v, W - kw);
+        ls.forEach((l, i) => { if (!i) manText(p, k, 0, p.row); manText(p, l, kw, p.row++); });
+      }
+      continue;
+    }
+    if (it.pre) { for (const l of it.pre) manText(p, l, 0, p.row++); continue; }
+    if (it.warn) {
+      const ls = manWrap(it.warn, W - 4), top = MAN.MT + p.row*MAN.CH - 3;
+      manText(p, (it.title || 'WARNING'), Math.floor((W - (it.title || 'WARNING').length)/2), p.row + 1, true);
+      ls.forEach((l, i) => manText(p, l, 2, p.row + 2 + i));
+      const bot = MAN.MT + (p.row + 2 + ls.length)*MAN.CH + 1, x0 = MAN.ML - 3, x1 = MAN.ML + W*MAN.CW;
+      for (let x = x0; x <= x1; x += 2) { manSet(p, x, top, 2); manSet(p, x, bot, 2); }
+      for (let y = top; y <= bot; y += 2) { manSet(p, x0, y, 2); manSet(p, x1, y, 2); }
+      p.row += ls.length + 3; continue;
+    }
+    if (it.fig) { manFig(p, it.rows, it.fig); continue; }
+    if (it.gap) { p.row += it.gap; continue; }
+  }
+}
+// Line helpers for diagrams
+const figArrow = (g, x0, y0, x1, y1, hd = 4) => {
+  g.beginPath(); g.moveTo(x0, y0); g.lineTo(x1, y1); g.stroke();
+  const a = Math.atan2(y1 - y0, x1 - x0);
+  g.beginPath(); g.moveTo(x1, y1); g.lineTo(x1 - hd*Math.cos(a - 0.45), y1 - hd*Math.sin(a - 0.45));
+  g.moveTo(x1, y1); g.lineTo(x1 - hd*Math.cos(a + 0.45), y1 - hd*Math.sin(a + 0.45)); g.stroke();
+};
+const figDash = (g, pts, on = 2, off = 2) => { g.setLineDash([on, off]); g.beginPath(); pts.forEach(([x, y], i) => i ? g.lineTo(x, y) : g.moveTo(x, y)); g.stroke(); g.setLineDash([]); };
+
+/* ---------- Page content ----------
+   Faces: 0 cover, 1 inside front cover, 2..23 pages 1..22, 24 inside back cover. Built when first needed, so
+   key names follow the current bindings. Short, technical, in the style of a 1980s flight manual. */
+const kn = id => codeName(bindings[id]).replace('Mouse Left', 'LMB').replace('Mouse Right', 'RMB').replace('Mouse Middle', 'MMB')
+  .replace('ArrowUp', 'UP').replace('ArrowDown', 'DOWN').replace('ArrowLeft', 'LEFT').replace('ArrowRight', 'RIGHT')
+  .replace('Period', '.').replace('Comma', ',').replace('BracketLeft', '[').replace('BracketRight', ']').toUpperCase();
+const modDesc = id => MODULE_CATALOG[id].desc.replace(/·/g, '-').replace(/±/g, '+/-');
+const MAN_PAGES = [
+  // 1 title and contents
+  () => [{ gap: 1 }, { pre: ['        PILOT\'S FLIGHT MANUAL'] }, { gap: 1 },
+    { pre: ['   ARMED PATROL CRAFT  OG-1 "LANTERN"'] }, { gap: 2 },
+    'THIS MANUAL CONTAINS THE INFORMATION NECESSARY FOR SAFE AND EFFECTIVE OPERATION OF THE OG-1. READ IT BEFORE FLIGHT. KEEP IT IN THE COCKPIT.',
+    { gap: 1 }, { h: 'CONTENTS' },
+    { kv: [['SECTION I', 'THE SHIP ........... 2'], ['SECTION II', 'COCKPIT ............ 4'], ['SECTION III', 'FLIGHT ............. 6'],
+      ['SECTION IV', 'SENSORS ........... 11'], ['SECTION V', 'WEAPONS ........... 14'], ['SECTION VI', 'THREATS ........... 17'],
+      ['SECTION VII', 'SYSTEMS ........... 18'], ['SECTION VIII', 'LOADOUT ........... 20'], ['SECTION IX', 'QUICK REFERENCE ... 21'],
+      ['', 'EMERGENCIES ....... 22']], w: 13 },
+    { gap: 2 }, 'CHANGE 3 INCORPORATES ECM, VLS AND LASER POINT DEFENCE MODULES. DESTROY SUPERSEDED PAGES.'],
+  // 2 the ship
+  () => [{ h: 'SECTION I - THE SHIP' },
+    'SINGLE-SEAT ORBITAL COMBAT CRAFT. FUSION REACTOR, FUSION-HEATED MAIN DRIVE, COLD-GAS RCS. NO WINGS. NO AIR. NEWTON FLIES THIS SHIP; YOU ADVISE HIM.',
+    { gap: 1 },
+    { kv: [['LENGTH', '24 M'], ['DRY HULL', `${SHIP.hullDry} KG + MODULES`], ['MAIN PROP', `${SHIP.mainProp0.toFixed(0)} KG`],
+      ['RCS PROP', `${SHIP.rcsProp0} KG`], ['MAIN THRUST', `${SHIP.mainThrust/1e3} KN`], ['MAIN ISP', `${SHIP.mainIsp} S`],
+      ['DELTA-V', '7500 M/S WITH 2 DROP TANKS'], ['REACTOR', `${POWER.reactor/1e3} KW ELECTRIC`], ['CAPACITOR', `${POWER.battCap/1e6} MJ`],
+      ['HULL TEMP', `${THERM.tMax} K MAX`]] },
+    { gap: 1 }, { h: 'AXES' },
+    { b: 'NOSE IS FORWARD. PITCH, YAW AND ROLL ARE ABOUT THE SHIP, NOT THE ORBIT.' },
+    { b: 'THE MAIN DRIVE PUSHES ALONG THE NOSE ONLY. POINT FIRST, THEN BURN.' },
+    { b: 'RCS TRANSLATES IN ALL SIX DIRECTIONS AT LOW THRUST. USE IT FOR THE LAST METRES.' },
+    { gap: 1 },
+    { warn: 'THERE IS NO DRAG. A RATE OR VELOCITY NOT CANCELLED STAYS. LEAVE RCS STAB ON UNLESS YOU NEED IT OFF.' }],
+  // 3 ship diagram
+  () => [{ h: 'GENERAL ARRANGEMENT (TOP VIEW)' },
+    { fig: (g, x, y, w, h, lab) => {
+      const k = Math.min((w - 10)/25, (h - 26)/12), ox = x + w/2 - 0.6*k, oy = y + h/2;
+      const P = ([u, v]) => [ox + u*k, oy + v*k];
+      const poly = pts => { g.beginPath(); pts.forEach((q, i) => { const [a2, b2] = P(q); i ? g.lineTo(a2, b2) : g.moveTo(a2, b2); }); g.closePath(); g.stroke(); };
+      poly(SHIP_SIL.hull[0]); for (const r of SHIP_SIL.radiators) poly(r);
+      const box2 = (u0, u1) => { const [a2, b2] = P([u0, -0.9]), [c2, d2] = P([u1, 0.9]); g.strokeRect(a2, b2, c2 - a2, d2 - b2); };
+      box2(-9.7, -7.7); box2(-7.3, -2.6); box2(0.6, 5.8); box2(9, 11.4);
+      // Leaders: from a point on the ship to a label in the top or bottom row
+      const call = (u, v, tx, top, s2) => { const [a2, b2] = P([u, v]), ty = top ? y : y + h - 7, lx = tx + s2.length*3;
+        g.beginPath(); g.moveTo(a2, b2); g.lineTo(lx, top ? ty + 9 : ty - 2); g.stroke(); lab(s2, tx, ty); };
+      call(-11, 0, x, true, 'NOSE'); call(-5, -0.9, x + 36, true, 'CAPACITORS'); call(3.2, -0.9, x + 112, true, 'REACTOR');
+      call(10.2, -1.6, x + 166, true, 'DRIVE');
+      call(-8.7, 0.9, x, false, 'SCOPE'); call(-0.1, 1.7, x + 40, false, 'PDC TURRETS'); call(6.8, 1.7, x + 116, false, 'PYLONS');
+      call(9.8, 4.5, x + 170, false, 'RADIATOR');
+}, rows: 13 }, { gap: 1 },
+    { kv: [['SPINAL', 'RAILGUN OR TORPEDO TUBE'], ['NOSE GIMBAL', 'LASER OR RADAR'], ['TURRETS (2)', 'PDC, LASER PD OR INTERCEPTORS'],
+      ['PYLONS (2)', 'DROP TANK, VLS, CAPACITOR OR ECM POD']] },
+    { gap: 1 },
+    'RADIATORS FOLD ALONG THE HULL WHEN STOWED. STOWED, THEY SHED 7% OF THE HEAT AND SHOW 7% OF THE SIGNATURE.',
+    { gap: 1 },
+    { warn: 'DROP TANKS HOLD 2500 M/S. JETTISONED EARLY, THE REMAINING PROPELLANT IS LOST.', title: 'CAUTION' }],
+  // 4 cockpit layout
+  () => [{ h: 'SECTION II - COCKPIT' },
+    { fig: (g, x, y, w, h, lab) => {
+      const s = w/2.2, X = v => x + w/2 + v*s, Y = v => y + 8 - (v - 0.5)*s*0.9;
+      const r = (cx, cy, ww, hh, t) => { g.strokeRect(X(cx - ww/2), Y(cy + hh/2), ww*s, hh*s*0.9); lab(t, X(cx) - t.length*3, Y(cy) - 3); };
+      for (const xx of [-0.82, -0.27, 0.27, 0.82]) { g.beginPath(); g.arc(X(xx*1.2), Y(0.52), 2, 0, 7); g.stroke(); }
+      lab('WARNING LAMPS', X(0) - 39, Y(0.62) - 3);
+      r(-0.54, 0.302, 0.5, 0.306, 'MFD 1'); r(0, 0.302, 0.5, 0.306, 'MFD 2'); r(0.54, 0.302, 0.5, 0.306, 'MFD 3');
+      r(-0.45, -0.11, 0.6, 0.367, 'MAP 4'); r(0.45, -0.11, 0.6, 0.367, 'MFD 5');
+      g.beginPath(); g.arc(X(0), Y(-0.04), 0.115*s, 0, 7); g.stroke(); lab('BALL', X(0) - 12, Y(-0.04) - 3);
+      r(0, -0.27, 0.22, 0.12, 'KEYPAD');
+      for (const xx of [-0.85, -0.57, -0.28, 0, 0.28, 0.57, 0.85]) g.strokeRect(X(xx) - 3, Y(-0.52) - 2, 6, 4);
+      lab('SWITCHES', X(0) - 24, Y(-0.6) - 3);
+    }, rows: 16 },
+    { kv: [['LAMPS', 'OVERHEAT, BATT LOW, LASER ARMED, RAD STOWED, TGT FWD, SYS DAMAGE'], ['MFD 1-3, 5', 'SELECTABLE PAGES'],
+      ['MAP 4', 'DEDICATED 3D MAP'], ['BALL', 'ATTITUDE (NAVBALL)'], ['KEYPAD', 'TRACK NUMBER ENTRY'],
+      ['SWITCHES', 'RADIATORS, RCS STAB, LASER ARM, MASTER ARM, AUX']] },
+    { gap: 1 }, 'GUARDED SWITCHES: LIFT THE COVER, THEN THROW. TORP LAMP AND MUTE BUTTON SIT RIGHT OF MFD 5.'],
+  // 5 MFD operation
+  () => [{ h: 'MFD OPERATION' },
+    'EACH MFD HAS FIVE SOFTKEYS BELOW THE SCREEN:',
+    { kv: [['PG+ / PG-', 'NEXT / PREVIOUS PAGE'], ['RNG', 'RANGE SCALE. ON SCOPE: ZOOM'], ['TGT', 'NEXT CONTACT'], ['PWR', 'SCREEN ON / OFF']] },
+    { gap: 1 }, { h: 'PAGES' },
+    { kv: [['TACTICAL', 'CONTACTS AHEAD, THREATS, OWN SIGNATURE'], ['ORBIT', 'ELEMENTS: PE, AP, PERIOD'],
+      ['POWER/THERM', 'REACTOR, CAPACITOR, HULL TEMP'], ['WEAPONS', 'STATUS, AMMO, CONTACT LIST'],
+      ['PROPULSION', 'PROPELLANT, DELTA-V, TURN RATES'], ['COMMS', 'MESSAGE LOG, DATALINK'],
+      ['SHIP', 'MODULES, DAMAGE, TANKS'], ['SCOPE', 'TELESCOPE, VIS / IR'], ['DAMAGE', 'HULL AND SYSTEMS'],
+      ['CONTROLS', 'KEY REFERENCE']] },
+    { gap: 1 }, { h: 'MAP 4' },
+    { kv: [['VIEW', 'ORBIT / LOCAL'], ['ZM+ ZM-', 'ZOOM'], ['ROT', 'ROTATE 30 DEG'], ['TILT', 'CAMERA ELEVATION']] }],
+  // 6 flight controls
+  () => [{ h: 'SECTION III - FLIGHT' }, { h: 'CONTROLS' },
+    { kv: [['PITCH', `${kn('pitchUp')} / ${kn('pitchDown')}`], ['YAW', `${kn('yawLeft')} / ${kn('yawRight')}`], ['ROLL', `${kn('rollLeft')} / ${kn('rollRight')}`],
+      ['FWD / AFT', `${kn('transFwd')} / ${kn('transAft')}`], ['LEFT / RIGHT', `${kn('transLeft')} / ${kn('transRight')}`],
+      ['UP / DOWN', `${kn('transUp')} / ${kn('transDown')}`], ['MAIN DRIVE', `${kn('mainEngine')} (HOLD)`], ['RCS STAB', kn('rcsStab')],
+      ['LEAD HOLD', kn('leadHold')]] },
+    { gap: 1 }, { h: 'ATTITUDE' },
+    'RCS FIRES IN PAIRS ON A 10.5 M ARM. RATES BUILD WHILE THE KEY IS HELD. RCS STAB DAMPS ALL RATES TO ZERO WHEN NO INPUT IS GIVEN.',
+    { gap: 1 }, { h: 'REACTION WHEELS' },
+    'WHEN RCS PROPELLANT IS EXHAUSTED THE WHEELS TAKE OVER. 15% OF RCS TORQUE, TURN ONLY, UP TO 30 KW FROM THE CAPACITOR. NO POWER, NO TURN.',
+    { gap: 1 },
+    { warn: 'THE MAIN DRIVE PUSHES 20 KN. AT LIGHT LOADOUT THIS IS OVER 2.5 M/S2. DO NOT BURN TOWARD A CONTACT YOU INTEND TO MEET SLOWLY.', title: 'CAUTION' }],
+  // 7 orbital flight I
+  () => [{ h: 'ORBITAL FLIGHT' },
+    { fig: (g, x, y, w, h, lab) => {
+      const cx = x + w*0.42, cy = y + h/2, a = w*0.36, b = h*0.42;
+      g.beginPath(); g.ellipse(cx, cy, a, b, 0, 0, 7); g.stroke();
+      g.beginPath(); g.arc(cx - a*0.35, cy, 12, 0, 7); g.stroke(); lab('EARTH', cx - a*0.35 - 15, cy - 3);
+      const sx = cx, sy = cy - b; g.fillRect(sx - 2, sy - 2, 4, 4);
+      figArrow(g, sx, sy, sx + 30, sy); lab('PRO', sx + 32, sy - 3);
+      figArrow(g, sx, sy, sx - 30, sy); lab('RETRO', sx - 64, sy - 3);
+      figArrow(g, sx, sy, sx, sy - 16); lab('RAD OUT', sx + 4, sy - 22);
+      figArrow(g, sx, sy, sx, sy + 16); lab('RAD IN', sx + 4, sy + 12);
+      lab('AP', cx + a + 3, cy - 3); lab('PE', cx - a - 14, cy - 3);
+    }, rows: 13 },
+    { kv: [['PROGRADE', 'RAISES THE FAR SIDE (AP)'], ['RETROGRADE', 'LOWERS THE FAR SIDE'], ['RADIAL', 'ROTATES THE ORBIT'], ['NORMAL', 'CHANGES THE PLANE']] },
+    { gap: 1 },
+    'BURN AT PE TO MOVE AP; BURN AT AP TO MOVE PE. TO CATCH A TARGET AHEAD, DROP LOWER AND FASTER; TO WAIT FOR ONE BEHIND, GO HIGHER.',
+    { gap: 1 }, 'LOW ORBIT PERIOD IS ABOUT 92 MIN. ONE KM OF ALTITUDE IS WORTH ABOUT 0.5 M/S.'],
+  // 8 orbital flight II
+  () => [{ h: 'RENDEZVOUS AND TIME WARP' },
+    { b: 'SELECT THE TARGET (TGT). READ RNG, CL (CLOSING) AND LEAD ON TACTICAL.' },
+    { b: 'CLOSE AT NO MORE THAN 1/100 OF THE RANGE PER SECOND. 10 KM: 100 M/S.' },
+    { b: 'ABOVE 1 KM: STEER WITH THE MAIN DRIVE. BELOW: RCS ONLY.' },
+    { b: 'KILL RELATIVE VELOCITY ON THE TARGET MARKER OF THE BALL, THEN DRIFT IN.' },
+    { gap: 1 }, { h: 'TIME WARP' },
+    { kv: [['WARP +', kn('warpUp')], ['WARP -', kn('warpDown')], ['STEPS', 'X1, X10, X100, X1000']] },
+    'ANY FLIGHT INPUT OR LEAD HOLD DROPS WARP TO X1.',
+    { gap: 1 }, { h: 'LUNAR TRANSFER' },
+    'A PROGRADE BURN OF ABOUT 3100 M/S FROM LOW ORBIT REACHES THE MOON IN 3 DAYS. INSIDE THE LUNAR SPHERE THE ORBIT PAGE SHOWS MOON ELEMENTS. CAPTURE WITH A RETROGRADE BURN AT LUNAR PE.',
+    { gap: 1 }, { warn: 'MOON RADIUS 1737 KM. PE BELOW THIS IS NOT AN ORBIT.' }],
+  // 9 maneuver planner
+  () => [{ h: 'MANEUVER PLANNER' },
+    'PLANS ONE BURN (A NODE) AND SHOWS THE RESULT ON MAP 4 ORBIT VIEW: GREEN DOTS PRESENT PATH, CYAN DASHES PLANNED PATH.',
+    { gap: 1 },
+    { kv: [['SET/CLEAR', kn('planNode')], ['PRO - / +', `${kn('planRetro')} / ${kn('planPro')}`], ['RADIAL IN/OUT', `${kn('planRadIn')} / ${kn('planRadOut')}`],
+      ['NORMAL - / +', `${kn('planAnti')} / ${kn('planNrm')}`], ['EARLIER/LATER', `${kn('planEarlier')} / ${kn('planLater')}`], ['STEP SIZE', kn('planStep')]], w: 15 },
+    { gap: 1 }, { h: 'EXECUTION' },
+    { b: 'UNDER 15 MIN TO THE NODE, LEAD HOLD POINTS THE NOSE AT THE BURN (CYAN MARKER ON THE BALL).' },
+    { b: 'HOLD THE MAIN DRIVE WHEN THE READOUT SAYS BURN. RELEASE AT ZERO DV LEFT.' },
+    { b: 'THE PLAN FREEZES ONCE THE BURN STARTS. A LATE START COSTS ACCURACY, NOT FUEL.' },
+    { gap: 1 }, 'CLOSEST APPROACH TO THE SELECTED TARGET IS MARKED ON THE PLANNED PATH.'],
+  // 10 navball
+  () => [{ h: 'NAVBALL' },
+    { fig: (g, x, y, w, h, lab) => {
+      const cx = x + w*0.3, cy = y + h/2, R = h*0.46;
+      g.beginPath(); g.arc(cx, cy, R, 0, 7); g.stroke(); figDash(g, [[cx - R, cy], [cx + R, cy]]);
+      const pro = (px, py) => { g.beginPath(); g.arc(px, py, 4, 0, 7); g.stroke(); g.beginPath(); g.moveTo(px - 4, py); g.lineTo(px - 8, py); g.moveTo(px + 4, py); g.lineTo(px + 8, py); g.moveTo(px, py - 4); g.lineTo(px, py - 8); g.stroke(); };
+      const retro = (px, py) => { g.beginPath(); g.arc(px, py, 4, 0, 7); g.stroke(); g.beginPath(); g.moveTo(px - 3, py - 3); g.lineTo(px + 3, py + 3); g.moveTo(px + 3, py - 3); g.lineTo(px - 3, py + 3); g.stroke(); };
+      pro(cx + 10, cy - 12); retro(cx - 20, cy + 16);
+      g.strokeRect(cx + 16, cy + 8, 8, 8); g.beginPath(); g.arc(cx - 14, cy - 18, 5, 0, 7); g.stroke();
+      g.beginPath(); g.moveTo(cx - 6, cy); g.lineTo(cx + 6, cy); g.moveTo(cx, cy - 3); g.lineTo(cx, cy + 3); g.stroke();
+      const lx = x + w*0.62; pro(lx + 4, y + 8); lab('PROGRADE', lx + 14, y + 5);
+      retro(lx + 4, y + 22); lab('RETROGRADE', lx + 14, y + 19);
+      g.strokeRect(lx, y + 32, 8, 8); lab('TARGET', lx + 14, y + 33);
+      g.beginPath(); g.arc(lx + 4, y + 50, 5, 0, 7); g.stroke(); lab('BURN', lx + 14, y + 47);
+      g.beginPath(); g.moveTo(lx - 2, y + 64); g.lineTo(lx + 10, y + 64); g.stroke(); lab('NOSE', lx + 14, y + 61);
+    }, rows: 9 },
+    'THE BALL SHOWS THE SKY ABOUT THE SHIP: BLUE UP (AWAY FROM THE BODY), BROWN DOWN. THE NOSE IS THE CENTRE CROSS.',
+    { gap: 1 },
+    { b: 'TO BURN PROGRADE: PUT THE PROGRADE MARKER UNDER THE CROSS.' },
+    { b: 'TO KILL RELATIVE VELOCITY: POINT AT THE RETRO TARGET MARKER AND BURN.' },
+    { b: 'LEAD HOLD STEERS THE NOSE FOR YOU: TO THE FIRING LEAD, OR TO THE BURN WHEN A NODE IS NEAR.' }],
+  // 11 sensors and signature
+  () => [{ h: 'SECTION IV - SENSORS' }, { h: 'SIGNATURE' },
+    'EVERY HULL RADIATES HEAT. SIGNATURE 1 IS A COLD, COASTING HULL. DETECTION RANGE IS 12 KM X SQRT(SIGNATURE), BOTH WAYS.',
+    { fig: (g, x, y, w, h, lab) => {
+      g.beginPath(); g.moveTo(x + 24, y + 2); g.lineTo(x + 24, y + h - 10); g.lineTo(x + w - 4, y + h - 10); g.stroke();
+      g.beginPath(); for (let i = 0; i <= 60; i++) { const sgv = 1 + i*i*0.1, X = x + 24 + (w - 30)*i/60, Y = y + h - 10 - (h - 14)*Math.sqrt(sgv)/Math.sqrt(361); i ? g.lineTo(X, Y) : g.moveTo(X, Y); } g.stroke();
+      lab('228', x, y + 2); lab('KM', x, y + 10); lab('12', x + 6, y + h - 14); lab('SIGNATURE 1 - 360', x + 60, y + h - 7);
+    }, rows: 9 }, { gap: 1 },
+    { kv: [['COAST, RAD STOWED', 'LOW'], ['RADIATORS OUT', 'HIGHER'], ['MAIN DRIVE', '+400 PER FULL BURN'], ['LAUNCH', '+150 FOR 5 S'],
+      ['PDC FIRING', '+40'], ['RADAR ON', '+200']], w: 19 },
+    { gap: 1 },
+    'THE SIG BAR ON TACTICAL SHOWS HOW FAR YOU CAN BE SEEN. EARTH AND MOON BLOCK ALL SENSORS.',
+    { gap: 1 }, { warn: 'ONE BURN IS SEEN FROM 240 KM. PLAN BURNS WHERE NO ONE IS LOOKING.', title: 'NOTE' }],
+  // 12 datalink
+  () => [{ h: 'CONTACTS AND DATALINK' },
+    { b: 'OWN SENSORS: PASSIVE BY SIGNATURE, OR BOW RADAR TO 500 KM IF FITTED.' },
+    { b: 'TGT CYCLES OWN-SENSOR CONTACTS. FIRE CONTROL NEEDS ONE.' },
+    { b: 'OBSERVATION SATELLITES (900 KM ORBIT) REPORT WHAT THEY SEE BY LASER LINK. REPORTS ARE DELAYED AND MAY GAP.' },
+    { fig: (g, x, y, w, h, lab) => {
+      const ex = x + 34, cy = y + h/2; g.beginPath(); g.arc(ex, cy, 18, 0, 7); g.stroke(); lab('EARTH', ex - 15, cy - 3);
+      const mx = x + w - 60; g.beginPath(); g.arc(mx, cy, 10, 0, 7); g.stroke(); lab('MOON', mx - 12, cy + 13);
+      g.fillRect(ex + 26, cy - 22, 3, 3); lab('SAT', ex + 30, cy - 30);
+      g.fillRect(mx + 26, cy - 2, 3, 3); lab('YOU', mx + 22, cy + 5);
+      figDash(g, [[ex + 28, cy - 21], [mx + 2, cy - 4]]); g.beginPath(); g.moveTo(mx - 6, cy - 12); g.lineTo(mx + 2, cy - 4); g.moveTo(mx + 2, cy - 12); g.lineTo(mx - 6, cy - 4); g.stroke();
+      lab('BLOCKED', x + w/2 - 30, cy - 34);
+    }, rows: 8 },
+    'SATELLITES RELAY TO EACH OTHER, BUT ONE OF THEM MUST SEE YOU, AND ONE MUST SEE THE TARGET. THE MOON SHADOWS BOTH.',
+    { gap: 1 }, { h: 'TRACK NUMBERS' },
+    'DISTANT TRACKS ARE SELECTED BY THEIR FOUR-DIGIT TRACK NUMBER ON THE KEYPAD (SHOWN ON MAP 4). ENT CONFIRMS, CLR CLEARS.'],
+  // 13 telescope
+  () => [{ h: 'TELESCOPE' },
+    'GIMBALLED, 4 DEG FIELD, SLEWS TO THE SELECTED TARGET. STOWS TO THE NOSE WHEN NOTHING IS SELECTED.',
+    { gap: 1 },
+    { kv: [['ZOOM', 'RNG SOFTKEY: X1, X4, X16, X64, X256'], ['VIS / IR', `${kn('toggleIR')} OR IR BUTTON`], ['IR', 'WHITE HOT. SEES DRIVES, RADIATORS AND FRESH WRECKS']] },
+    { gap: 1 }, { h: 'RESOLUTION' },
+    { kv: [['VISIBLE', '15 MICRORAD (15 CM AT 10 KM)'], ['IR', '40 MICRORAD']] },
+    'BEYOND A FEW KM A SHIP IS A BLUR. IDENTIFY BY SHAPE ONLY AT CLOSE RANGE. THE AIM RETICLE IS THE SPINAL BORESIGHT; THE DIAMOND IS THE RAIL LEAD.',
+    { gap: 1 },
+    { warn: 'A SHIP LASING YOU FLOODS THE SENSOR WITH GLARE. THE GLARE MARKS THE SHOOTER. MOVE OUT OF 5 KM.' }],
+  // 14 weapons I
+  () => [{ h: 'SECTION V - WEAPONS' }, { h: 'MASTER ARM' },
+    { kv: [['COVER', kn('guardMaster')], ['SWITCH', `${kn('masterArm')}: OFF / ON / TNG`], ['TNG', 'TRAINING. FIRES, NO DAMAGE']] },
+    { gap: 1 }, { h: 'RAILGUN' }, modDesc('rail_mk1'),
+    { fig: (g, x, y, w, h, lab) => {
+      const sx = x + 8, sy = y + h - 8; g.strokeRect(sx - 3, sy - 2, 8, 4); lab('YOU', sx - 4, sy - 12);
+      const tx = x + w*0.45, ty = y + 8; g.beginPath(); g.arc(tx, ty, 3, 0, 7); g.stroke(); lab('TARGET', tx - 18, ty - 10 < y ? ty + 6 : ty - 10);
+      figDash(g, [[tx, ty], [x + w*0.82, ty + 6]]); const lx = x + w*0.82, ly = ty + 6;
+      g.beginPath(); g.moveTo(lx, ly - 4); g.lineTo(lx + 4, ly); g.lineTo(lx, ly + 4); g.lineTo(lx - 4, ly); g.closePath(); g.stroke(); lab('LEAD', lx + 6, ly - 3);
+      figArrow(g, sx + 6, sy - 2, lx - 4, ly + 3); lab('SLUG', x + w*0.45, y + h - 16);
+    }, rows: 6 },
+    `FIRE: ${kn('fireRail')}. AIM THE NOSE AT THE LEAD DIAMOND (LEAD HOLD DOES IT). THE SLUG IS UNGUIDED. KILLS SPLIT THE HULL.`,
+    { gap: 1 }, { h: 'LASER' }, modDesc('laser_mk1'),
+    `GUARD ${kn('guardLaser')}, ARM ${kn('armLaser')}, FIRE ${kn('fireLaser')} (HOLD). NEEDS AN OWN-SENSOR CONTACT IN 5 KM. DRAWS 300 KW.`],
+  // 15 weapons II
+  () => [{ h: 'GUIDED WEAPONS' },
+    { h: 'VLS MISSILES' }, modDesc('vls_mk1'),
+    `FIRE: ${kn('fireMissile')}. LOCKS THE SELECTED TARGET AT LAUNCH. 20 S OF BURN.`,
+    { h: 'TORPEDOES' }, modDesc('torp_mk1'),
+    `FIRE: ${kn('fireRail')} (SPINAL KEY). 60 S OF BURN. 400 DAMAGE. SLOW BUT HEAVY.`,
+    { h: 'INTERCEPTORS' }, modDesc('rim4_mk1'), 'LAUNCH AUTOMATICALLY AT CLOSING TORPEDOES. NOT IN TNG.',
+    { h: 'GUIDANCE' },
+    'GUIDED WEAPONS NEED A TARGET KNOWN TO THE SHIP: OWN SENSORS OR A DATALINK TRACK. A WEAPON THAT HAS MISSED AND CANNOT TURN BACK SELF-DESTRUCTS AFTER 5 S.',
+    { gap: 1 }, { warn: 'ENEMY POINT DEFENCE SHOOTS DOWN SINGLE WEAPONS. LAUNCH IN SALVOS. TORPEDOES NEED MISSILES WITH THEM.', title: 'NOTE' }],
+  // 16 point defence and ECM
+  () => [{ h: 'POINT DEFENCE AND ECM' },
+    { h: 'PDC TURRETS' }, modDesc('pdc_mk1'),
+    { fig: (g, x, y, w, h, lab) => {
+      const cx = x + w/2, cy = y + h/2; g.strokeRect(cx - 50, cy - 3, 100, 6); lab('NOSE', cx - 86, cy - 3);
+      g.beginPath(); g.arc(cx, cy - 3, h*0.4, Math.PI + 0.17, -0.17 + 2*Math.PI, false); g.stroke();
+      g.beginPath(); g.arc(cx, cy + 3, h*0.4, 0.17, Math.PI - 0.17); g.stroke();
+      lab('DORSAL ARC', cx + 34, y + 4); lab('VENTRAL ARC', cx + 34, y + h - 12);
+    }, rows: 8 }, { gap: 1 },
+    'AUTOMATIC WHEN ARMED. EACH MOUNT COVERS 100 DEG FROM ITS AXIS; THE ARCS OVERLAP AT THE BEAM. 2000 ROUNDS EACH.',
+    { b: 'BARRELS HEAT WITH FIRE. AT FULL HEAT THE MOUNT CEASES FIRE UNTIL COOL.' },
+    { gap: 1 }, { h: 'LASER PD' }, modDesc('lpd_mk1'),
+    { gap: 1 }, { h: 'ECM POD' }, modDesc('ecm_mk1'),
+    'A DECOY SALVO FIRES AT EACH TORPEDO ENTERING 4 KM. 45% BREAK LOCK AND CHASE THE DECOY.'],
+  // 17 threats
+  () => [{ h: 'SECTION VI - THREATS' },
+    { kv: [['TORPEDOES', 'HOSTILES FIRE SALVOS INSIDE 80 KM. TORP LAMP BLINKS AND A TONE SOUNDS. 15% HULL PER HIT AND ONE SYSTEM DAMAGED.'],
+      ['LASERS', 'ARMED SHIPS LASE INSIDE 5 KM: 4 S BURSTS. HEATS THE HULL, ABLATES IT TO NO LESS THAN 40%, SCORCHES SYSTEMS.'],
+      ['POINT DEF.', 'HOSTILES SHOOT AT YOUR MISSILES AND TORPEDOES INSIDE 3 KM. RAIL SLUGS ARE TOO FAST.'],
+      ['EVASION', 'HOSTILES DODGE WEAPONS IN THE LAST 15 S, KEEP THEIR RANGE AND RUN WHEN BADLY HURT.'],
+      ['DEBRIS', 'WRECK SECTIONS AND FRAGMENTS STAY IN ORBIT. A SECTION COSTS 12% HULL; A FRAGMENT 2-6%.']], w: 11 },
+    { gap: 1 }, { warn: 'A HIT ON THE HULL IS RARELY FATAL. THREE OR FOUR ARE. KEEP THE PDCS COOL AND ARMED.' }],
+  // 18 power and thermal
+  () => [{ h: 'SECTION VII - SYSTEMS' }, { h: 'POWER' },
+    `REACTOR ${POWER.reactor/1e3} KW CHARGES THE ${POWER.battCap/1e6} MJ CAPACITOR. LOADS: AVIONICS 40 KW, LASER 300 KW, LASER PD 400 KW, WHEELS TO 30 KW, RAILGUN 2.5 MJ PER SHOT.`,
+    { b: 'CAPACITOR EMPTY AND LOAD OVER REACTOR: BROWNOUT. WEAPONS DROP OUT.' },
+    { gap: 1 }, { h: 'THERMAL' },
+    'ALL POWER BECOMES HEAT. RADIATORS SHED IT. STOWED, THEY SHED LITTLE AND THE HULL HEATS.',
+    { kv: [['START', `${THERM.tStart} K`], ['WARNING', `${THERM.tWarn} K - OVERHEAT LAMP`], ['LIMIT', `${THERM.tMax} K - LASER AND LASER PD LOCK OUT`]] },
+    { gap: 1 },
+    { warn: 'STOWING THE RADIATORS LOWERS YOUR SIGNATURE BUT THE HULL WILL HEAT. WATCH HULL TEMP ON POWER/THERM.', title: 'CAUTION' }],
+  // 19 damage
+  () => [{ h: 'DAMAGE' },
+    'HULL INTEGRITY 100% TO 0%. AT 0% THE SHIP IS LOST. SYSTEMS DEGRADE FROM 100% TO OFFLINE.',
+    { gap: 1 },
+    { kv: [['REACTOR', 'LESS POWER'], ['RADIATORS', 'LESS COOLING'], ['CAPACITORS', 'LESS STORAGE'], ['TELESCOPE', 'POOR IMAGE'],
+      ['MAIN DRIVE', 'LESS THRUST'], ['RCS', 'SLOWER TURNS'], ['MODULES', 'WEAKER, SLOWER RELOAD, OFF']] },
+    { gap: 1 },
+    'HITS DAMAGE SYSTEMS ON THE SIDE THEY CAME FROM. THE SHIP PAGE SHOWS IMPACTS AND STATES; SYS DAMAGE LAMP LIGHTS ON ANY DAMAGE.',
+    { gap: 1 }, 'THERE IS NO REPAIR IN FLIGHT.'],
+  // 20 loadout
+  () => [{ h: 'SECTION VIII - LOADOUT' }, 'FIT MODULES IN THE HANGAR BEFORE LAUNCH. EACH ADDS MASS.',
+    { gap: 1 },
+    { kv: Object.keys(MODULE_CATALOG).map(k => [MODULE_CATALOG[k].short, modDesc(k)]), w: 7 }],
+  // 21 quick reference
+  () => [{ h: 'SECTION IX - QUICK REFERENCE' },
+    { kv: ACTIONS.filter(a => !a.id.startsWith('plan')).map(a => [kn(a.id), a.label.toUpperCase().replace(/\s*\(.*\)/, '')]), w: 10 },
+    { kv: [['ESC', 'MENU / REBIND KEYS'], ['[ ]', 'TURN PAGES']], w: 10 }],
+  // 22 emergencies
+  () => [{ h: 'EMERGENCY PROCEDURES' },
+    { h: 'INCOMING TORPEDO' }, { pre: ['1. MASTER ARM - ON', '2. TURN BEAM-ON (BOTH PDC ARCS)', '3. RADIATORS - CHECK OUT', '4. BURN ACROSS ITS PATH'] },
+    { gap: 1 }, { h: 'OVERHEAT' }, { pre: ['1. RADIATORS - DEPLOY', '2. LASER - CEASE', '3. WAIT FOR TEMP BELOW 380 K'] },
+    { gap: 1 }, { h: 'LASER ILLUMINATION' }, { pre: ['1. OPEN RANGE PAST 5 KM', '2. PUT EARTH OR MOON BETWEEN', '3. KILL THE SHOOTER'] },
+    { gap: 1 }, { h: 'RCS DRY' }, { pre: ['1. RCS STAB - ON (WHEELS)', '2. KEEP CAPACITOR CHARGED', '3. PLAN BURNS EARLY'] },
+    { gap: 1 }, { h: 'DETECTED' }, { pre: ['1. COMPLETE THE TASK OR LEAVE', '2. EXPECT SALVOS IN 20 S'] }],
+];
+const MAN_FACES = 25;
+// Printed page (faces 2-23): header, body, page number; plus foxing, ink wear and the gutter shadow
+function manBuildFace(f) {
+  const { TW, TH } = MAN, cv = document.createElement('canvas'); cv.width = TW; cv.height = TH;
+  const g = cv.getContext('2d');
+  let seed = 977*f + 13; const R = () => (seed = (seed*16807) % 2147483647)/2147483647;
+  const paper = (base, yellow) => {
+    g.fillStyle = base; g.fillRect(0, 0, TW, TH);
+    for (let i = 0; i < 14; i++) {                   // uneven yellowing
+      const x = R()*TW, y = R()*TH, r = 120 + R()*380, gr = g.createRadialGradient(x, y, 0, x, y, r);
+      gr.addColorStop(0, `rgba(${yellow},${0.05 + 0.08*R()})`); gr.addColorStop(1, `rgba(${yellow},0)`);
+      g.fillStyle = gr; g.fillRect(0, 0, TW, TH);
+    }
+    const ed = g.createLinearGradient(0, 0, 0, TH);   // darker, more yellowed edges
+    for (const [o, a] of [[0, 0.22], [0.06, 0], [0.94, 0], [1, 0.25]]) ed.addColorStop(o, `rgba(150,110,40,${a})`);
+    g.fillStyle = ed; g.fillRect(0, 0, TW, TH);
+    const ex = g.createLinearGradient(0, 0, TW, 0);
+    for (const [o, a] of [[0, 0.2], [0.06, 0], [0.94, 0], [1, 0.2]]) ex.addColorStop(o, `rgba(150,110,40,${a})`);
+    g.fillStyle = ex; g.fillRect(0, 0, TW, TH);
+    for (let i = 0; i < 2500; i++) { g.fillStyle = `rgba(90,70,30,${0.04*R()})`; g.fillRect(R()*TW, R()*TH, 1 + R()*3, 1); }   // fibres
+    for (let i = 0; i < 18; i++) {                   // foxing spots
+      const x = R()*TW, y = R()*TH, r = 1 + R()*5; g.fillStyle = `rgba(130,80,30,${0.08 + 0.15*R()})`;
+      g.beginPath(); g.arc(x, y, r, 0, 7); g.fill();
+    }
+  };
+  const gutter = (left) => {                         // binding shadow on the inner edge
+    const x0 = left ? 0 : TW, gr = g.createLinearGradient(x0, 0, left ? 90 : TW - 90, 0);
+    gr.addColorStop(0, 'rgba(60,40,10,0.35)'); gr.addColorStop(1, 'rgba(60,40,10,0)');
+    g.fillStyle = gr; g.fillRect(left ? 0 : TW - 90, 0, 90, TH);
+  };
+  if (f === 0) { manCover(g, R); return cv; }
+  paper('#e7dcb9', '170,130,40');
+  const p = manPage();
+  if (f === 1 || f === 24) {                         // inside covers: warning notice / notes
+    if (f === 1) manLayout(p, [{ gap: 3 }, { warn: 'THIS MANUAL IS NOT A SUBSTITUTE FOR SOUND JUDGEMENT. IN SPACE, MISTAKES DO NOT SLOW DOWN.', title: 'NOTICE' },
+      { gap: 2 }, 'DISTRIBUTION: OG-1 PILOTS AND INSTRUCTORS ONLY. HANDLE VIA PILOT CHANNELS.', { gap: 1 },
+      'REPORT ERRORS ON AFTO FORM 22 TO THE FLIGHT MANUAL MANAGER, LUNAR OPERATIONS WING.', { gap: 1 },
+      'ORIGINAL 15 MARCH 1986', 'CHANGE 3 - 1 OCTOBER 1987', { gap: 6 }, { pre: ['ISSUED TO: ____________________', '', 'SERIAL:    ____________________'] }]);
+    else { manLayout(p, [{ h: 'NOTES' }]); for (let r = 0; r < 30; r++) for (let x = 0; x < MAN.COLS*MAN.CW; x += 3) manSet(p, MAN.ML + x, MAN.MT + (3 + r)*MAN.CH + 6); }
+  } else {
+    const n = f - 1;
+    manText(p, 'T.O. 1F-OG-1', 0, -1.2 | 0);
+    const items = MAN_PAGES[n - 1] ? MAN_PAGES[n - 1]() : [];
+    p.row = 1; manLayout(p, items);
+    const num = `- ${n} -`; manText(p, num, Math.floor((MAN.COLS - num.length)/2), MAN.ROWS + 1);
+    if (n % 2) manText(p, 'CHANGE 3', MAN.COLS - 8, MAN.ROWS + 1); else manText(p, 'CHANGE 3', 0, MAN.ROWS + 1);
+  }
+  manStrike(g, p, R);
+  gutter(f % 2 === 0);                               // fronts (right pages) bind on the left
+  if (f === 10) {                                    // a coffee ring
+    g.strokeStyle = 'rgba(120,70,20,0.18)'; g.lineWidth = 9; g.beginPath(); g.arc(560, 820, 110, 0.3, 5.9); g.stroke();
+    g.strokeStyle = 'rgba(120,70,20,0.1)'; g.lineWidth = 3; g.beginPath(); g.arc(560, 820, 98, 0, 7); g.stroke();
+  }
+  return cv;
+}
+// Strike the dots: round, soft-edged, ink density from the ribbon (per line) with a few dropouts. Double-struck
+// dots (headings) are darker and slightly offset.
+function manStrike(g, p, R) {
+  const s = MAN.TW/MAN.DW, buckets = [[], [], [], []];
+  for (let y = 0; y < MAN.DH; y++) {
+    const line = Math.max(0, Math.floor((y - MAN.MT)/MAN.CH)), band = p.ink[Math.min(p.ink.length - 1, line + 1)];
+    for (let x = 0; x < MAN.DW; x++) {
+      const v = p.dots[y*MAN.DW + x]; if (!v) continue;
+      if (R() < 0.015) continue;                     // a pin that did not strike
+      const d = clamp(band*(0.85 + 0.15*Math.sin(x*0.02 + line)) + (v === 2 ? 0.25 : 0) + (R() - 0.5)*0.2, 0.35, 1.2);
+      buckets[Math.min(3, Math.floor(d*3))].push([x, y, v]);
+    }
+  }
+  buckets.forEach((bk, i) => {
+    g.fillStyle = `rgba(28,26,34,${0.38 + 0.2*i})`;
+    g.beginPath();
+    for (const [x, y, v] of bk) {
+      const cx = (x + 0.5)*s, cy = (y + 0.5)*s, r = s*0.5;
+      g.moveTo(cx + r, cy); g.arc(cx, cy, r, 0, 7);
+      if (v === 2) { g.moveTo(cx + r + s*0.35, cy); g.arc(cx + s*0.35, cy, r, 0, 7); }
+    }
+    g.fill();
+  });
+}
+// The front cover: buff card, stencilled title, typed block, stamp, wear
+function manCover(g, R) {
+  const { TW, TH } = MAN;
+  g.fillStyle = '#c9b585'; g.fillRect(0, 0, TW, TH);
+  for (let i = 0; i < 20; i++) {
+    const x = R()*TW, y = R()*TH, r = 100 + R()*400, gr = g.createRadialGradient(x, y, 0, x, y, r);
+    gr.addColorStop(0, `rgba(${R() < 0.5 ? '90,70,30' : '235,220,180'},${0.08*R()})`); gr.addColorStop(1, 'rgba(0,0,0,0)');
+    g.fillStyle = gr; g.fillRect(0, 0, TW, TH);
+  }
+  for (let i = 0; i < 6000; i++) { g.fillStyle = `rgba(60,45,20,${0.06*R()})`; g.fillRect(R()*TW, R()*TH, 1 + R()*2, 1 + R()*2); }
+  // Worn edges and corners, and a crease
+  g.strokeStyle = 'rgba(70,50,20,0.35)'; g.lineWidth = 18; g.strokeRect(0, 0, TW, TH);
+  g.strokeStyle = 'rgba(255,245,215,0.12)'; g.lineWidth = 3; g.beginPath(); g.moveTo(0, TH*0.72); g.lineTo(TW, TH*0.69); g.stroke();
+  // Border rule
+  g.strokeStyle = 'rgba(25,22,18,0.85)'; g.lineWidth = 4; g.strokeRect(46, 46, TW - 92, TH - 92); g.lineWidth = 1.5; g.strokeRect(56, 56, TW - 112, TH - 112);
+  // Typed block at the top
+  g.fillStyle = 'rgba(25,22,18,0.9)'; g.font = 'bold 26px "Courier New", Courier, monospace'; g.textAlign = 'center';
+  g.fillText('T.O. 1F-OG-1', TW/2, 120); g.font = '22px "Courier New", Courier, monospace';
+  g.fillText("PILOT'S FLIGHT MANUAL", TW/2, 160);
+  // Stencilled title: heavy letters with stencil bridges, sprayed edge
+  const lines = [['HOW', 0.40], ['TO', 0.535], ['FLY', 0.67]];
+  g.font = 'bold 150px "Arial Black", "Helvetica Neue", Helvetica, Arial, sans-serif'; g.textBaseline = 'alphabetic';
+  const tmp = document.createElement('canvas'); tmp.width = TW; tmp.height = TH; const tg = tmp.getContext('2d');
+  tg.font = g.font; tg.fillStyle = '#1c1a17'; tg.textBaseline = 'alphabetic';
+  const bridges = { H: [0.5], O: [0.5], W: [0.5], F: [0.33], Y: [], T: [], L: [] };
+  for (const [word, fy] of lines) {
+    const tw = tg.measureText(word).width + (word.length - 1)*18; let x = TW/2 - tw/2;
+    for (const ch of word) {
+      const cw = tg.measureText(ch).width, by = TH*fy;
+      tg.globalCompositeOperation = 'source-over'; tg.fillText(ch, x, by);
+      tg.globalCompositeOperation = 'destination-out';
+      for (const b of bridges[ch] || []) tg.fillRect(x + cw*b - 5, by - 120, 10, 125);
+      x += cw + 18;
+    }
+  }
+  tg.globalCompositeOperation = 'destination-out';     // sprayed edge and wear
+  for (let i = 0; i < 9000; i++) { const a = R()*0.5; tg.fillStyle = `rgba(0,0,0,${a})`; tg.fillRect(R()*TW, TH*0.25 + R()*TH*0.5, 1 + R()*3, 1 + R()*3); }
+  g.drawImage(tmp, 0, 0);
+  // Bottom block and a rubber stamp
+  g.globalCompositeOperation = 'source-over'; g.fillStyle = 'rgba(25,22,18,0.9)';
+  g.font = '20px "Courier New", Courier, monospace'; g.textAlign = 'center';
+  g.fillText('ARMED PATROL CRAFT OG-1 "LANTERN"', TW/2, TH - 190);
+  g.fillText('CHANGE 3 - 1 OCTOBER 1987', TW/2, TH - 160);
+  g.font = '15px "Courier New", Courier, monospace'; g.fillText('THIS PUBLICATION SUPERSEDES ALL PREVIOUS ISSUES', TW/2, TH - 110);
+  g.save(); g.translate(TW*0.7, TH*0.765); g.rotate(-0.16);
+  g.strokeStyle = 'rgba(160,30,25,0.65)'; g.lineWidth = 5; g.strokeRect(-120, -34, 240, 62);
+  g.fillStyle = 'rgba(160,30,25,0.65)'; g.font = 'bold 34px "Courier New", Courier, monospace'; g.textAlign = 'center'; g.fillText('RESTRICTED', 0, 10);
+  g.globalCompositeOperation = 'destination-out';
+  for (let i = 0; i < 600; i++) { g.fillStyle = 'rgba(0,0,0,0.6)'; g.fillRect(-125 + R()*250, -40 + R()*75, 2, 2); }
+  g.restore();
+  // Coffee ring
+  g.strokeStyle = 'rgba(90,50,15,0.22)'; g.lineWidth = 8; g.beginPath(); g.arc(TW*0.24, TH*0.86, 85, 0.6, 5.6); g.stroke();
+}
+
+/* ---------- The booklet in 3D ---------- */
+const BOOK = { W: 0.17, H: 0.235, T: 0.0011, LEAVES: 12, root: null, inner: null, s: 0, anim: null, queue: 0,
+  vis: 0, open: false, fromMenu: false, cache: new Map(), down: null };
+function manTex(f) {
+  const C = BOOK.cache;
+  if (C.has(f)) { const e = C.get(f); C.delete(f); C.set(f, e); return e; }
+  const cv = manBuildFace(f), tex = new THREE.CanvasTexture(cv);
+  tex.colorSpace = THREE.SRGBColorSpace; tex.anisotropy = 8;
+  C.set(f, tex);
+  while (C.size > 8) { const [k, old] = C.entries().next().value; C.delete(k); old.dispose(); }
+  return tex;
+}
+const pageMat = () => new THREE.MeshStandardMaterial({ color: 0xd8d2c4, roughness: 0.95, metalness: 0, emissive: 0xffffff, emissiveIntensity: 0.12 });
+function setFace(mesh, f) {
+  if (mesh.userData.face === f) return;
+  mesh.userData.face = f;
+  mesh.visible = f !== null && f !== undefined;
+  if (!mesh.visible) return;
+  const t = manTex(f);
+  mesh.material.map = t; mesh.material.emissiveMap = t; mesh.material.needsUpdate = true;
+}
+function buildBook() {
+  const { W, H } = BOOK;
+  const root = new THREE.Group(), inner = new THREE.Group(); root.add(inner); scene.add(root);
+  root.visible = false;
+  const flat = new THREE.PlaneGeometry(W, H);
+  const left = new THREE.Mesh(flat, pageMat()); left.position.x = -W/2; inner.add(left);
+  const right = new THREE.Mesh(flat, pageMat()); right.position.x = W/2; inner.add(right);
+  // Page blocks (the thick stack of leaves on each side) and the card covers under them
+  const edgeMat = new THREE.MeshStandardMaterial({ color: 0xd9cba0, roughness: 1, emissive: 0xd9cba0, emissiveIntensity: 0.12 });
+  const boardMat = new THREE.MeshStandardMaterial({ color: 0xa8955f, roughness: 0.95, emissive: 0xa8955f, emissiveIntensity: 0.1 });
+  const blockL = new THREE.Mesh(new THREE.BoxGeometry(W, H, 1), edgeMat); blockL.position.x = -W/2; inner.add(blockL);
+  const blockR = new THREE.Mesh(new THREE.BoxGeometry(W, H, 1), edgeMat); blockR.position.x = W/2; inner.add(blockR);
+  const bw = W + 0.004, bh = H + 0.007, bt = 0.0022;
+  const boardL = new THREE.Mesh(new THREE.BoxGeometry(bw, bh, bt), boardMat); boardL.position.set(-bw/2, 0, -bt/2); inner.add(boardL);
+  const boardR = new THREE.Mesh(new THREE.BoxGeometry(bw, bh, bt), boardMat); boardR.position.set(bw/2, 0, -bt/2); inner.add(boardR);
+  // Staples, seen at the centre spread of a saddle-stitched booklet
+  const stapleMat = new THREE.MeshStandardMaterial({ color: 0x9aa0a6, metalness: 0.9, roughness: 0.35 });
+  const staples = new THREE.Group();
+  for (const y of [-H*0.28, H*0.28]) { const st = new THREE.Mesh(new THREE.BoxGeometry(0.0016, 0.022, 0.0008), stapleMat); st.position.y = y; staples.add(st); }
+  inner.add(staples);
+  // The turning leaf: front and back share one bent geometry (the back with mirrored U)
+  const geoF = new THREE.PlaneGeometry(W, H, 24, 1), geoB = geoF.clone();
+  const uv = geoB.attributes.uv; for (let i = 0; i < uv.count; i++) uv.setX(i, 1 - uv.getX(i));
+  geoB.setAttribute('position', geoF.attributes.position);
+  const flipF = new THREE.Mesh(geoF, pageMat()), flipB = new THREE.Mesh(geoB, pageMat());
+  flipB.material.side = THREE.BackSide; inner.add(flipF, flipB);
+  flipF.visible = flipB.visible = false;
+  Object.assign(BOOK, { root, inner, left, right, blockL, blockR, boardL, boardR, staples, flipF, flipB, geoF, geoB,
+    hits: [left, right, flipF, flipB, blockL, blockR, boardL, boardR] });
+  for (const m of BOOK.hits) m.renderOrder = 2;
+  bookLayout();
+}
+// Faces shown at spread s: left = back of leaf s-1, right = front of leaf s (the back cover's inside after the last)
+const bookRightFace = s => s < BOOK.LEAVES ? 2*s : 24;
+const bookLeftFace = s => s > 0 ? 2*s - 1 : null;
+// Bend the turning leaf: hinge angle th (0 flat right .. PI flat left); the free edge lags behind the hinge
+function bendLeaf(th, dir, z0) {
+  const { W } = BOOK, pos = BOOK.geoF.attributes.position, n = 25, c = 0.55*Math.sin(th)*dir;
+  const xs = [0], zs = [0], du = W/(n - 1);
+  for (let i = 1; i < n; i++) {
+    const u = (i - 0.5)/(n - 1), ph = th - c*u*u*1.3;
+    xs.push(xs[i - 1] + Math.cos(ph)*du); zs.push(zs[i - 1] + Math.sin(ph)*du);
+  }
+  // PlaneGeometry vertices: rows of n along x, from -W/2 to +W/2
+  for (let k = 0; k < pos.count; k++) {
+    const col = k % n;
+    pos.setX(k, xs[col]); pos.setZ(k, z0 + zs[col]);
+  }
+  pos.needsUpdate = true; BOOK.geoF.computeVertexNormals(); BOOK.geoB.attributes.normal = BOOK.geoF.attributes.normal;
+  BOOK.geoF.computeBoundingSphere(); BOOK.geoB.boundingSphere = BOOK.geoF.boundingSphere;
+}
+function bookLayout() {
+  const { T, LEAVES } = BOOK, a = BOOK.anim;
+  let s = BOOK.s, nL, nR;
+  if (a) {
+    const i = a.leaf;                                // the leaf in the air belongs to neither stack
+    nL = i; nR = LEAVES - i - 1;
+    setFace(BOOK.left, bookLeftFace(i)); setFace(BOOK.right, bookRightFace(i + 1));
+    setFace(BOOK.flipF, 2*i); setFace(BOOK.flipB, 2*i + 1);
+    BOOK.flipF.visible = BOOK.flipB.visible = true;
+  } else {
+    nL = s; nR = LEAVES - s;
+    setFace(BOOK.left, bookLeftFace(s)); setFace(BOOK.right, bookRightFace(s));
+    BOOK.flipF.visible = BOOK.flipB.visible = false;
+  }
+  const hL = Math.max(1e-5, nL*T), hR = Math.max(1e-5, nR*T);
+  BOOK.blockL.scale.z = hL; BOOK.blockL.position.z = hL/2; BOOK.blockL.visible = nL > 0;
+  BOOK.blockR.scale.z = hR; BOOK.blockR.position.z = hR/2; BOOK.blockR.visible = nR > 0;
+  BOOK.left.position.z = hL + 0.0002; BOOK.right.position.z = hR + 0.0002;
+  if (!(nL > 0) && BOOK.left.userData.face === null) BOOK.left.visible = false;
+  BOOK.boardL.visible = nL > 0;
+  BOOK.staples.visible = !a && s === LEAVES/2;
+  BOOK.staples.position.z = Math.max(hL, hR) + 0.0006;
+  BOOK.hingeZ = Math.max(hL, hR) + 0.0004;
+}
+function bookFlip(dir) {
+  if (!BOOK.root) return;
+  BOOK.queue = clamp(BOOK.queue + dir, -BOOK.LEAVES, BOOK.LEAVES);
+}
+function bookStartNext() {
+  if (BOOK.anim || !BOOK.queue) return;
+  const dir = Math.sign(BOOK.queue);
+  if ((dir > 0 && BOOK.s >= BOOK.LEAVES) || (dir < 0 && BOOK.s <= 0)) { BOOK.queue = 0; return; }
+  BOOK.queue -= dir;
+  BOOK.anim = { dir, t: 0, leaf: dir > 0 ? BOOK.s : BOOK.s - 1 };
+  sfx.pageTurn && sfx.pageTurn();
+  bookLayout();
+}
+function toggleManual(fromMenu = false) {
+  if (!BOOK.root) buildBook();
+  BOOK.open = !BOOK.open;
+  if (BOOK.open) {
+    BOOK.fromMenu = fromMenu; BOOK.root.visible = true;
+    // Reprint on opening, so the key names follow any rebinding
+    for (const t of BOOK.cache.values()) t.dispose();
+    BOOK.cache.clear();
+    for (const m of [BOOK.left, BOOK.right, BOOK.flipF, BOOK.flipB]) m.userData.face = undefined;
+    bookLayout();
+    if (fromMenu) missionsEl.style.display = 'none';
+    sfx.pageTurn && sfx.pageTurn(true);
+    // Warm the neighbouring faces in the background
+    setTimeout(() => { for (const f of [bookRightFace(BOOK.s + 1), bookLeftFace(BOOK.s + 1)]) if (f !== null) manTex(f); }, 300);
+  } else if (BOOK.fromMenu) { BOOK.fromMenu = false; missionsEl.style.display = 'flex'; }
+}
+// Per frame: raise or lower the booklet, turn leaves, centre it when closed
+function updateBook(dt) {
+  if (!BOOK.root) return;
+  BOOK.vis = clamp(BOOK.vis + (BOOK.open ? 1 : -1)*dt/0.45, 0, 1);
+  if (BOOK.vis <= 0 && !BOOK.open) { BOOK.root.visible = false; return; }
+  const e = BOOK.vis < 0.5 ? 2*BOOK.vis*BOOK.vis : 1 - 2*(1 - BOOK.vis)**2;
+  const t = performance.now()/1000;
+  // Held in front of the panel, tilted toward the eye, with a slight unsteady hand
+  BOOK.root.position.set(0.0 + 0.002*Math.sin(t*0.7), -0.42 + 0.43*e + 0.0015*Math.sin(t*1.1), -0.25 - 0.045*e);
+  BOOK.root.rotation.set(-1.15 + 0.85*e, 0.01*Math.sin(t*0.5), 0.004*Math.sin(t*0.8));
+  bookStartNext();
+  const a = BOOK.anim;
+  if (a) {
+    a.t = Math.min(1, a.t + dt/0.6);
+    const k = a.t < 0.5 ? 2*a.t*a.t : 1 - 2*(1 - a.t)**2;
+    const th = a.dir > 0 ? Math.PI*k : Math.PI*(1 - k);
+    bendLeaf(th, a.dir, BOOK.hingeZ);
+    if (a.t >= 1) { BOOK.s += a.dir; BOOK.anim = null; bookLayout();
+      setTimeout(() => { for (const f of [bookRightFace(Math.min(BOOK.LEAVES, BOOK.s + 1)), bookLeftFace(Math.min(BOOK.LEAVES, BOOK.s + 1)), bookLeftFace(BOOK.s - 1 < 0 ? 0 : BOOK.s - 1)]) if (f !== null) manTex(f); }, 50); }
+  }
+  // Closed at either end: slide so the closed booklet sits in the middle
+  const tx = BOOK.s === 0 && !a ? -BOOK.W/2 : BOOK.s === BOOK.LEAVES && !a ? BOOK.W/2 : 0;
+  BOOK.inner.position.x += (tx - BOOK.inner.position.x)*Math.min(1, dt*8);
+}
+// Taps and swipes on the booklet. Capture phase, so a tap on the pages never fires a weapon.
+function bookHit(e) {
+  if (!BOOK.root || !BOOK.open || BOOK.vis < 0.8) return null;
+  ndc.set(e.clientX/window.innerWidth*2 - 1, -(e.clientY/window.innerHeight)*2 + 1);
+  raycaster.setFromCamera(ndc, camera);
+  const h = raycaster.intersectObjects(BOOK.hits.filter(m => m.visible), false)[0];
+  return h ? BOOK.inner.worldToLocal(h.point.clone()) : null;
+}
+window.addEventListener('pointerdown', e => {
+  if (e.target !== canvas) return;
+  const p = bookHit(e);
+  if (!p) { if (BOOK.open && BOOK.fromMenu) { toggleManual(); e.stopImmediatePropagation(); } return; }   // from the menu: tap beside it to close
+  BOOK.down = { x: e.clientX, y: e.clientY, side: p.x };
+  e.stopImmediatePropagation(); e.preventDefault();
+}, true);
+window.addEventListener('pointerup', e => {
+  if (!BOOK.down) return;
+  const d = BOOK.down; BOOK.down = null;
+  const dx = e.clientX - d.x;
+  if (Math.abs(dx) > 40) bookFlip(dx < 0 ? 1 : -1);  // swipe left: next spread
+  else bookFlip(d.side >= 0 ? 1 : -1);               // tap the right page: next; the left: previous
+  e.stopImmediatePropagation();
+}, true);
+window.addEventListener('keydown', e => {
+  if (rebinding) return;
+  const flightLive = started && !uiOverlay && !menuOpen && !hangarOpen;
+  if (e.code === bindings.manual && !e.repeat && (flightLive || BOOK.open)) { toggleManual(false); e.preventDefault(); e.stopImmediatePropagation(); return; }
+  if (!BOOK.open) return;
+  const next = e.code === 'BracketRight' || (!flightLive && e.code === 'ArrowRight');
+  const prev = e.code === 'BracketLeft' || (!flightLive && e.code === 'ArrowLeft');
+  if (next || prev) { bookFlip(next ? 1 : -1); e.preventDefault(); e.stopImmediatePropagation(); return; }
+  if (e.code === 'Escape') { toggleManual(); e.preventDefault(); e.stopImmediatePropagation(); }
+}, true);
+
 /* ================= MAIN LOOP ================= */
 function step(dt) {
   const c = controlState();
@@ -5305,6 +6021,7 @@ function frame(now) {
   animateCockpit(dt);
   uiAcc += dt;
   if (uiAcc > 0.066) { uiAcc = 0; updateDisplays(); }
+  updateBook(dt);
   audioFrame();
   renderer.render(scene, camera);
 }
