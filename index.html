@@ -4898,7 +4898,7 @@ function briefSounds() {
 function briefAdvance() {
   if (!brief.active) return;
   if (brief.t < brief.end) { brief.t = brief.end; return; }   // first press: show everything
-  brief.active = false; briefEl.style.display = 'none';
+  brief.active = false; briefEl.style.display = 'none'; uiOverlay = false;   // the briefing no longer blocks the cockpit
   const done = brief.done; brief.done = null;
   if (done) done();
 }
@@ -5218,7 +5218,7 @@ function openHangar() {
   refreshHangar();
 }
 function launch() {
-  hangarOpen = false;
+  hangarOpen = false; uiOverlay = false;             // nothing may still be holding the cockpit when the flight starts
   hangarEl.style.display = 'none';
   restartAfterDeath();                               // fresh ship and scenario with this loadout
   if (!started) started = true;
