@@ -3284,6 +3284,10 @@ function drawShip(g, W, H, idx) {
 const SCOPE_FOV0 = 4 * Math.PI/180;
 // Telescope magnification steps (RNG softkey on the SCOPE page): field of view = 4 deg / zoom
 const SCOPE_ZOOMS = [1, 4, 16, 64, 256];
+// Finest detail the telescope resolves (radians): optics plus pointing jitter during the exposure. The thermal
+// channel works at about 10 um wavelength, so it resolves several times less. At x256 one element is a few pixels.
+const SCOPE_RES = 15e-6, SCOPE_RES_IR = 40e-6;
+let scopeSilCv = null;
 let scopeZoom = 0;
 // Sunlight comes from a fixed direction in the Earth-centred frame (the run is short next to a year)
 const SUN_DIR = new THREE.Vector3(0.83, 0.52, 0.2).normalize();
@@ -3632,15 +3636,42 @@ function drawScope(g, W, H, idx) {
       gr.addColorStop(0, `rgba(255,255,255,${0.15 + 0.3*heat})`); gr.addColorStop(1, 'rgba(0,0,0,0)');
       g.fillStyle = gr; g.beginPath(); g.arc(p.x, p.y, kk*0.8, 0, Math.PI*2); g.fill();
     }
+    // Image quality: the sensor resolves SCOPE_RES (radians; coarser in IR, longer wavelength). The model is drawn
+    // into a canvas with one pixel per resolution element, speckled with sensor noise, then enlarged with a blur
+    // and a little pointing jitter. Far away an object is a few soft cells; only up close does its shape read.
+    let resPx = Math.max(1.2, (irOn ? SCOPE_RES_IR : SCOPE_RES)/(SCOPE_FOV/R));     // screen px per element
+    resPx = Math.max(resPx, kk*1.4/250);             // very close: cap the work canvas (the frame is filled anyway)
+    const S = Math.ceil(kk*1.4/resPx) + 6;
+    if (!scopeSilCv) scopeSilCv = document.createElement('canvas');
+    if (scopeSilCv.width !== S) { scopeSilCv.width = S; scopeSilCv.height = S; }
+    const sg = scopeSilCv.getContext('2d'), sc = S/2;
+    sg.clearRect(0, 0, S, S);
     for (const fc of draw) {
       let v;
       if (irOn) v = (55 + 200*heat*(fc.tone < 1 ? 1 : 0.75))*(0.8 + 0.2*fc.nz);     // radiators glow hottest; a cold hull is dark
       else v = 255*Math.min(1, 0.06 + 0.8*fc.lam*fc.tone);
       const c = clamp(v, 0, 255) | 0;
-      g.fillStyle = irOn ? `rgb(${c},${c},${c})` : `rgb(${c*0.92|0},${c*0.97|0},${c})`;
-      g.strokeStyle = g.fillStyle; g.lineWidth = 0.6;   // hide hairline seams between faces
-      g.beginPath(); fc.pts.forEach(([x, y], i) => i ? g.lineTo(x, y) : g.moveTo(x, y)); g.closePath(); g.fill(); g.stroke();
+      sg.fillStyle = irOn ? `rgb(${c},${c},${c})` : `rgb(${c*0.92|0},${c*0.97|0},${c})`;
+      sg.strokeStyle = sg.fillStyle; sg.lineWidth = 0.6/resPx + 0.2;   // hide hairline seams between faces
+      sg.beginPath();
+      fc.pts.forEach(([x, y], i) => { const X = sc + (x - p.x)/resPx, Y = sc + (y - p.y)/resPx; i ? sg.lineTo(X, Y) : sg.moveTo(X, Y); });
+      sg.closePath(); sg.fill(); sg.stroke();
     }
+    try {                                            // sensor noise, stronger the fewer elements the object covers
+      const img = sg.getImageData(0, 0, S, S), dd = img.data, amp = clamp(60/Math.sqrt(kk/resPx), 8, 45);
+      for (let i = 0; i < dd.length; i += 4) {
+        if (dd[i + 3] === 0) continue;
+        const nse = (Math.random() - 0.5)*2*amp;
+        dd[i] = clamp(dd[i] + nse, 0, 255); dd[i + 1] = clamp(dd[i + 1] + nse, 0, 255); dd[i + 2] = clamp(dd[i + 2] + nse, 0, 255);
+      }
+      sg.putImageData(img, 0, 0);
+    } catch (e) { /* no pixel access: skip the noise */ }
+    const jit = resPx*0.35, jx = (Math.random() - 0.5)*jit, jy = (Math.random() - 0.5)*jit;
+    g.save();
+    g.imageSmoothingEnabled = true;
+    g.filter = `blur(${(resPx*0.45).toFixed(1)}px)`;
+    g.drawImage(scopeSilCv, p.x - sc*resPx + jx, p.y - sc*resPx + jy, S*resPx, S*resPx);
+    g.restore();
     return { p, k };
   };
   const mv = moonVel(simT), mpp = moonPos(simT);
