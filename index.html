@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OG — Cockpit prototype v0.4.0</title>
+<title>OG — Cockpit prototype v0.5.0</title>
 <style>
   html, body { margin:0; height:100%; background:#000; overflow:hidden;
     font-family: ui-monospace, Menlo, Consolas, monospace; color:#cfd8c0; }
@@ -90,7 +90,7 @@
 </head>
 <body>
 <canvas id="gl"></canvas>
-<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.4.0</span></div>
+<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.5.0</span></div>
 <div id="hangar"><div class="load" id="hangarLoad">LOADING SHIP</div>
   <div class="hint">DRAG TO ORBIT · WHEEL TO ZOOM · CLICK A HARDPOINT TO CHOOSE ITS MODULE</div>
   <div class="panel"><h2>HANGAR</h2><div class="sub">LOADOUT · SELECT A HARDPOINT, THEN A MODULE</div>
@@ -5354,14 +5354,23 @@ function manFig(p, rows, draw) {
   const g = cv.getContext('2d');
   g.strokeStyle = g.fillStyle = '#000'; g.lineWidth = 1; g.lineCap = 'round';
   g.font = '7px monospace';
-  draw(g, MAN.ML, y0, MAN.DW - MAN.ML - 12, h, (s, x, y) => {     // labels in the printer face, at a dot position
-    [...String(s).toUpperCase()].forEach((ch, i) => {
-      const gl = FONT57[ch] || FONT57['?'];
-      for (let r = 0; r < 7; r++) for (let c = 0; c < 5; c++) if (gl[r] & (16 >> c)) manSet(p, Math.round(x) + i*6 + c, Math.round(y) + r);
-    });
+  const glyphs = (s, x, y, v = 1) => [...String(s).toUpperCase()].forEach((ch, i) => {
+    const gl = FONT57[ch] || FONT57['?'];
+    for (let r = 0; r < 7; r++) for (let c = 0; c < 5; c++) if (gl[r] & (16 >> c)) manSet(p, Math.round(x) + i*6 + c, Math.round(y) + r, v);
   });
+  const tags = [];
+  draw(g, MAN.ML, y0, MAN.DW - MAN.ML - 12, h, (s, x, y) => glyphs(s, x, y),     // labels in the printer face
+    (s, x, y) => tags.push([s, x, y]));                                          // numbered callout boxes
   const d = g.getImageData(0, 0, MAN.DW, MAN.DH).data;
   for (let i = 0; i < MAN.DW*MAN.DH; i++) if (d[i*4 + 3] > 110) p.dots[i] = Math.max(p.dots[i], 1);
+  // Callouts: a cleared box with a border and the number, centred on the item
+  for (const [s, cx, cy] of tags) {
+    const tw = s.length*6 - 1, x0 = Math.round(cx - tw/2) - 2, y0 = Math.round(cy - 3.5) - 2, x1 = x0 + tw + 3, y1 = y0 + 10;
+    for (let yy = y0; yy <= y1; yy++) for (let xx = x0; xx <= x1; xx++) if (xx >= 0 && yy >= 0 && xx < MAN.DW && yy < MAN.DH) p.dots[yy*MAN.DW + xx] = 0;
+    for (let xx = x0; xx <= x1; xx++) { manSet(p, xx, y0); manSet(p, xx, y1); }
+    for (let yy = y0; yy <= y1; yy++) { manSet(p, x0, yy); manSet(p, x1, yy); }
+    glyphs(s, x0 + 2, y0 + 2, 2);
+  }
   p.row += rows;
 }
 // Layout of one page from a list of items: strings (paragraphs), {h} heading, {b} bullet, {kv} table, {warn},
@@ -5409,7 +5418,7 @@ const figArrow = (g, x0, y0, x1, y1, hd = 4) => {
 const figDash = (g, pts, on = 2, off = 2) => { g.setLineDash([on, off]); g.beginPath(); pts.forEach(([x, y], i) => i ? g.lineTo(x, y) : g.moveTo(x, y)); g.stroke(); g.setLineDash([]); };
 
 /* ---------- Page content ----------
-   Faces: 0 cover, 1 inside front cover, 2..23 pages 1..22, 24 inside back cover. Built when first needed, so
+   Faces: 0 cover, 1 inside front cover, 2..25 pages 1..24, 26 inside back cover. Built when first needed, so
    key names follow the current bindings. Short, technical, in the style of a 1980s flight manual. */
 const kn = id => codeName(bindings[id]).replace('Mouse Left', 'LMB').replace('Mouse Right', 'RMB').replace('Mouse Middle', 'MMB')
   .replace('ArrowUp', 'UP').replace('ArrowDown', 'DOWN').replace('ArrowLeft', 'LEFT').replace('ArrowRight', 'RIGHT')
@@ -5419,28 +5428,27 @@ const MAN_PAGES = [
   // 1 title and contents
   () => [{ gap: 1 }, { pre: ['        PILOT\'S FLIGHT MANUAL'] }, { gap: 1 },
     { pre: ['   ARMED PATROL CRAFT  OG-1 "LANTERN"'] }, { gap: 2 },
-    'THIS MANUAL CONTAINS THE INFORMATION NECESSARY FOR SAFE AND EFFECTIVE OPERATION OF THE OG-1. READ IT BEFORE FLIGHT. KEEP IT IN THE COCKPIT.',
+    'THIS MANUAL GIVES THE DATA THAT YOU MUST KNOW TO FLY THE OG-1. READ ALL OF THIS MANUAL BEFORE YOUR FIRST FLIGHT. KEEP THIS MANUAL IN THE COCKPIT.',
     { gap: 1 }, { h: 'CONTENTS' },
-    { kv: [['SECTION I', 'THE SHIP ........... 2'], ['SECTION II', 'COCKPIT ............ 4'], ['SECTION III', 'FLIGHT ............. 6'],
-      ['SECTION IV', 'SENSORS ........... 11'], ['SECTION V', 'WEAPONS ........... 14'], ['SECTION VI', 'THREATS ........... 17'],
-      ['SECTION VII', 'SYSTEMS ........... 18'], ['SECTION VIII', 'LOADOUT ........... 20'], ['SECTION IX', 'QUICK REFERENCE ... 21'],
-      ['', 'EMERGENCIES ....... 22']], w: 13 },
-    { gap: 2 }, 'CHANGE 3 INCORPORATES ECM, VLS AND LASER POINT DEFENCE MODULES. DESTROY SUPERSEDED PAGES.'],
+    { kv: [['SECTION I', 'THE SHIP ........... 2'], ['SECTION II', 'COCKPIT ............ 4'], ['SECTION III', 'FLIGHT ............. 7'],
+      ['SECTION IV', 'SENSORS ........... 12'], ['SECTION V', 'WEAPONS ........... 15'], ['SECTION VI', 'THREATS ........... 18'],
+      ['SECTION VII', 'SYSTEMS ........... 19'], ['SECTION VIII', 'LOADOUT ........... 21'], ['SECTION IX', 'QUICK REFERENCE ... 22'],
+      ['', 'EMERGENCIES ....... 23'], ['', 'ABBREVIATIONS ..... 24']], w: 13 },
+    { gap: 1 }, 'THIS MANUAL IS WRITTEN IN SIMPLIFIED TECHNICAL ENGLISH (ASD-STE100).',
+    { gap: 1 }, 'CHANGE 3 ADDS THE ECM, VLS AND LASER POINT DEFENCE MODULES. DISCARD THE PAGES THAT CHANGE 3 REPLACES.'],
   // 2 the ship
   () => [{ h: 'SECTION I - THE SHIP' },
-    'SINGLE-SEAT ORBITAL COMBAT CRAFT. FUSION REACTOR, FUSION-HEATED MAIN DRIVE, COLD-GAS RCS. NO WINGS. NO AIR. NEWTON FLIES THIS SHIP; YOU ADVISE HIM.',
+    'THE OG-1 IS A SINGLE-SEAT COMBAT SPACECRAFT. A FUSION REACTOR SUPPLIES THE POWER.',
     { gap: 1 },
-    { kv: [['LENGTH', '24 M'], ['DRY HULL', `${SHIP.hullDry} KG + MODULES`], ['MAIN PROP', `${SHIP.mainProp0.toFixed(0)} KG`],
-      ['RCS PROP', `${SHIP.rcsProp0} KG`], ['MAIN THRUST', `${SHIP.mainThrust/1e3} KN`], ['MAIN ISP', `${SHIP.mainIsp} S`],
-      ['DELTA-V', '7500 M/S WITH 2 DROP TANKS'], ['REACTOR', `${POWER.reactor/1e3} KW ELECTRIC`], ['CAPACITOR', `${POWER.battCap/1e6} MJ`],
-      ['HULL TEMP', `${THERM.tMax} K MAX`]] },
-    { gap: 1 }, { h: 'AXES' },
-    { b: 'NOSE IS FORWARD. PITCH, YAW AND ROLL ARE ABOUT THE SHIP, NOT THE ORBIT.' },
-    { b: 'THE MAIN DRIVE PUSHES ALONG THE NOSE ONLY. POINT FIRST, THEN BURN.' },
-    { b: 'RCS TRANSLATES IN ALL SIX DIRECTIONS AT LOW THRUST. USE IT FOR THE LAST METRES.' },
-    { gap: 1 },
-    { warn: 'THERE IS NO DRAG. A RATE OR VELOCITY NOT CANCELLED STAYS. LEAVE RCS STAB ON UNLESS YOU NEED IT OFF.' }],
-  // 3 ship diagram
+    { kv: [['LENGTH', '24 M'], ['HULL MASS', `${SHIP.hullDry} KG (NO MODULES)`], ['MAIN PROP', `${SHIP.mainProp0.toFixed(0)} KG`],
+      ['RCS PROP', `${SHIP.rcsProp0} KG`], ['MAIN THRUST', `${SHIP.mainThrust/1e3} KN`], ['DELTA-V', '7500 M/S WITH 2 DROP TANKS'],
+      ['REACTOR', `${POWER.reactor/1e3} KW ELECTRICAL`], ['CAPACITOR', `${POWER.battCap/1e6} MJ`], ['HULL TEMP', `${THERM.tMax} K MAXIMUM`]] },
+    { gap: 1 }, { h: 'AXES AND THRUST' },
+    { b: 'THE NOSE IS THE FRONT OF THE SHIP. PITCH, YAW AND ROLL TURN THE SHIP ABOUT ITS OWN AXES.' },
+    { b: 'THE MAIN DRIVE PUSHES THE SHIP IN THE DIRECTION OF THE NOSE ONLY. TURN THE SHIP FIRST. THEN START THE BURN.' },
+    { b: 'THE RCS MOVES THE SHIP IN SIX DIRECTIONS WITH LOW THRUST. USE IT FOR SMALL CORRECTIONS.' },
+    { gap: 1 }, { warn: 'THERE IS NO AIR IN SPACE. A MOVEMENT DOES NOT STOP BY ITSELF. RCS STAB STOPS TURNS ONLY.', title: 'NOTE' }],
+  // 3 general arrangement
   () => [{ h: 'GENERAL ARRANGEMENT (TOP VIEW)' },
     { fig: (g, x, y, w, h, lab) => {
       const k = Math.min((w - 10)/25, (h - 26)/12), ox = x + w/2 - 0.6*k, oy = y + h/2;
@@ -5449,141 +5457,142 @@ const MAN_PAGES = [
       poly(SHIP_SIL.hull[0]); for (const r of SHIP_SIL.radiators) poly(r);
       const box2 = (u0, u1) => { const [a2, b2] = P([u0, -0.9]), [c2, d2] = P([u1, 0.9]); g.strokeRect(a2, b2, c2 - a2, d2 - b2); };
       box2(-9.7, -7.7); box2(-7.3, -2.6); box2(0.6, 5.8); box2(9, 11.4);
-      // Leaders: from a point on the ship to a label in the top or bottom row
       const call = (u, v, tx, top, s2) => { const [a2, b2] = P([u, v]), ty = top ? y : y + h - 7, lx = tx + s2.length*3;
         g.beginPath(); g.moveTo(a2, b2); g.lineTo(lx, top ? ty + 9 : ty - 2); g.stroke(); lab(s2, tx, ty); };
       call(-11, 0, x, true, 'NOSE'); call(-5, -0.9, x + 36, true, 'CAPACITORS'); call(3.2, -0.9, x + 112, true, 'REACTOR');
       call(10.2, -1.6, x + 166, true, 'DRIVE');
       call(-8.7, 0.9, x, false, 'SCOPE'); call(-0.1, 1.7, x + 40, false, 'PDC TURRETS'); call(6.8, 1.7, x + 116, false, 'PYLONS');
       call(9.8, 4.5, x + 170, false, 'RADIATOR');
-}, rows: 13 }, { gap: 1 },
-    { kv: [['SPINAL', 'RAILGUN OR TORPEDO TUBE'], ['NOSE GIMBAL', 'LASER OR RADAR'], ['TURRETS (2)', 'PDC, LASER PD OR INTERCEPTORS'],
+    }, rows: 13 }, { gap: 1 },
+    { kv: [['SPINAL MOUNT', 'RAILGUN OR TORPEDO TUBE'], ['NOSE GIMBAL', 'LASER OR RADAR'], ['TURRETS (2)', 'PDC, LASER PD OR INTERCEPTORS'],
       ['PYLONS (2)', 'DROP TANK, VLS, CAPACITOR OR ECM POD']] },
     { gap: 1 },
-    'RADIATORS FOLD ALONG THE HULL WHEN STOWED. STOWED, THEY SHED 7% OF THE HEAT AND SHOW 7% OF THE SIGNATURE.',
+    'WHEN STOWED, THE RADIATORS RELEASE ONLY 7 PERCENT OF THE HEAT. THIS IS AT THE SAME HULL TEMPERATURE.',
     { gap: 1 },
-    { warn: 'DROP TANKS HOLD 2500 M/S. JETTISONED EARLY, THE REMAINING PROPELLANT IS LOST.', title: 'CAUTION' }],
-  // 4 cockpit layout
+    { warn: 'DO NOT JETTISON FULL DROP TANKS. THE PROPELLANT IN THE TANKS IS LOST. THE SHIP USES THE TANKS FIRST.', title: 'CAUTION' }],
+  // 4 cockpit drawing
   () => [{ h: 'SECTION II - COCKPIT' },
-    { fig: (g, x, y, w, h, lab) => {
-      const s = w/2.2, X = v => x + w/2 + v*s, Y = v => y + 8 - (v - 0.5)*s*0.9;
-      const r = (cx, cy, ww, hh, t) => { g.strokeRect(X(cx - ww/2), Y(cy + hh/2), ww*s, hh*s*0.9); lab(t, X(cx) - t.length*3, Y(cy) - 3); };
-      for (const xx of [-0.82, -0.27, 0.27, 0.82]) { g.beginPath(); g.arc(X(xx*1.2), Y(0.52), 2, 0, 7); g.stroke(); }
-      lab('WARNING LAMPS', X(0) - 39, Y(0.62) - 3);
-      r(-0.54, 0.302, 0.5, 0.306, 'MFD 1'); r(0, 0.302, 0.5, 0.306, 'MFD 2'); r(0.54, 0.302, 0.5, 0.306, 'MFD 3');
-      r(-0.45, -0.11, 0.6, 0.367, 'MAP 4'); r(0.45, -0.11, 0.6, 0.367, 'MFD 5');
-      g.beginPath(); g.arc(X(0), Y(-0.04), 0.115*s, 0, 7); g.stroke(); lab('BALL', X(0) - 12, Y(-0.04) - 3);
-      r(0, -0.27, 0.22, 0.12, 'KEYPAD');
-      for (const xx of [-0.85, -0.57, -0.28, 0, 0.28, 0.57, 0.85]) g.strokeRect(X(xx) - 3, Y(-0.52) - 2, 6, 4);
-      lab('SWITCHES', X(0) - 24, Y(-0.6) - 3);
-    }, rows: 16 },
-    { kv: [['LAMPS', 'OVERHEAT, BATT LOW, LASER ARMED, RAD STOWED, TGT FWD, SYS DAMAGE'], ['MFD 1-3, 5', 'SELECTABLE PAGES'],
-      ['MAP 4', 'DEDICATED 3D MAP'], ['BALL', 'ATTITUDE (NAVBALL)'], ['KEYPAD', 'TRACK NUMBER ENTRY'],
-      ['SWITCHES', 'RADIATORS, RCS STAB, LASER ARM, MASTER ARM, AUX']] },
-    { gap: 1 }, 'GUARDED SWITCHES: LIFT THE COVER, THEN THROW. TORP LAMP AND MUTE BUTTON SIT RIGHT OF MFD 5.'],
-  // 5 MFD operation
+    { fig: manCockpitFig, rows: 17 },
+    { pre: ['    FIGURE 2-1. INSTRUMENT PANEL'] }, { gap: 1 },
+    'THE KEY TO THE ITEM NUMBERS IS ON THE OPPOSITE PAGE.',
+    { gap: 1 }, { h: 'GUARDED SWITCHES' },
+    'THE LASER ARM AND MASTER ARM SWITCHES HAVE A COVER. TO SET A GUARDED SWITCH, LIFT THE COVER. THEN SET THE SWITCH.',
+    { gap: 1 }, { h: 'PANEL CONTROLS' },
+    'TOUCH OR CLICK A BUTTON OR A SWITCH TO OPERATE IT. KEYS ON THE KEYBOARD DO THE SAME FUNCTIONS. REFER TO SECTION IX.'],
+  // 5 cockpit key
+  () => [{ h: 'KEY TO FIGURE 2-1' },
+    { kv: [['1', 'BOOK - OPENS THIS MANUAL'], ['2', 'TEST - ALL LAMPS ON FOR 3 S'], ['3', 'RESET - ALL MFDS TO DEFAULT PAGES'],
+      ['4', 'JETT - JETTISONS THE DROP TANKS'], ['5', 'IR - SCOPE VIS / IR'], ['6', 'LEAD - LEAD HOLD ON / OFF'],
+      ['7', 'TORP LAMP - FLASHES FOR TORPEDOES'], ['8', 'MUTE - STOPS THE TORPEDO TONE'], ['9', 'PLACARD - MAX ACCEL 9 G'],
+      ['10', 'WARNING LAMPS (6)'], ['11', 'MFD 1 (TACTICAL)'], ['12', 'MFD 2 (SHIP)'], ['13', 'MFD 3 (ORBIT)'],
+      ['14', 'MFD 4 (MAP)'], ['15', 'MFD 5 (WEAPONS)'], ['16', 'MFD SOFTKEYS (5 PER MFD)'], ['17', 'MAP KEYS'],
+      ['18', 'NAVBALL'], ['19', 'KEYPAD AND DISPLAY'], ['20', 'BATTERY GAUGE (%)'], ['21', 'HULL TEMP GAUGE (K)'],
+      ['22', 'ELEC LOAD GAUGE (KW)'], ['23', 'MAIN THRUST GAUGE (%)'], ['24', 'DELTA-V GAUGE (M/S)'], ['25', 'HEAT OUT GAUGE (KW)'],
+      ['26', 'RADIATORS - DEPLOY / STOW'], ['27', 'RCS STAB - ON / OFF'], ['28', 'LASER ARM (GUARDED)'], ['29', 'MASTER ARM (GUARDED)'],
+      ['30', 'AUX PWR - NOT CONNECTED'], ['31', 'COMMS - NOT CONNECTED'], ['32', 'BEACON - NOT CONNECTED']], w: 4 }],
+  // 6 MFD operation
   () => [{ h: 'MFD OPERATION' },
     'EACH MFD HAS FIVE SOFTKEYS BELOW THE SCREEN:',
     { kv: [['PG+ / PG-', 'NEXT / PREVIOUS PAGE'], ['RNG', 'RANGE SCALE. ON SCOPE: ZOOM'], ['TGT', 'NEXT CONTACT'], ['PWR', 'SCREEN ON / OFF']] },
     { gap: 1 }, { h: 'PAGES' },
-    { kv: [['TACTICAL', 'CONTACTS AHEAD, THREATS, OWN SIGNATURE'], ['ORBIT', 'ELEMENTS: PE, AP, PERIOD'],
-      ['POWER/THERM', 'REACTOR, CAPACITOR, HULL TEMP'], ['WEAPONS', 'STATUS, AMMO, CONTACT LIST'],
+    { kv: [['TACTICAL', 'CONTACTS, THREATS, OWN SIGNATURE'], ['ORBIT', 'ORBIT DATA: PE, AP, PERIOD'],
+      ['POWER/THERM', 'REACTOR, CAPACITOR, HULL TEMP'], ['WEAPONS', 'STATUS, AMMUNITION, CONTACTS'],
       ['PROPULSION', 'PROPELLANT, DELTA-V, TURN RATES'], ['COMMS', 'MESSAGE LOG, DATALINK'],
       ['SHIP', 'MODULES, DAMAGE, TANKS'], ['SCOPE', 'TELESCOPE, VIS / IR'], ['DAMAGE', 'HULL AND SYSTEMS'],
-      ['CONTROLS', 'KEY REFERENCE']] },
-    { gap: 1 }, { h: 'MAP 4' },
-    { kv: [['VIEW', 'ORBIT / LOCAL'], ['ZM+ ZM-', 'ZOOM'], ['ROT', 'ROTATE 30 DEG'], ['TILT', 'CAMERA ELEVATION']] }],
-  // 6 flight controls
+      ['CONTROLS', 'KEY LIST']] },
+    { gap: 1 }, { h: 'MFD 4 (MAP)' },
+    'MFD 4 SHOWS ONLY THE MAP. ITS KEYS ARE:',
+    { kv: [['VIEW', 'ORBIT OR LOCAL VIEW'], ['ZM+ / ZM-', 'ZOOM IN / OUT'], ['ROT', 'TURN THE VIEW 30 DEG'], ['TILT', 'CHANGE THE VIEW ANGLE']] }],
+  // 7 flight controls
   () => [{ h: 'SECTION III - FLIGHT' }, { h: 'CONTROLS' },
-    { kv: [['PITCH', `${kn('pitchUp')} / ${kn('pitchDown')}`], ['YAW', `${kn('yawLeft')} / ${kn('yawRight')}`], ['ROLL', `${kn('rollLeft')} / ${kn('rollRight')}`],
+    { kv: [['PITCH UP/DN', `${kn('pitchUp')} / ${kn('pitchDown')}`], ['YAW L/R', `${kn('yawLeft')} / ${kn('yawRight')}`], ['ROLL L/R', `${kn('rollLeft')} / ${kn('rollRight')}`],
       ['FWD / AFT', `${kn('transFwd')} / ${kn('transAft')}`], ['LEFT / RIGHT', `${kn('transLeft')} / ${kn('transRight')}`],
       ['UP / DOWN', `${kn('transUp')} / ${kn('transDown')}`], ['MAIN DRIVE', `${kn('mainEngine')} (HOLD)`], ['RCS STAB', kn('rcsStab')],
       ['LEAD HOLD', kn('leadHold')]] },
-    { gap: 1 }, { h: 'ATTITUDE' },
-    'RCS FIRES IN PAIRS ON A 10.5 M ARM. RATES BUILD WHILE THE KEY IS HELD. RCS STAB DAMPS ALL RATES TO ZERO WHEN NO INPUT IS GIVEN.',
+    { gap: 1 }, { h: 'TURNS' },
+    'THE TURN RATE INCREASES WHILE YOU HOLD A KEY. WHEN RCS STAB IS ON AND YOU RELEASE ALL KEYS, THE RCS STOPS THE TURN.',
     { gap: 1 }, { h: 'REACTION WHEELS' },
-    'WHEN RCS PROPELLANT IS EXHAUSTED THE WHEELS TAKE OVER. 15% OF RCS TORQUE, TURN ONLY, UP TO 30 KW FROM THE CAPACITOR. NO POWER, NO TURN.',
+    'WHEN THE RCS PROPELLANT IS EMPTY, THE REACTION WHEELS TURN THE SHIP. THEY GIVE 15 PERCENT OF THE RCS TURN FORCE. THEY CANNOT MOVE THE SHIP.',
+    'THE WHEELS USE UP TO 30 KW. WITHOUT POWER, THEY DO NOT OPERATE.',
     { gap: 1 },
-    { warn: 'THE MAIN DRIVE PUSHES 20 KN. AT LIGHT LOADOUT THIS IS OVER 2.5 M/S2. DO NOT BURN TOWARD A CONTACT YOU INTEND TO MEET SLOWLY.', title: 'CAUTION' }],
-  // 7 orbital flight I
+    { warn: 'DO NOT BURN THE MAIN DRIVE TOWARD A NEAR CONTACT. THE CLOSING SPEED INCREASES QUICKLY.', title: 'CAUTION' }],
+  // 8 orbital flight
   () => [{ h: 'ORBITAL FLIGHT' },
     { fig: (g, x, y, w, h, lab) => {
-      const cx = x + w*0.42, cy = y + h/2, a = w*0.36, b = h*0.42;
+      const cx = x + w*0.42, cy = y + h/2 + 4, a = w*0.36, b = h*0.36;
       g.beginPath(); g.ellipse(cx, cy, a, b, 0, 0, 7); g.stroke();
       g.beginPath(); g.arc(cx - a*0.35, cy, 12, 0, 7); g.stroke(); lab('EARTH', cx - a*0.35 - 15, cy - 3);
       const sx = cx, sy = cy - b; g.fillRect(sx - 2, sy - 2, 4, 4);
       figArrow(g, sx, sy, sx + 30, sy); lab('PRO', sx + 32, sy - 3);
       figArrow(g, sx, sy, sx - 30, sy); lab('RETRO', sx - 64, sy - 3);
-      figArrow(g, sx, sy, sx, sy - 16); lab('RAD OUT', sx + 4, sy - 22);
-      figArrow(g, sx, sy, sx, sy + 16); lab('RAD IN', sx + 4, sy + 12);
+      figArrow(g, sx, sy, sx, sy - 14); lab('RADIAL OUT', sx + 4, sy - 20);
+      figArrow(g, sx, sy, sx, sy + 14); lab('RADIAL IN', sx + 4, sy + 10);
       lab('AP', cx + a + 3, cy - 3); lab('PE', cx - a - 14, cy - 3);
     }, rows: 13 },
-    { kv: [['PROGRADE', 'RAISES THE FAR SIDE (AP)'], ['RETROGRADE', 'LOWERS THE FAR SIDE'], ['RADIAL', 'ROTATES THE ORBIT'], ['NORMAL', 'CHANGES THE PLANE']] },
+    { kv: [['PROGRADE', 'RAISES THE OPPOSITE SIDE'], ['RETROGRADE', 'LOWERS THE OPPOSITE SIDE'], ['RADIAL', 'TURNS THE ORBIT'], ['NORMAL', 'CHANGES THE ORBIT PLANE']] },
     { gap: 1 },
-    'BURN AT PE TO MOVE AP; BURN AT AP TO MOVE PE. TO CATCH A TARGET AHEAD, DROP LOWER AND FASTER; TO WAIT FOR ONE BEHIND, GO HIGHER.',
-    { gap: 1 }, 'LOW ORBIT PERIOD IS ABOUT 92 MIN. ONE KM OF ALTITUDE IS WORTH ABOUT 0.5 M/S.'],
-  // 8 orbital flight II
-  () => [{ h: 'RENDEZVOUS AND TIME WARP' },
-    { b: 'SELECT THE TARGET (TGT). READ RNG, CL (CLOSING) AND LEAD ON TACTICAL.' },
-    { b: 'CLOSE AT NO MORE THAN 1/100 OF THE RANGE PER SECOND. 10 KM: 100 M/S.' },
-    { b: 'ABOVE 1 KM: STEER WITH THE MAIN DRIVE. BELOW: RCS ONLY.' },
-    { b: 'KILL RELATIVE VELOCITY ON THE TARGET MARKER OF THE BALL, THEN DRIFT IN.' },
+    'A BURN AT THE PE CHANGES THE AP. A BURN AT THE AP CHANGES THE PE.',
+    'TO GO NEAR A TARGET IN FRONT OF YOU, LOWER YOUR ORBIT. TO LET A TARGET BEHIND YOU COME NEAR, RAISE YOUR ORBIT.',
+    { gap: 1 }, 'IN LOW EARTH ORBIT, ONE ORBIT TAKES 92 MIN.'],
+  // 9 rendezvous, time warp, lunar transfer
+  () => [{ h: 'RENDEZVOUS' },
+    { b: 'SELECT THE TARGET WITH TGT. READ RNG (RANGE) AND CL (CLOSING SPEED) ON THE TACTICAL PAGE.' },
+    { b: 'KEEP THE CLOSING SPEED BELOW 1 PERCENT OF THE RANGE PER SECOND. EXAMPLE: AT 10 KM, 100 M/S.' },
+    { b: 'ABOVE 1 KM, USE THE MAIN DRIVE. BELOW 1 KM, USE THE RCS ONLY.' },
     { gap: 1 }, { h: 'TIME WARP' },
-    { kv: [['WARP +', kn('warpUp')], ['WARP -', kn('warpDown')], ['STEPS', 'X1, X10, X100, X1000']] },
-    'ANY FLIGHT INPUT OR LEAD HOLD DROPS WARP TO X1.',
+    { kv: [['WARP UP', kn('warpUp')], ['WARP DOWN', kn('warpDown')], ['STEPS', 'X1, X10, X100, X1000']] },
+    'A FLIGHT INPUT OR LEAD HOLD SETS THE WARP TO X1.',
     { gap: 1 }, { h: 'LUNAR TRANSFER' },
-    'A PROGRADE BURN OF ABOUT 3100 M/S FROM LOW ORBIT REACHES THE MOON IN 3 DAYS. INSIDE THE LUNAR SPHERE THE ORBIT PAGE SHOWS MOON ELEMENTS. CAPTURE WITH A RETROGRADE BURN AT LUNAR PE.',
-    { gap: 1 }, { warn: 'MOON RADIUS 1737 KM. PE BELOW THIS IS NOT AN ORBIT.' }],
-  // 9 maneuver planner
+    'FROM LOW EARTH ORBIT, A PROGRADE BURN OF APPROXIMATELY 3100 M/S GOES TO THE MOON. THE TRANSFER TAKES APPROXIMATELY 3 DAYS.',
+    'NEAR THE MOON, THE ORBIT PAGE SHOWS THE ORBIT AROUND THE MOON. TO STAY, DO A RETROGRADE BURN AT THE LUNAR PE.',
+    { gap: 1 }, { warn: 'MAKE SURE THAT THE LUNAR PE IS MORE THAN 0 KM. THE SURFACE OF THE MOON IS 1737 KM FROM ITS CENTRE.' }],
+  // 10 maneuver planner
   () => [{ h: 'MANEUVER PLANNER' },
-    'PLANS ONE BURN (A NODE) AND SHOWS THE RESULT ON MAP 4 ORBIT VIEW: GREEN DOTS PRESENT PATH, CYAN DASHES PLANNED PATH.',
+    'THE PLANNER SHOWS THE RESULT OF ONE BURN (A NODE) ON MFD 4, ORBIT VIEW. GREEN DOTS SHOW THE PATH NOW. CYAN LINES SHOW THE PATH AFTER THE BURN.',
     { gap: 1 },
-    { kv: [['SET/CLEAR', kn('planNode')], ['PRO - / +', `${kn('planRetro')} / ${kn('planPro')}`], ['RADIAL IN/OUT', `${kn('planRadIn')} / ${kn('planRadOut')}`],
+    { kv: [['SET/REMOVE', kn('planNode')], ['PRO - / +', `${kn('planRetro')} / ${kn('planPro')}`], ['RADIAL IN/OUT', `${kn('planRadIn')} / ${kn('planRadOut')}`],
       ['NORMAL - / +', `${kn('planAnti')} / ${kn('planNrm')}`], ['EARLIER/LATER', `${kn('planEarlier')} / ${kn('planLater')}`], ['STEP SIZE', kn('planStep')]], w: 15 },
-    { gap: 1 }, { h: 'EXECUTION' },
-    { b: 'UNDER 15 MIN TO THE NODE, LEAD HOLD POINTS THE NOSE AT THE BURN (CYAN MARKER ON THE BALL).' },
-    { b: 'HOLD THE MAIN DRIVE WHEN THE READOUT SAYS BURN. RELEASE AT ZERO DV LEFT.' },
-    { b: 'THE PLAN FREEZES ONCE THE BURN STARTS. A LATE START COSTS ACCURACY, NOT FUEL.' },
-    { gap: 1 }, 'CLOSEST APPROACH TO THE SELECTED TARGET IS MARKED ON THE PLANNED PATH.'],
-  // 10 navball
+    { gap: 1 }, { h: 'PROCEDURE' },
+    { pre: ['1. SET THE NODE. ADJUST THE BURN.', '2. SET LEAD HOLD TO ON.', '3. WAIT. AT 15 MIN BEFORE THE NODE,', '   THE NOSE TURNS TO THE BURN.',
+      '4. WHEN COMMS SHOWS "BURN WINDOW",', '   HOLD THE MAIN DRIVE.', '5. WHEN COMMS SHOWS "BURN COMPLETE",', '   RELEASE THE MAIN DRIVE.'] },
+    { gap: 1 }, 'THE MAP SHOWS THE CLOSEST APPROACH TO THE SELECTED TARGET ON THE PLANNED PATH.'],
+  // 11 navball
   () => [{ h: 'NAVBALL' },
     { fig: (g, x, y, w, h, lab) => {
-      const cx = x + w*0.3, cy = y + h/2, R = h*0.46;
+      const cx = x + w*0.2, cy = y + h/2, R = h*0.44;
       g.beginPath(); g.arc(cx, cy, R, 0, 7); g.stroke(); figDash(g, [[cx - R, cy], [cx + R, cy]]);
-      const pro = (px, py) => { g.beginPath(); g.arc(px, py, 4, 0, 7); g.stroke(); g.beginPath(); g.moveTo(px - 4, py); g.lineTo(px - 8, py); g.moveTo(px + 4, py); g.lineTo(px + 8, py); g.moveTo(px, py - 4); g.lineTo(px, py - 8); g.stroke(); };
-      const retro = (px, py) => { g.beginPath(); g.arc(px, py, 4, 0, 7); g.stroke(); g.beginPath(); g.moveTo(px - 3, py - 3); g.lineTo(px + 3, py + 3); g.moveTo(px + 3, py - 3); g.lineTo(px - 3, py + 3); g.stroke(); };
-      pro(cx + 10, cy - 12); retro(cx - 20, cy + 16);
-      g.strokeRect(cx + 16, cy + 8, 8, 8); g.beginPath(); g.arc(cx - 14, cy - 18, 5, 0, 7); g.stroke();
-      g.beginPath(); g.moveTo(cx - 6, cy); g.lineTo(cx + 6, cy); g.moveTo(cx, cy - 3); g.lineTo(cx, cy + 3); g.stroke();
-      const lx = x + w*0.62; pro(lx + 4, y + 8); lab('PROGRADE', lx + 14, y + 5);
-      retro(lx + 4, y + 22); lab('RETROGRADE', lx + 14, y + 19);
-      g.strokeRect(lx, y + 32, 8, 8); lab('TARGET', lx + 14, y + 33);
-      g.beginPath(); g.arc(lx + 4, y + 50, 5, 0, 7); g.stroke(); lab('BURN', lx + 14, y + 47);
-      g.beginPath(); g.moveTo(lx - 2, y + 64); g.lineTo(lx + 10, y + 64); g.stroke(); lab('NOSE', lx + 14, y + 61);
+      lab('BLUE', cx - 12, cy - R*0.6); lab('BROWN', cx - 15, cy + R*0.45);
+      const ring = (px, py, r = 4) => { g.beginPath(); g.arc(px, py, r, 0, 7); g.stroke(); };
+      const cross = (px, py) => { g.beginPath(); g.moveTo(px - 4, py - 4); g.lineTo(px + 4, py + 4); g.moveTo(px + 4, py - 4); g.lineTo(px - 4, py + 4); g.stroke(); };
+      ring(cx, cy, 6);
+      const lx = x + w*0.4; ring(lx + 4, y + 8); lab('PROGRADE (YELLOW)', lx + 14, y + 5);
+      cross(lx + 4, y + 22); lab('RETROGRADE (YELLOW)', lx + 14, y + 19);
+      g.fillRect(lx + 2, y + 34, 4, 4); lab('TARGET (MAGENTA)', lx + 14, y + 33);
+      ring(lx + 4, y + 50, 5); lab('BURN (CYAN)', lx + 14, y + 47);
+      ring(lx + 4, y + 64, 6); lab('NOSE (WHITE)', lx + 14, y + 61);
     }, rows: 9 },
-    'THE BALL SHOWS THE SKY ABOUT THE SHIP: BLUE UP (AWAY FROM THE BODY), BROWN DOWN. THE NOSE IS THE CENTRE CROSS.',
+    'THE NAVBALL SHOWS THE DIRECTIONS AROUND THE SHIP. THE BLUE HALF IS AWAY FROM THE EARTH OR THE MOON. THE BROWN HALF IS TOWARD IT.',
+    'THE WHITE RING IN THE CENTRE SHOWS THE NOSE. THE PROGRADE AND RETROGRADE MARKERS ARE ON THE LINE BETWEEN THE HALVES.',
     { gap: 1 },
-    { b: 'TO BURN PROGRADE: PUT THE PROGRADE MARKER UNDER THE CROSS.' },
-    { b: 'TO KILL RELATIVE VELOCITY: POINT AT THE RETRO TARGET MARKER AND BURN.' },
-    { b: 'LEAD HOLD STEERS THE NOSE FOR YOU: TO THE FIRING LEAD, OR TO THE BURN WHEN A NODE IS NEAR.' }],
-  // 11 sensors and signature
+    { b: 'TO BURN PROGRADE, PUT THE PROGRADE MARKER IN THE WHITE RING. THEN BURN.' },
+    { b: 'LEAD HOLD TURNS THE NOSE TO THE FIRING LEAD. IF A NODE IS NEAR, IT TURNS THE NOSE TO THE BURN.' }],
+  // 12 sensors and signature
   () => [{ h: 'SECTION IV - SENSORS' }, { h: 'SIGNATURE' },
-    'EVERY HULL RADIATES HEAT. SIGNATURE 1 IS A COLD, COASTING HULL. DETECTION RANGE IS 12 KM X SQRT(SIGNATURE), BOTH WAYS.',
+    'ALL SHIPS RELEASE HEAT. THE SIGNATURE IS A MEASURE OF THIS HEAT. A COLD HULL HAS A SIGNATURE OF 1.',
+    'A SENSOR CAN SEE A SHIP AT 12 KM X THE SQUARE ROOT OF ITS SIGNATURE. THIS APPLIES TO YOU AND TO THE ENEMY.',
     { fig: (g, x, y, w, h, lab) => {
       g.beginPath(); g.moveTo(x + 24, y + 2); g.lineTo(x + 24, y + h - 10); g.lineTo(x + w - 4, y + h - 10); g.stroke();
-      g.beginPath(); for (let i = 0; i <= 60; i++) { const sgv = 1 + i*i*0.1, X = x + 24 + (w - 30)*i/60, Y = y + h - 10 - (h - 14)*Math.sqrt(sgv)/Math.sqrt(361); i ? g.lineTo(X, Y) : g.moveTo(X, Y); } g.stroke();
-      lab('228', x, y + 2); lab('KM', x, y + 10); lab('12', x + 6, y + h - 14); lab('SIGNATURE 1 - 360', x + 60, y + h - 7);
+      g.beginPath(); for (let i = 0; i <= 60; i++) { const sgv = 1 + (400*i/60), X = x + 24 + (w - 30)*i/60, Y = y + h - 10 - (h - 14)*(Math.sqrt(sgv) - 1)/(Math.sqrt(401) - 1); i ? g.lineTo(X, Y) : g.moveTo(X, Y); } g.stroke();
+      lab('240', x, y + 2); lab('KM', x, y + 10); lab('12', x + 6, y + h - 14); lab('SIGNATURE 1 TO 401', x + 50, y + h - 7);
     }, rows: 9 }, { gap: 1 },
-    { kv: [['COAST, RAD STOWED', 'LOW'], ['RADIATORS OUT', 'HIGHER'], ['MAIN DRIVE', '+400 PER FULL BURN'], ['LAUNCH', '+150 FOR 5 S'],
-      ['PDC FIRING', '+40'], ['RADAR ON', '+200']], w: 19 },
-    { gap: 1 },
-    'THE SIG BAR ON TACTICAL SHOWS HOW FAR YOU CAN BE SEEN. EARTH AND MOON BLOCK ALL SENSORS.',
-    { gap: 1 }, { warn: 'ONE BURN IS SEEN FROM 240 KM. PLAN BURNS WHERE NO ONE IS LOOKING.', title: 'NOTE' }],
-  // 12 datalink
+    { kv: [['RADIATED HEAT', '+1 PER 16.5 KW'], ['MAIN DRIVE', '+400 AT FULL THRUST'], ['RAILGUN SHOT', '+150 FOR 5 S'], ['MISSILE/TORP', '+80 FOR 5 S'],
+      ['LASER OR LPD', '+60'], ['PDC FIRE', '+40 FOR 2 S'], ['RCS', '+3'], ['RADAR ON', '+200']], w: 15 },
+    { gap: 1 }, 'THE SIG BAR ON THE TACTICAL PAGE SHOWS THE RANGE AT WHICH THE ENEMY CAN SEE YOU. THE EARTH AND THE MOON BLOCK ALL SENSORS.'],
+  // 13 datalink
   () => [{ h: 'CONTACTS AND DATALINK' },
-    { b: 'OWN SENSORS: PASSIVE BY SIGNATURE, OR BOW RADAR TO 500 KM IF FITTED.' },
-    { b: 'TGT CYCLES OWN-SENSOR CONTACTS. FIRE CONTROL NEEDS ONE.' },
-    { b: 'OBSERVATION SATELLITES (900 KM ORBIT) REPORT WHAT THEY SEE BY LASER LINK. REPORTS ARE DELAYED AND MAY GAP.' },
+    { b: 'YOUR SENSORS SEE A SHIP BY ITS SIGNATURE. THE BOW RADAR (IF INSTALLED) SEES ALL SHIPS TO 500 KM.' },
+    { b: 'TGT SELECTS YOUR NEXT SENSOR CONTACT. FIRE CONTROL NEEDS A SENSOR CONTACT.' },
+    { b: 'SATELLITES IN A 900 KM ORBIT SEND DATA BY LASER LINK. THE DATA ARRIVES LATE. SOMETIMES IT STOPS.' },
     { fig: (g, x, y, w, h, lab) => {
       const ex = x + 34, cy = y + h/2; g.beginPath(); g.arc(ex, cy, 18, 0, 7); g.stroke(); lab('EARTH', ex - 15, cy - 3);
       const mx = x + w - 60; g.beginPath(); g.arc(mx, cy, 10, 0, 7); g.stroke(); lab('MOON', mx - 12, cy + 13);
@@ -5592,101 +5601,158 @@ const MAN_PAGES = [
       figDash(g, [[ex + 28, cy - 21], [mx + 2, cy - 4]]); g.beginPath(); g.moveTo(mx - 6, cy - 12); g.lineTo(mx + 2, cy - 4); g.moveTo(mx + 2, cy - 12); g.lineTo(mx - 6, cy - 4); g.stroke();
       lab('BLOCKED', x + w/2 - 30, cy - 34);
     }, rows: 8 },
-    'SATELLITES RELAY TO EACH OTHER, BUT ONE OF THEM MUST SEE YOU, AND ONE MUST SEE THE TARGET. THE MOON SHADOWS BOTH.',
+    'THE SATELLITES SEND DATA TO EACH OTHER. ONE SATELLITE MUST SEE YOU. ONE SATELLITE MUST SEE THE TARGET. THE MOON CAN BLOCK BOTH.',
     { gap: 1 }, { h: 'TRACK NUMBERS' },
-    'DISTANT TRACKS ARE SELECTED BY THEIR FOUR-DIGIT TRACK NUMBER ON THE KEYPAD (SHOWN ON MAP 4). ENT CONFIRMS, CLR CLEARS.'],
-  // 13 telescope
+    'MFD 4 SHOWS A FOUR-DIGIT NUMBER FOR EACH TRACK. TO SELECT A DISTANT TRACK, TYPE ITS NUMBER ON THE KEYPAD. THEN PUSH ENT. CLR REMOVES THE NUMBER.'],
+  // 14 telescope
   () => [{ h: 'TELESCOPE' },
-    'GIMBALLED, 4 DEG FIELD, SLEWS TO THE SELECTED TARGET. STOWS TO THE NOSE WHEN NOTHING IS SELECTED.',
+    'THE TELESCOPE TURNS TO THE SELECTED TARGET. IF NO TARGET IS SELECTED, IT POINTS TO THE NOSE.',
     { gap: 1 },
-    { kv: [['ZOOM', 'RNG SOFTKEY: X1, X4, X16, X64, X256'], ['VIS / IR', `${kn('toggleIR')} OR IR BUTTON`], ['IR', 'WHITE HOT. SEES DRIVES, RADIATORS AND FRESH WRECKS']] },
+    { kv: [['ZOOM', 'RNG SOFTKEY: X1, X4, X16, X64, X256'], ['VIS / IR', `${kn('toggleIR')} OR THE IR BUTTON`], ['IR', 'HOT IS WHITE. IR SHOWS DRIVES, RADIATORS AND NEW WRECKS']] },
     { gap: 1 }, { h: 'RESOLUTION' },
-    { kv: [['VISIBLE', '15 MICRORAD (15 CM AT 10 KM)'], ['IR', '40 MICRORAD']] },
-    'BEYOND A FEW KM A SHIP IS A BLUR. IDENTIFY BY SHAPE ONLY AT CLOSE RANGE. THE AIM RETICLE IS THE SPINAL BORESIGHT; THE DIAMOND IS THE RAIL LEAD.',
+    { kv: [['VISIBLE', '15 MICRORAD (0.15 M AT 10 KM)'], ['IR', '40 MICRORAD (0.4 M AT 10 KM)']] },
+    'AT LONG RANGE, A SHIP IS NOT CLEAR. YOU CAN SEE ITS SHAPE ONLY AT SHORT RANGE.',
+    'THE RING WITH 4 LINES SHOWS THE SPINAL WEAPON AIM. THE DIAMOND SHOWS THE RAILGUN LEAD.',
     { gap: 1 },
-    { warn: 'A SHIP LASING YOU FLOODS THE SENSOR WITH GLARE. THE GLARE MARKS THE SHOOTER. MOVE OUT OF 5 KM.' }],
-  // 14 weapons I
+    { warn: 'IF THE IMAGE FILLS WITH GLARE, A SHIP FIRES ITS LASER AT YOU. THE GLARE COMES FROM THAT SHIP. MOVE MORE THAN 5 KM AWAY.' }],
+  // 15 weapons I
   () => [{ h: 'SECTION V - WEAPONS' }, { h: 'MASTER ARM' },
-    { kv: [['COVER', kn('guardMaster')], ['SWITCH', `${kn('masterArm')}: OFF / ON / TNG`], ['TNG', 'TRAINING. FIRES, NO DAMAGE']] },
-    { gap: 1 }, { h: 'RAILGUN' }, modDesc('rail_mk1'),
+    { kv: [['COVER', kn('guardMaster')], ['SWITCH', `${kn('masterArm')}: OFF / ON / TNG`], ['TNG', 'TRAINING. WEAPONS FIRE BUT CAUSE NO DAMAGE']] },
+    { gap: 1 }, { h: 'RAILGUN' },
+    { kv: [['SLUG', '5 KG AT 1000 M/S'], ['CYCLE', '3 S, 2.5 MJ PER SHOT'], ['FIRE', kn('fireRail')]] },
     { fig: (g, x, y, w, h, lab) => {
       const sx = x + 8, sy = y + h - 8; g.strokeRect(sx - 3, sy - 2, 8, 4); lab('YOU', sx - 4, sy - 12);
-      const tx = x + w*0.45, ty = y + 8; g.beginPath(); g.arc(tx, ty, 3, 0, 7); g.stroke(); lab('TARGET', tx - 18, ty - 10 < y ? ty + 6 : ty - 10);
+      const tx = x + w*0.45, ty = y + 8; g.beginPath(); g.arc(tx, ty, 3, 0, 7); g.stroke(); lab('TARGET', tx - 18, ty + 6);
       figDash(g, [[tx, ty], [x + w*0.82, ty + 6]]); const lx = x + w*0.82, ly = ty + 6;
       g.beginPath(); g.moveTo(lx, ly - 4); g.lineTo(lx + 4, ly); g.lineTo(lx, ly + 4); g.lineTo(lx - 4, ly); g.closePath(); g.stroke(); lab('LEAD', lx + 6, ly - 3);
       figArrow(g, sx + 6, sy - 2, lx - 4, ly + 3); lab('SLUG', x + w*0.45, y + h - 16);
     }, rows: 6 },
-    `FIRE: ${kn('fireRail')}. AIM THE NOSE AT THE LEAD DIAMOND (LEAD HOLD DOES IT). THE SLUG IS UNGUIDED. KILLS SPLIT THE HULL.`,
-    { gap: 1 }, { h: 'LASER' }, modDesc('laser_mk1'),
-    `GUARD ${kn('guardLaser')}, ARM ${kn('armLaser')}, FIRE ${kn('fireLaser')} (HOLD). NEEDS AN OWN-SENSOR CONTACT IN 5 KM. DRAWS 300 KW.`],
-  // 15 weapons II
+    'THE SLUG HAS NO GUIDANCE. AIM THE NOSE AT THE LEAD DIAMOND. LEAD HOLD DOES THIS FOR YOU.',
+    { gap: 1 }, { h: 'LASER' },
+    { kv: [['BEAM', '300 KW, 5 KM'], ['GIMBAL', '2 DEG FROM THE NOSE'], ['ARM', `GUARD ${kn('guardLaser')}, SWITCH ${kn('armLaser')}`], ['FIRE', `${kn('fireLaser')} (HOLD)`]] },
+    'THE LASER HITS THE FIRST OBJECT IN THE BEAM. THE GIMBAL AIMS AT THE SELECTED SENSOR CONTACT.'],
+  // 16 guided weapons
   () => [{ h: 'GUIDED WEAPONS' },
-    { h: 'VLS MISSILES' }, modDesc('vls_mk1'),
-    `FIRE: ${kn('fireMissile')}. LOCKS THE SELECTED TARGET AT LAUNCH. 20 S OF BURN.`,
-    { h: 'TORPEDOES' }, modDesc('torp_mk1'),
-    `FIRE: ${kn('fireRail')} (SPINAL KEY). 60 S OF BURN. 400 DAMAGE. SLOW BUT HEAVY.`,
-    { h: 'INTERCEPTORS' }, modDesc('rim4_mk1'), 'LAUNCH AUTOMATICALLY AT CLOSING TORPEDOES. NOT IN TNG.',
-    { h: 'GUIDANCE' },
-    'GUIDED WEAPONS NEED A TARGET KNOWN TO THE SHIP: OWN SENSORS OR A DATALINK TRACK. A WEAPON THAT HAS MISSED AND CANNOT TURN BACK SELF-DESTRUCTS AFTER 5 S.',
-    { gap: 1 }, { warn: 'ENEMY POINT DEFENCE SHOOTS DOWN SINGLE WEAPONS. LAUNCH IN SALVOS. TORPEDOES NEED MISSILES WITH THEM.', title: 'NOTE' }],
-  // 16 point defence and ECM
+    { kv: [['MISSILE', `VLS POD, 8 CELLS. BURN 20 S. DAMAGE 120. FIRE: ${kn('fireMissile')}.`],
+      ['TORPEDO', `SPINAL TUBE, 4 TORPEDOES, RELOAD 8 S. BURN 60 S. DAMAGE 400. FIRE: ${kn('fireRail')}.`],
+      ['INTERCEPTOR', 'TURRET, 4 PER TURRET. THE TURRET LAUNCHES THEM AT TORPEDOES THAT COME TO 15 KM. NOT IN TNG.']], w: 12 },
+    { gap: 1 }, { h: 'GUIDANCE' },
+    'A GUIDED WEAPON FLIES TO THE TARGET THAT YOU SELECT AT LAUNCH. THE TARGET MUST BE A SENSOR CONTACT OR A DATALINK TRACK.',
+    'IF A WEAPON MISSES AND CANNOT TURN BACK, IT DESTROYS ITSELF AFTER 5 S.',
+    { gap: 1 }, { warn: 'ENEMY POINT DEFENCE CAN DESTROY ONE WEAPON EASILY. FIRE SEVERAL WEAPONS AT THE SAME TIME.', title: 'NOTE' }],
+  // 17 point defence and ECM
   () => [{ h: 'POINT DEFENCE AND ECM' },
-    { h: 'PDC TURRETS' }, modDesc('pdc_mk1'),
+    { h: 'PDC TURRETS' },
     { fig: (g, x, y, w, h, lab) => {
       const cx = x + w/2, cy = y + h/2; g.strokeRect(cx - 50, cy - 3, 100, 6); lab('NOSE', cx - 86, cy - 3);
       g.beginPath(); g.arc(cx, cy - 3, h*0.4, Math.PI + 0.17, -0.17 + 2*Math.PI, false); g.stroke();
       g.beginPath(); g.arc(cx, cy + 3, h*0.4, 0.17, Math.PI - 0.17); g.stroke();
-      lab('DORSAL ARC', cx + 34, y + 4); lab('VENTRAL ARC', cx + 34, y + h - 12);
+      lab('TOP ARC', cx + 34, y + 4); lab('BOTTOM ARC', cx + 34, y + h - 12);
     }, rows: 8 }, { gap: 1 },
-    'AUTOMATIC WHEN ARMED. EACH MOUNT COVERS 100 DEG FROM ITS AXIS; THE ARCS OVERLAP AT THE BEAM. 2000 ROUNDS EACH.',
-    { b: 'BARRELS HEAT WITH FIRE. AT FULL HEAT THE MOUNT CEASES FIRE UNTIL COOL.' },
-    { gap: 1 }, { h: 'LASER PD' }, modDesc('lpd_mk1'),
-    { gap: 1 }, { h: 'ECM POD' }, modDesc('ecm_mk1'),
-    'A DECOY SALVO FIRES AT EACH TORPEDO ENTERING 4 KM. 45% BREAK LOCK AND CHASE THE DECOY.'],
-  // 17 threats
+    'THE PDCS FIRE AUTOMATICALLY WHEN MASTER ARM IS ON. EACH TURRET COVERS 100 DEG FROM ITS AXIS. RANGE 5 KM. 2000 ROUNDS PER TURRET.',
+    'AFTER APPROXIMATELY 17 S OF CONTINUOUS FIRE, A TURRET STOPS. IT FIRES AGAIN AFTER APPROXIMATELY 16 S.',
+    { gap: 1 }, { h: 'LASER PD' },
+    'THE LASER PD DESTROYS A TORPEDO IN 0.6 S, TO 8 KM. IT USES 400 KW.',
+    { gap: 1 }, { h: 'ECM POD' },
+    'THE POD RELEASES DECOYS AT EACH TORPEDO THAT COMES TO 4 KM. 16 SALVOS. 45 PERCENT OF THE TORPEDOES GO TO THE DECOYS.'],
+  // 18 threats
   () => [{ h: 'SECTION VI - THREATS' },
-    { kv: [['TORPEDOES', 'HOSTILES FIRE SALVOS INSIDE 80 KM. TORP LAMP BLINKS AND A TONE SOUNDS. 15% HULL PER HIT AND ONE SYSTEM DAMAGED.'],
-      ['LASERS', 'ARMED SHIPS LASE INSIDE 5 KM: 4 S BURSTS. HEATS THE HULL, ABLATES IT TO NO LESS THAN 40%, SCORCHES SYSTEMS.'],
-      ['POINT DEF.', 'HOSTILES SHOOT AT YOUR MISSILES AND TORPEDOES INSIDE 3 KM. RAIL SLUGS ARE TOO FAST.'],
-      ['EVASION', 'HOSTILES DODGE WEAPONS IN THE LAST 15 S, KEEP THEIR RANGE AND RUN WHEN BADLY HURT.'],
-      ['DEBRIS', 'WRECK SECTIONS AND FRAGMENTS STAY IN ORBIT. A SECTION COSTS 12% HULL; A FRAGMENT 2-6%.']], w: 11 },
-    { gap: 1 }, { warn: 'A HIT ON THE HULL IS RARELY FATAL. THREE OR FOUR ARE. KEEP THE PDCS COOL AND ARMED.' }],
-  // 18 power and thermal
+    { kv: [['TORPEDOES', 'PATROL SHIPS FIRE SALVOS AT 80 KM OR LESS. THE TORP LAMP FLASHES AND A TONE SOUNDS. EACH HIT REMOVES 15 PERCENT OF THE HULL AND DAMAGES ONE SYSTEM.'],
+      ['LASERS', 'ARMED SHIPS FIRE THEIR LASERS IN 4 S BURSTS AT 5 KM OR LESS. THE HULL GETS HOT. THE LASER REMOVES HULL TO 40 PERCENT, NOT LESS.'],
+      ['POINT DEF.', 'ENEMY SHIPS FIRE AT YOUR MISSILES AND TORPEDOES AT 3 KM OR LESS. THEY CANNOT HIT RAILGUN SLUGS.'],
+      ['MOVEMENT', 'ENEMY SHIPS MOVE AWAY FROM YOUR WEAPONS. A SHIP WITH HEAVY DAMAGE GOES AWAY.'],
+      ['DEBRIS', 'WRECKS STAY IN ORBIT. A HIT BY A WRECK REMOVES 12 PERCENT OF THE HULL. A FRAGMENT REMOVES 2 TO 5 PERCENT.']], w: 11 },
+    { gap: 1 }, { warn: 'KEEP MASTER ARM ON NEAR THE ENEMY. IF THE HULL GETS TO 0 PERCENT, THE SHIP IS LOST.' }],
+  // 19 power and thermal
   () => [{ h: 'SECTION VII - SYSTEMS' }, { h: 'POWER' },
-    `REACTOR ${POWER.reactor/1e3} KW CHARGES THE ${POWER.battCap/1e6} MJ CAPACITOR. LOADS: AVIONICS 40 KW, LASER 300 KW, LASER PD 400 KW, WHEELS TO 30 KW, RAILGUN 2.5 MJ PER SHOT.`,
-    { b: 'CAPACITOR EMPTY AND LOAD OVER REACTOR: BROWNOUT. WEAPONS DROP OUT.' },
-    { gap: 1 }, { h: 'THERMAL' },
-    'ALL POWER BECOMES HEAT. RADIATORS SHED IT. STOWED, THEY SHED LITTLE AND THE HULL HEATS.',
-    { kv: [['START', `${THERM.tStart} K`], ['WARNING', `${THERM.tWarn} K - OVERHEAT LAMP`], ['LIMIT', `${THERM.tMax} K - LASER AND LASER PD LOCK OUT`]] },
+    `THE REACTOR SUPPLIES ${POWER.reactor/1e3} KW. IT CHARGES THE ${POWER.battCap/1e6} MJ CAPACITOR.`,
+    { kv: [['AVIONICS', '40 KW'], ['LASER', '300 KW'], ['LASER PD', '400 KW'], ['WHEELS', '30 KW MAXIMUM'], ['RAILGUN', '2.5 MJ PER SHOT']] },
+    'IF THE CAPACITOR IS EMPTY, THE PDCS AND THE RAILGUN CANNOT FIRE. IF THE LOAD IS ALSO MORE THAN THE REACTOR POWER, THE LASERS AND THE WHEELS STOP.',
+    { gap: 1 }, { h: 'HEAT' },
+    'ALL ELECTRICAL POWER CHANGES TO HEAT. THE RADIATORS RELEASE THE HEAT.',
+    { kv: [['START', `${THERM.tStart} K`], ['WARNING', `${THERM.tWarn} K, OVERHEAT LAMP ON`], ['LIMIT', `${THERM.tMax} K, LASER AND LASER PD STOP`]] },
     { gap: 1 },
-    { warn: 'STOWING THE RADIATORS LOWERS YOUR SIGNATURE BUT THE HULL WILL HEAT. WATCH HULL TEMP ON POWER/THERM.', title: 'CAUTION' }],
-  // 19 damage
+    { warn: 'IF YOU STOW THE RADIATORS, THE SIGNATURE DECREASES. BUT THE HULL TEMPERATURE INCREASES. MONITOR THE HULL TEMP GAUGE.', title: 'CAUTION' }],
+  // 20 damage
   () => [{ h: 'DAMAGE' },
-    'HULL INTEGRITY 100% TO 0%. AT 0% THE SHIP IS LOST. SYSTEMS DEGRADE FROM 100% TO OFFLINE.',
+    'THE HULL INTEGRITY IS 100 TO 0 PERCENT. AT 0 PERCENT THE SHIP IS LOST. EACH SYSTEM IS 100 PERCENT TO OFF.',
     { gap: 1 },
-    { kv: [['REACTOR', 'LESS POWER'], ['RADIATORS', 'LESS COOLING'], ['CAPACITORS', 'LESS STORAGE'], ['TELESCOPE', 'POOR IMAGE'],
-      ['MAIN DRIVE', 'LESS THRUST'], ['RCS', 'SLOWER TURNS'], ['MODULES', 'WEAKER, SLOWER RELOAD, OFF']] },
+    { kv: [['REACTOR', 'LESS POWER'], ['RADIATORS', 'LESS COOLING'], ['CAPACITORS', 'LESS ENERGY'], ['TELESCOPE', 'POOR IMAGE'],
+      ['MAIN DRIVE', 'LESS THRUST'], ['RCS', 'SLOWER TURNS'], ['MODULES', 'LESS EFFECT OR OFF']] },
     { gap: 1 },
-    'HITS DAMAGE SYSTEMS ON THE SIDE THEY CAME FROM. THE SHIP PAGE SHOWS IMPACTS AND STATES; SYS DAMAGE LAMP LIGHTS ON ANY DAMAGE.',
-    { gap: 1 }, 'THERE IS NO REPAIR IN FLIGHT.'],
-  // 20 loadout
-  () => [{ h: 'SECTION VIII - LOADOUT' }, 'FIT MODULES IN THE HANGAR BEFORE LAUNCH. EACH ADDS MASS.',
+    'A HIT DAMAGES A SYSTEM ON THE SIDE OF THE HIT. THE SHIP PAGE SHOWS THE HITS AND THE SYSTEMS. THE SYS DAMAGE LAMP COMES ON.',
+    { gap: 1 }, 'YOU CANNOT REPAIR DAMAGE IN FLIGHT.'],
+  // 21 loadout
+  () => [{ h: 'SECTION VIII - LOADOUT' }, 'INSTALL THE MODULES IN THE HANGAR BEFORE LAUNCH. EACH MODULE ADDS MASS.',
     { gap: 1 },
-    { kv: Object.keys(MODULE_CATALOG).map(k => [MODULE_CATALOG[k].short, modDesc(k)]), w: 7 }],
-  // 21 quick reference
+    { kv: [['RAIL', 'RAILGUN. 5 KG SLUG, 1000 M/S'], ['TORP', 'TORPEDO TUBE. 4 TORPEDOES'], ['LASER', 'GIMBAL LASER. 300 KW, 5 KM'],
+      ['RADAR', 'BOW RADAR. SENSORS TO 500 KM. TORPEDO WARNING AT 20 KM'], ['PDC', 'GUN TURRET. 2000 ROUNDS, 5 KM'],
+      ['LPD', 'LASER PD. 8 KM, 400 KW'], ['INTCP', 'INTERCEPTORS. 4, 15 KM'], ['TANK', 'DROP TANK. 303 KG PROPELLANT'],
+      ['VLS', 'MISSILE POD. 8 MISSILES'], ['CAP', 'CAPACITOR POD. +5 MJ. RAILGUN CYCLE 20 PERCENT FASTER'],
+      ['ECM', 'DECOY POD. 16 SALVOS. TORPEDO WARNING AT 30 KM']], w: 7 },
+    { gap: 1 }, 'WITHOUT RADAR OR ECM, THE TORPEDO WARNING IS AT 10 KM.'],
+  // 22 quick reference
   () => [{ h: 'SECTION IX - QUICK REFERENCE' },
     { kv: ACTIONS.filter(a => !a.id.startsWith('plan')).map(a => [kn(a.id), a.label.toUpperCase().replace(/\s*\(.*\)/, '')]), w: 10 },
-    { kv: [['ESC', 'MENU / REBIND KEYS'], ['[ ]', 'TURN PAGES']], w: 10 }],
-  // 22 emergencies
+    { kv: [['ESC', 'MENU, CHANGE KEYS'], ['[ ]', 'TURN PAGES']], w: 10 }],
+  // 23 emergencies
   () => [{ h: 'EMERGENCY PROCEDURES' },
-    { h: 'INCOMING TORPEDO' }, { pre: ['1. MASTER ARM - ON', '2. TURN BEAM-ON (BOTH PDC ARCS)', '3. RADIATORS - CHECK OUT', '4. BURN ACROSS ITS PATH'] },
-    { gap: 1 }, { h: 'OVERHEAT' }, { pre: ['1. RADIATORS - DEPLOY', '2. LASER - CEASE', '3. WAIT FOR TEMP BELOW 380 K'] },
-    { gap: 1 }, { h: 'LASER ILLUMINATION' }, { pre: ['1. OPEN RANGE PAST 5 KM', '2. PUT EARTH OR MOON BETWEEN', '3. KILL THE SHOOTER'] },
-    { gap: 1 }, { h: 'RCS DRY' }, { pre: ['1. RCS STAB - ON (WHEELS)', '2. KEEP CAPACITOR CHARGED', '3. PLAN BURNS EARLY'] },
-    { gap: 1 }, { h: 'DETECTED' }, { pre: ['1. COMPLETE THE TASK OR LEAVE', '2. EXPECT SALVOS IN 20 S'] }],
+    { h: 'TORPEDO WARNING' }, { pre: ['1. SET MASTER ARM TO ON.', '2. TURN THE SHIP SIDEWAYS TO THE', '   TORPEDO (BOTH PDCS FIRE).', '3. BURN ACROSS THE TORPEDO PATH.'] },
+    { gap: 1 }, { h: 'OVERHEAT' }, { pre: ['1. DEPLOY THE RADIATORS.', '2. STOP THE LASER.', '3. WAIT UNTIL THE TEMP IS BELOW 380 K.'] },
+    { gap: 1 }, { h: 'LASER GLARE' }, { pre: ['1. MOVE MORE THAN 5 KM AWAY.', '2. OR PUT THE EARTH OR THE MOON', '   BETWEEN YOU AND THE SHIP.'] },
+    { gap: 1 }, { h: 'RCS PROPELLANT EMPTY' }, { pre: ['1. SET RCS STAB TO ON.', '2. KEEP THE CAPACITOR CHARGED.', '3. PLAN THE BURNS EARLY.'] },
+    { gap: 1 }, { h: 'DETECTED' }, { pre: ['1. COMPLETE THE TASK OR GO AWAY.', '2. EXPECT TORPEDOES.'] }],
+  // 24 abbreviations
+  () => [{ h: 'ABBREVIATIONS' },
+    { kv: [['AP', 'APOAPSIS (HIGHEST POINT)'], ['CL', 'CLOSING SPEED'], ['DV', 'DELTA-V (SPEED CHANGE)'], ['ECM', 'ELECTRONIC COUNTERMEASURES'],
+      ['ENT', 'ENTER'], ['CLR', 'CLEAR'], ['IR', 'INFRARED'], ['JETT', 'JETTISON'], ['KN', 'KILONEWTON'], ['KW', 'KILOWATT'],
+      ['LPD', 'LASER POINT DEFENCE'], ['MFD', 'MULTI-FUNCTION DISPLAY'], ['MJ', 'MEGAJOULE'], ['PD', 'POINT DEFENCE'],
+      ['PDC', 'POINT DEFENCE CANNON'], ['PE', 'PERIAPSIS (LOWEST POINT)'], ['RCS', 'REACTION CONTROL SYSTEM'],
+      ['RNG', 'RANGE'], ['SIG', 'SIGNATURE'], ['TGT', 'TARGET'], ['TNG', 'TRAINING'], ['VIS', 'VISIBLE'],
+      ['VLS', 'VERTICAL LAUNCH SYSTEM']], w: 6 }],
 ];
-const MAN_FACES = 25;
-// Printed page (faces 2-23): header, body, page number; plus foxing, ink wear and the gutter shadow
+// Figure 2-1: the instrument panel as a line drawing in panel coordinates (the panel faces the eye, so the
+// drawing is a uniform scale of the real layout), with numbered callout boxes.
+function manCockpitFig(g, x, y, w, h, lab, tag) {
+  const X0 = -1.0, X1 = 1.0, Y1 = 0.6, k = w/(X1 - X0);
+  const X = v => x + (v - X0)*k, Y = v => y + (Y1 - v)*k;
+  const rect = (cx, cy, ww, hh) => g.strokeRect(X(cx - ww/2), Y(cy + hh/2), ww*k, hh*k);
+  const circ = (cx, cy, r) => { g.beginPath(); g.arc(X(cx), Y(cy), r*k, 0, 7); g.stroke(); };
+  g.strokeRect(x, y, w, h);
+  [-0.96, -0.576, -0.192, 0.192, 0.576, 0.96].forEach(lx => circ(lx, 0.52, 0.02));
+  for (const d of mfdDefs) {
+    rect(d.x, d.y, d.w + 0.02, d.h + 0.02);
+    const by = d.y - d.h/2 - 0.035;
+    for (const bx of mfdBtnX) rect(d.x + bx*d.w/0.6, by, 0.06, 0.034);
+  }
+  circ(0, -0.04, 0.12);
+  for (const la of [-0.06, 0, 0.06]) { g.beginPath(); g.moveTo(X(-Math.sqrt(0.0132 - la*la)), Y(-0.04 + la)); g.lineTo(X(Math.sqrt(0.0132 - la*la)), Y(-0.04 + la)); g.stroke(); }
+  rect(0, -0.284, 0.26, 0.212); rect(0, -0.19, 0.2, 0.022);
+  for (let r = 0; r < 4; r++) for (let c = 0; c < 3; c++) rect(-0.08 + c*0.08, -0.226 - r*0.044, 0.06, 0.034);
+  for (const d of dials) {
+    circ(d.x, d.y, DIAL_S/2 + 0.004);
+    for (let i = 0; i <= 8; i++) { const a = Math.PI*1.25 - i*Math.PI*1.5/8, r0 = DIAL_S/2 - 0.02, r1 = DIAL_S/2 - 0.01;
+      g.beginPath(); g.moveTo(X(d.x + r0*Math.cos(a)), Y(d.y + r0*Math.sin(a))); g.lineTo(X(d.x + r1*Math.cos(a)), Y(d.y + r1*Math.sin(a))); g.stroke(); }
+  }
+  for (const bx of [-0.74, -0.26, 0.26, 0.34, 0.42, 0.5]) rect(bx, -0.43, 0.072, 0.046);
+  circ(0.5, -0.39, 0.008); circ(0.66, -0.30, 0.016); circ(0.66, -0.36, 0.0165);
+  rect(0, -0.43, 0.2, 0.075); lab('9 G', X(0) - 8, Y(-0.43) - 1);
+  for (const s of switchDefs) {
+    rect(s.x, SW_Y, 0.07, 0.05);
+    if (s.guard) rect(s.x, SW_Y, 0.085, 0.085);
+    g.beginPath(); g.moveTo(X(s.x), Y(SW_Y)); g.lineTo(X(s.x + 0.012), Y(SW_Y - 0.035)); g.stroke();
+  }
+  // Callouts: [number, x, y] at the item (panel coordinates)
+  const C = [[1, -0.74, -0.43], [2, -0.26, -0.43], [3, 0.26, -0.43], [4, 0.34, -0.43], [5, 0.42, -0.43], [6, 0.5, -0.43],
+    [7, 0.60, -0.265], [8, 0.73, -0.37], [9, 0.155, -0.43], [10, 0, 0.52], [11, -0.54, 0.302], [12, 0, 0.302], [13, 0.54, 0.302],
+    [14, -0.45, -0.1135], [15, 0.45, -0.1135], [16, 0.45, -0.332], [17, -0.45, -0.332], [18, 0, -0.04], [19, 0, -0.29],
+    [20, -0.9, 0.33], [21, -0.9, 0], [22, -0.9, -0.33], [23, 0.9, 0.33], [24, 0.9, 0], [25, 0.9, -0.33],
+    ...switchDefs.map((s, i) => [26 + i, s.x, SW_Y])];
+  for (const [n, cx, cy] of C) tag(String(n), X(cx), Y(cy));
+}
+const MAN_LEAVES = 13;                               // the cover plus 12 leaves of pages
+
+// Printed page (faces 2 .. 2*MAN_LEAVES-1): header, body, page number; plus foxing, ink wear and the gutter shadow
 function manBuildFace(f) {
   const { TW, TH } = MAN, cv = document.createElement('canvas'); cv.width = TW; cv.height = TH;
   const g = cv.getContext('2d');
@@ -5718,10 +5784,10 @@ function manBuildFace(f) {
   if (f === 0) { manCover(g, R); return cv; }
   paper('#e7dcb9', '170,130,40');
   const p = manPage();
-  if (f === 1 || f === 24) {                         // inside covers: warning notice / notes
-    if (f === 1) manLayout(p, [{ gap: 3 }, { warn: 'THIS MANUAL IS NOT A SUBSTITUTE FOR SOUND JUDGEMENT. IN SPACE, MISTAKES DO NOT SLOW DOWN.', title: 'NOTICE' },
-      { gap: 2 }, 'DISTRIBUTION: OG-1 PILOTS AND INSTRUCTORS ONLY. HANDLE VIA PILOT CHANNELS.', { gap: 1 },
-      'REPORT ERRORS ON AFTO FORM 22 TO THE FLIGHT MANUAL MANAGER, LUNAR OPERATIONS WING.', { gap: 1 },
+  if (f === 1 || f === 2*MAN_LEAVES) {                         // inside covers: warning notice / notes
+    if (f === 1) manLayout(p, [{ gap: 3 }, { warn: 'THIS MANUAL DOES NOT REPLACE GOOD JUDGEMENT. IN SPACE, A MISTAKE DOES NOT STOP BY ITSELF.', title: 'NOTICE' },
+      { gap: 2 }, 'GIVE THIS MANUAL ONLY TO OG-1 PILOTS AND INSTRUCTORS.', { gap: 1 },
+      'IF YOU FIND AN ERROR, SEND AFTO FORM 22 TO THE FLIGHT MANUAL MANAGER, LUNAR OPERATIONS WING.', { gap: 1 },
       'ORIGINAL 15 MARCH 1986', 'CHANGE 3 - 1 OCTOBER 1987', { gap: 6 }, { pre: ['ISSUED TO: ____________________', '', 'SERIAL:    ____________________'] }]);
     else { manLayout(p, [{ h: 'NOTES' }]); for (let r = 0; r < 30; r++) for (let x = 0; x < MAN.COLS*MAN.CW; x += 3) manSet(p, MAN.ML + x, MAN.MT + (3 + r)*MAN.CH + 6); }
   } else {
@@ -5819,7 +5885,7 @@ function manCover(g, R) {
 }
 
 /* ---------- The booklet in 3D ---------- */
-const BOOK = { W: 0.17, H: 0.235, T: 0.0011, LEAVES: 12, root: null, inner: null, s: 0, anim: null, queue: 0,
+const BOOK = { W: 0.17, H: 0.235, T: 0.0011, LEAVES: MAN_LEAVES, root: null, inner: null, s: 0, anim: null, queue: 0,
   vis: 0, open: false, fromMenu: false, cache: new Map(), down: null };
 function manTex(f) {
   const C = BOOK.cache;
@@ -5872,7 +5938,7 @@ function buildBook() {
   bookLayout();
 }
 // Faces shown at spread s: left = back of leaf s-1, right = front of leaf s (the back cover's inside after the last)
-const bookRightFace = s => s < BOOK.LEAVES ? 2*s : 24;
+const bookRightFace = s => s < BOOK.LEAVES ? 2*s : 2*BOOK.LEAVES;
 const bookLeftFace = s => s > 0 ? 2*s - 1 : null;
 // Bend the turning leaf: hinge angle th (0 flat right .. PI flat left); the free edge lags behind the hinge
 function bendLeaf(th, dir, z0) {
@@ -5910,7 +5976,7 @@ function bookLayout() {
   BOOK.left.position.z = hL + 0.0002; BOOK.right.position.z = hR + 0.0002;
   if (!(nL > 0) && BOOK.left.userData.face === null) BOOK.left.visible = false;
   BOOK.boardL.visible = nL > 0;
-  BOOK.staples.visible = !a && s === LEAVES/2;
+  BOOK.staples.visible = !a && s === Math.ceil(LEAVES/2);
   BOOK.staples.position.z = Math.max(hL, hR) + 0.0006;
   BOOK.hingeZ = Math.max(hL, hR) + 0.0004;
 }
