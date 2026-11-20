@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OG — Cockpit prototype v0.5.5</title>
+<title>OG — Cockpit prototype v0.6.0</title>
 <style>
   html, body { margin:0; height:100%; background:#000; overflow:hidden;
     font-family: ui-monospace, Menlo, Consolas, monospace; color:#cfd8c0; }
@@ -90,7 +90,7 @@
 </head>
 <body>
 <canvas id="gl"></canvas>
-<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.5.5</span></div>
+<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.6.0</span></div>
 <div id="hangar"><div class="load" id="hangarLoad">LOADING SHIP</div>
   <div class="hint">DRAG TO ORBIT · WHEEL TO ZOOM · CLICK A HARDPOINT TO CHOOSE ITS MODULE</div>
   <div class="panel"><h2>HANGAR</h2><div class="sub">LOADOUT · SELECT A HARDPOINT, THEN A MODULE</div>
@@ -162,7 +162,7 @@ const HARDPOINTS = {
 const MODULE_CATALOG = {
   rail_mk1:  { name: 'SPINAL RAILGUN', short: 'RAIL', role: 'railgun', fits: ['spinal'], file: 'att_spinal_railgun.glb',
                mass: 900, com: [0, -0.29, -0.2], muzzle: [0, 0, 2.26],
-               stats: { railV: 1000, railCooldown: 3, railEnergy: 2.5e6 }, desc: '5 kg slug at 1000 m/s · 3 s cycle · 2.5 MJ' },
+               stats: { railV: 2000, railCooldown: 3, railEnergy: 2.5e6 }, desc: '1.25 kg slug at 2000 m/s · 3 s cycle · 2.5 MJ' },
   laser_mk1: { name: 'GIMBAL LASER',   short: 'LASER', role: 'laser', fits: ['gimbal'], file: 'att_gimbal_laser.glb',
                mass: 250, com: [0, 0, 0.35], emitter: [0, 0, 0.7],
                stats: { laserElec: 300e3, laserDmgRate: 10, laserRange: 5000 }, desc: '300 kW beam · 5 km · ±2° gimbal' },
@@ -275,7 +275,7 @@ const railMuzzle = () => { const s = roleSlot('railgun'); return s ? hpToBody(s,
 const laserEmitter = () => { const s = roleSlot('laser'); return s ? hpToBody(s, modAt(s).emitter) : [0, 0, -11]; };
 // Body-axis offset to world axes at the current attitude
 const bodyOff = p => new THREE.Vector3(p[0], p[1], p[2]).applyQuaternion(shipQ);
-const WEAPON = { railMass: 5, railV: 1000, railCooldown: 3, railEnergy: 2.5e6, railHeat: 1e6, railDmgDiv: 5e4,
+const WEAPON = { railMass: 1.25, railV: 2000, railCooldown: 3, railEnergy: 2.5e6, railHeat: 1e6, railDmgDiv: 5e4,
   laserElec: 300e3, laserDmgRate: 10, laserRange: 5000, laserTol: 2 };
 // The fitted railgun and laser modules' stats override these defaults (applied at launch)
 const WEAPON_BASE = { ...WEAPON };
@@ -5754,7 +5754,7 @@ const MAN_PAGES = [
   () => [{ h: 'SECTION V - WEAPONS' }, { h: 'MASTER ARM' },
     { kv: [['COVER', kn('guardMaster')], ['SWITCH', `${kn('masterArm')}: OFF / ON / TNG`], ['TNG', 'TRAINING. WEAPONS FIRE BUT CAUSE NO DAMAGE']] },
     { gap: 1 }, { h: 'RAILGUN' },
-    { kv: [['SLUG', '5 KG AT 1000 M/S'], ['CYCLE', '3 S, 2.5 MJ PER SHOT'], ['FIRE', kn('fireRail')]] },
+    { kv: [['SLUG', '1.25 KG AT 2000 M/S'], ['CYCLE', '3 S, 2.5 MJ PER SHOT'], ['FIRE', kn('fireRail')]] },
     { fig: (g, x, y, w, h, lab) => {
       const sx = x + 8, sy = y + h - 8; g.strokeRect(sx - 3, sy - 2, 8, 4); lab('YOU', sx - 4, sy - 12);
       const tx = x + w*0.45, ty = y + 8; g.beginPath(); g.arc(tx, ty, 3, 0, 7); g.stroke(); lab('TARGET', tx - 18, ty + 6);
@@ -5820,7 +5820,7 @@ const MAN_PAGES = [
   // 21 loadout
   () => [{ h: 'SECTION VIII - LOADOUT' }, 'INSTALL THE MODULES IN THE HANGAR BEFORE LAUNCH. EACH MODULE ADDS MASS.',
     { gap: 1 },
-    { kv: [['RAIL', 'RAILGUN. 5 KG SLUG, 1000 M/S'], ['TORP', 'TORPEDO TUBE. 4 TORPEDOES'], ['LASER', 'GIMBAL LASER. 300 KW, 5 KM'],
+    { kv: [['RAIL', 'RAILGUN. 1.25 KG SLUG, 2000 M/S'], ['TORP', 'TORPEDO TUBE. 4 TORPEDOES'], ['LASER', 'GIMBAL LASER. 300 KW, 5 KM'],
       ['RADAR', 'BOW RADAR. SENSORS TO 500 KM. TORPEDO WARNING AT 20 KM'], ['PDC', 'GUN TURRET. 2000 ROUNDS, 5 KM'],
       ['LPD', 'LASER PD. 8 KM, 400 KW'], ['INTCP', 'INTERCEPTORS. 4, 15 KM'], ['TANK', 'DROP TANK. 303 KG PROPELLANT'],
       ['VLS', 'MISSILE POD. 8 MISSILES'], ['CAP', 'CAPACITOR POD. +5 MJ. RAILGUN CYCLE 20 PERCENT FASTER'],
