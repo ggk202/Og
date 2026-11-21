@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OG — Cockpit prototype v0.14.5</title>
+<title>OG — Cockpit prototype v0.14.6</title>
 <style>
   html, body { margin:0; height:100%; background:#000; overflow:hidden;
     font-family: ui-monospace, Menlo, Consolas, monospace; color:#cfd8c0; }
@@ -97,7 +97,7 @@
 </head>
 <body>
 <canvas id="gl"></canvas>
-<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.14.5</span></div>
+<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.14.6</span></div>
 <div id="hangar"><div class="load" id="hangarLoad">LOADING SHIP</div>
   <div class="hint">DRAG TO ORBIT · WHEEL TO ZOOM · CLICK A HARDPOINT TO CHOOSE ITS MODULE</div>
   <div class="panel"><h2>HANGAR</h2><div class="sub" id="hullName"></div><div id="hullSel"></div><div class="sub">LOADOUT · SELECT A HARDPOINT, THEN A MODULE</div>
@@ -1016,10 +1016,22 @@ function enemyAI(t, h) {
     const opening = rel.dot(relV)/r;                 // the ship's speed away from us
     if (opening < 300) { dir = rel.clone().normalize().negate(); why = 'RETREAT'; }   // then coast away
     if (!t.retreating) { t.retreating = true; if (isLocal(t)) log(`${t.name} DISENGAGING`); }
+  } else if (t.huntTaskGroup && r < 4000e3 && r > 1e3) {
+    // 3a. Task-group assault ships (Saturnian Assault Group A): actively close to ~75-135 km combat range
+    const u = rel.clone().normalize(), want = t.closeRange || 95e3;
+    const vc = r > want ? Math.min(450, Math.sqrt(2*ai.acc*0.45*(r - want))) : r < 14e3 ? -65 : 0;
+    const err = u.clone().multiplyScalar(vc).sub(relV.clone().negate());
+    const e = err.length();
+    if (e > 16 || (was === 'MANEUVER' && e > 4)) {
+      dir = err.normalize(); why = 'MANEUVER';
+      const b = primaryAtState(t, simT);
+      const radV = new THREE.Vector3(t.x - b.c[0], t.y - b.c[1], t.z - b.c[2]);
+      if (radV.length() - b.R < 350e3) dir.addScaledVector(radV.normalize(), 1.1).normalize();
+    }
   } else if (r < AI_ENGAGE_R && relV.length() < AI_MATCH_V) {
-    // 3. Range keeping (only near, and only when the speeds can be matched): wanted closing speed from the
-    //    range band, steer the relative velocity onto it
-    const u = rel.clone().normalize(), want = t.fireRange ? 0.8*t.fireRange : 40e3;
+    // 3b. Range keeping (only near, and only when the speeds can be matched): wanted closing speed from the
+    //     range band, steer the relative velocity onto it
+    const u = rel.clone().normalize(), want = t.closeRange || (t.fireRange ? 0.8*t.fireRange : 40e3);
     const vc = r > want ? Math.min(250, (r - want)/60) : r < 8e3 ? -60 : 0;
     const err = u.clone().multiplyScalar(vc).sub(relV.clone().negate());   // wanted minus actual (own velocity rel. to ship)
     const e = err.length();                          // hysteresis: start at 20 m/s off, trim down to 3 m/s
@@ -1027,8 +1039,8 @@ function enemyAI(t, h) {
   }
   if (!dir) return null;
   // Orbit safety: a burn that would leave the orbit open or bring periapsis near the surface (looking 5 s of
-  // thrust ahead) is not made, except to dodge a weapon
-  if (why !== 'EVADE') {
+  // thrust ahead) is not made, except to dodge a weapon or close in during task-group assault
+  if (why !== 'EVADE' && !t.huntTaskGroup) {
     const b = primaryAtState(t, simT), k = ai.acc*5;
     const el = elementsAt({ x: t.x, y: t.y, z: t.z, vx: t.vx + dir.x*k, vy: t.vy + dir.y*k, vz: t.vz + dir.z*k }, b);
     if (el.e >= 0.9 || el.pe < AI_MIN_PE) return null;
@@ -2326,9 +2338,10 @@ function arriveAI(t, h) {
     const b = bodyAt('TITAN', simT), rv = new THREE.Vector3(t.x - b.c[0], t.y - b.c[1], t.z - b.c[2]), r = rv.length();
     const vv = new THREE.Vector3(t.vx - b.v[0], t.vy - b.v[1], t.vz - b.v[2]);
     const el = elementsAt(t, b), rp = el.pe + R_TITAN;
-    if (el.e <= 0.15 || vv.length() < 200 || (t.boss && Math.hypot(t.x - ship.x, t.y - ship.y, t.z - ship.z) < 1200e3 && el.e < 0.7)) {
+    const dShip = Math.hypot(t.x - ship.x, t.y - ship.y, t.z - ship.z);
+    if (el.e <= 0.15 || vv.length() < 200 || (t.boss && dShip < 1200e3 && el.e < 0.7) || (t.huntTaskGroup && dShip < 850e3 && el.e < 0.55)) {
       t.arrived = true;
-      if (isSeen(t) || t.boss) log(t.boss ? `${t.name} IN TITAN ORBIT · CLOSING ON TASK GROUP` : `${t.name} IN TITAN ORBIT`);
+      if (isSeen(t) || t.boss) log(t.boss ? `${t.name} IN TITAN ORBIT · CLOSING ON TASK GROUP` : `${t.name} IN TITAN ORBIT · ENGAGING TASK GROUP`);
       return null;
     }
     // from just before periapsis on; a low periapsis is held up with a radial-out component
@@ -2338,10 +2351,29 @@ function arriveAI(t, h) {
     }
   } else {
     if (A.obj.gone) { t.arrived = true; return null; }   // the objective is gone: fight as usual
-    if (A.via && !A.passed) {                         // coast through the flyby first; head for the objective once outbound
-      const b = bodyAt(A.via, simT), rv = new THREE.Vector3(t.x - b.c[0], t.y - b.c[1], t.z - b.c[2]), vv = new THREE.Vector3(t.vx - b.v[0], t.vy - b.v[1], t.vz - b.v[2]);
-      if (rv.dot(vv) < 0) return null;
-      A.passed = true; if (isSeen(t)) log(`${t.name} PAST TITAN · HEADING FOR ${A.obj.name}`);
+    if (A.via && !A.passed) {                         // engage the task group at Titan first; survivors break for L1 after departT
+      const b = bodyAt(A.via, simT), rv = new THREE.Vector3(t.x - b.c[0], t.y - b.c[1], t.z - b.c[2]), r = rv.length();
+      const vv = new THREE.Vector3(t.vx - b.v[0], t.vy - b.v[1], t.vz - b.v[2]);
+      const el = elementsAt(t, b), rp = el.pe + R_TITAN;
+      if (rv.dot(vv) < 0 && r > rp + 450e3) return null;
+      if (A.departT && simT < A.departT) {
+        // Brake at periapsis and close on the player's task group during the Titan battle window
+        const rel = new THREE.Vector3(ship.x - t.x, ship.y - t.y, ship.z - t.z), dS = rel.length();
+        const relV = new THREE.Vector3(ship.vx - t.vx, ship.vy - t.vy, ship.vz - t.vz);
+        if (el.e > 0.35 && r < 8000e3) {
+          dir = vv.clone().normalize().negate();
+        } else if (dS < 3500e3 && dS > 1e3) {
+          const u = rel.clone().normalize(), want = t.closeRange || 110e3;
+          const vc = dS > want ? Math.min(420, Math.sqrt(2*acc*0.45*(dS - want))) : dS < 16e3 ? -60 : 0;
+          const err = u.multiplyScalar(vc).sub(relV.clone().negate());
+          if (err.length() > 14) dir = err.normalize();
+        }
+        if (dir && r - b.R < 350e3) dir.addScaledVector(rv.clone().normalize(), 1.1).normalize();
+        if (!dir) return null;
+        t.burning = true; t.aiState = 'MANEUVER';
+        return [dir.x*acc, dir.y*acc, dir.z*acc];
+      }
+      A.passed = true; if (isSeen(t)) log(`${t.name} BREAKING OFF · HEADING FOR ${A.obj.name}`);
     }
     const o = A.obj, rel = new THREE.Vector3(o.x - t.x, o.y - t.y, o.z - t.z), d = rel.length(), u = rel.clone().divideScalar(d);
     const relV = new THREE.Vector3(t.vx - o.vx, t.vy - o.vy, t.vz - o.vz);
@@ -2354,7 +2386,7 @@ function arriveAI(t, h) {
   t.burning = true; t.aiState = 'ARRIVE';
   return [dir.x*acc, dir.y*acc, dir.z*acc];
 }
-const SAT = { ETA: 3*3600, ALT: 1500e3, ENEMY_ALT: 1800e3 };
+const SAT = { ETA: 3*3600, ALT: 1500e3, ENEMY_ALT: 1525e3 };
 function planSaturn(t0) {
   const ship = titanOrbitState(SAT.ALT, 0.4, 0.05, t0);
   const fwd = new THREE.Vector3(ship.vx, ship.vy, ship.vz).sub(V3(titanVel(t0))).normalize();
@@ -2379,50 +2411,59 @@ function saturnForces(t0) {
       const st = titanOrbitState(SAT.ALT, 0.4 + slot[0]/(R_TITAN + SAT.ALT), 0.05, t0);
       out.push(friendly(n, st, 15, 2000, { ally: true, short: sh, slot, cls: 'carrier', len: 60, cells: ALLY.cells, pd: 5, score: 0, keep: 1000 }));
     });
-  // Attack group A: a hyperbolic approach to Titan, periapsis ENEMY_ALT at ETA (spread over 12 min), brakes into orbit
-  const tA = t0 + SAT.ETA, vinf = 2200, rp = R_TITAN + SAT.ENEMY_ALT, vp = Math.sqrt(vinf*vinf + 2*GM_TITAN/rp);
+  // Attack group A: arrives at tA directly into the player's 1500 km orbital band & phase, captures into orbit,
+  // and closes to ~75-130 km combat range with the player and allied carriers
+  const tA = t0 + SAT.ETA, vinf = 1650, rp = R_TITAN + SAT.ENEMY_ALT, vp = Math.sqrt(vinf*vinf + 2*GM_TITAN/rp);
+  const orbT = 2*Math.PI*Math.sqrt((R_TITAN + SAT.ALT)**3 / GM_TITAN);
+  const eyInc = SAT_Y.clone().multiplyScalar(Math.cos(0.05)).addScaledVector(SAT_POLE, Math.sin(0.05));
   const hostile = (name, cls, radius, integ, st, extra) => mkTargetAt(name, st, radius, integ, 'HOSTILE',
-    { hostile: true, req: true, cls, intel: true, sig: 40, ...extra, ai: { acc: extra.acc || 4, dv: 1500 } });
+    { hostile: true, req: true, cls, intel: true, sig: 40, ...extra, ai: { acc: extra.acc || 4, dv: extra.dv || 2600 } });
   const groupA = [['CORVETTE BURAN', 'corvette'], ['CORVETTE GROZA', 'corvette'], ['CORVETTE VIKHR', 'corvette'], ['CORVETTE SHKVAL', 'corvette'],
     ['CORVETTE TAIFUN', 'corvette'], ['CORVETTE URAGAN', 'corvette'], ['FRIGATE NEUSTRASHIMY', 'capital'], ['FRIGATE BESSTRASHNY', 'capital'],
     ['CRUISER ADMIRAL GORSHKOV', 'capital']];
   groupA.forEach(([n, cls], i) => {
-    const ph = 3.2 + 0.03*i, tp = titanPos(tA + i*80), tv = titanVel(tA + i*80);
-    const pr = SAT_X.clone().multiplyScalar(Math.cos(ph)).addScaledVector(SAT_Y, Math.sin(ph)), pv = SAT_X.clone().multiplyScalar(-Math.sin(ph)).addScaledVector(SAT_Y, Math.cos(ph));
-    const off = (i % 3 - 1)*40e3;
-    const peri = { x: tp[0] + pr.x*(rp + off), y: tp[1] + pr.y*(rp + off), z: tp[2] + pr.z*(rp + off) + (i % 2 ? 30e3 : -30e3),
+    const tAi = tA + i*25;
+    const ph = 0.4 + 2*Math.PI*(tAi - t0)/orbT + 0.022 + 0.009*i, tp = titanPos(tAi), tv = titanVel(tAi);
+    const pr = SAT_X.clone().multiplyScalar(Math.cos(ph)).addScaledVector(eyInc, Math.sin(ph));
+    const pv = SAT_X.clone().multiplyScalar(-Math.sin(ph)).addScaledVector(eyInc, Math.cos(ph));
+    const off = (i % 3 - 1)*16e3;
+    const peri = { x: tp[0] + pr.x*(rp + off), y: tp[1] + pr.y*(rp + off), z: tp[2] + pr.z*(rp + off) + (i % 2 ? 14e3 : -14e3),
       vx: tv[0] + pv.x*vp, vy: tv[1] + pv.y*vp, vz: tv[2] + pv.z*vp };
-    const st = integrateTo(peri, tA + i*80, t0, 20);
+    const st = integrateTo(peri, tAi, t0, 20);
     const big = cls === 'capital', cruiser = n.startsWith('CRUISER');
     out.push(hostile(n, cls, cruiser ? 14 : big ? 9 : 6, cruiser ? 1200 : big ? 450 : 200, st,
-      { score: cruiser ? 2500 : big ? 1000 : 500, salvo: cruiser ? 6 : big ? 4 : 3, salvoT: cruiser ? 18 : 22, fireRange: 900e3, prefer: 'facility',
+      { score: cruiser ? 2500 : big ? 1000 : 500, salvo: cruiser ? 6 : big ? 4 : 3, salvoT: cruiser ? 18 : 22,
+        fireRange: 520e3, prefer: null, huntTaskGroup: true, closeRange: cruiser ? 130e3 : big ? 100e3 : 75e3,
         mag: cruiser ? 64 : big ? 32 : 18,
-        pd: cruiser ? 5 : big ? 3 : 2, laser: !cruiser, fireT: 10 + i, len: cruiser ? 90 : undefined, arrive: { mode: 'capture' }, acc: cruiser ? 2.5 : 4 }));
+        pd: cruiser ? 5 : big ? 3 : 2, laser: !cruiser, fireT: 8 + i, len: cruiser ? 90 : undefined, arrive: { mode: 'capture' }, acc: cruiser ? 2.5 : 4 }));
   });
-  // Attack group B: a Titan flyby (periapsis 3500 km, 20 min after group A), then on to the storage bay (standing
-  // off 60 km), some five hours later; it can be engaged on the flyby and chased
+  // Attack group B: arrives 3 min after Group A right across the player's orbital position (~80-150 km), engages
+  // the task group for 15 minutes during the main battle, and any survivors then break off for Storage Bay L1
   const groupB = [['CORVETTE METEL', 'corvette'], ['CORVETTE TUMAN', 'corvette'], ['FRIGATE NEPOKOLEBIMY', 'capital'], ['FRIGATE STOIKY', 'capital'],
     ['CRUISER SLAVA', 'capital']];
-  const tB = tA + 1200, rpB = R_TITAN + 3500e3, vpB = Math.sqrt(1800*1800 + 2*GM_TITAN/rpB);
+  const tB = tA + 180, rpB = R_TITAN + SAT.ALT + 35e3, vpB = Math.sqrt(1200*1200 + 2*GM_TITAN/rpB);
   groupB.forEach(([n, cls], i) => {
-    const ph = 0.6 + 0.02*i, tp = titanPos(tB + i*60), tv = titanVel(tB + i*60);
-    const pr = SAT_X.clone().multiplyScalar(Math.cos(ph)).addScaledVector(SAT_Y, Math.sin(ph)), pv = SAT_X.clone().multiplyScalar(-Math.sin(ph)).addScaledVector(SAT_Y, Math.cos(ph));
-    const peri = { x: tp[0] + pr.x*rpB, y: tp[1] + pr.y*rpB, z: tp[2] + pr.z*rpB + (i - 2)*25e3, vx: tv[0] + pv.x*vpB, vy: tv[1] + pv.y*vpB, vz: tv[2] + pv.z*vpB };
-    const st = integrateTo(peri, tB + i*60, t0, 20);
+    const tBi = tB + i*25;
+    const ph = 0.4 + 2*Math.PI*(tBi - t0)/orbT + 0.015 + 0.011*i, tp = titanPos(tBi), tv = titanVel(tBi);
+    const pr = SAT_X.clone().multiplyScalar(Math.cos(ph)).addScaledVector(eyInc, Math.sin(ph));
+    const pv = SAT_X.clone().multiplyScalar(-Math.sin(ph)).addScaledVector(eyInc, Math.cos(ph));
+    const peri = { x: tp[0] + pr.x*rpB, y: tp[1] + pr.y*rpB, z: tp[2] + pr.z*rpB + (i - 2)*14e3, vx: tv[0] + pv.x*vpB, vy: tv[1] + pv.y*vpB, vz: tv[2] + pv.z*vpB };
+    const st = integrateTo(peri, tBi, t0, 20);
     const big = cls === 'capital', cruiser = n.startsWith('CRUISER');
     out.push(hostile(n, cls, cruiser ? 14 : big ? 9 : 6, cruiser ? 1200 : big ? 450 : 200, st,
-      { score: cruiser ? 2500 : big ? 1000 : 500, salvo: cruiser ? 6 : big ? 4 : 3, salvoT: cruiser ? 18 : 22, fireRange: 150e3, prefer: 'facility', mag: cruiser ? 64 : big ? 32 : 18,
-        pd: cruiser ? 5 : big ? 3 : 2, laser: !cruiser, fireT: 10 + i, len: cruiser ? 90 : undefined, arrive: { mode: 'meet', obj: bay, stand: 60e3, vmax: 3000, via: 'TITAN' }, acc: cruiser ? 2.5 : 4 }));
+      { score: cruiser ? 2500 : big ? 1000 : 500, salvo: cruiser ? 6 : big ? 4 : 3, salvoT: cruiser ? 18 : 22,
+        fireRange: 480e3, prefer: null, closeRange: cruiser ? 140e3 : big ? 110e3 : 85e3, mag: cruiser ? 64 : big ? 32 : 18,
+        pd: cruiser ? 5 : big ? 3 : 2, laser: !cruiser, fireT: 8 + i, len: cruiser ? 90 : undefined,
+        arrive: { mode: 'meet', obj: bay, stand: 60e3, vmax: 2400, via: 'TITAN', departT: tB + 900 }, acc: cruiser ? 2.5 : 4 }));
   });
-  // Wave 3 Boss: KR-01 Buryia Heavy Soviet Orbital Dreadnought arriving 18 min after Group B, aligned with the
-  // player's 1500 km Titan orbit so it comes directly into engagement range and hunts the task group to ~32 km
+  // Wave 3 Boss: KR-01 Buryia Heavy Soviet Orbital Dreadnought trailing the main attack fleet; held in outer staging
+  // until the main fleet battle (Group A + Group B) concludes, then arrives to obliterate surviving allies & duel the player
   {
-    const tC = tB + 1080, rpC = R_TITAN + SAT.ALT + 20e3, vpC = Math.sqrt(1850*1850 + 2*GM_TITAN/rpC);
-    const orbT = 2*Math.PI*Math.sqrt((R_TITAN + SAT.ALT)**3 / GM_TITAN);
+    const tC = tA + 3000, rpC = R_TITAN + SAT.ALT + 20e3, vpC = Math.sqrt(1850*1850 + 2*GM_TITAN/rpC);
     const ph = 0.4 + 2*Math.PI*(tC - t0)/orbT + 0.04;
     const tp = titanPos(tC), tv = titanVel(tC);
-    const pr = SAT_X.clone().multiplyScalar(Math.cos(ph)).addScaledVector(SAT_Y, Math.sin(ph));
-    const pv = SAT_X.clone().multiplyScalar(-Math.sin(ph)).addScaledVector(SAT_Y, Math.cos(ph));
+    const pr = SAT_X.clone().multiplyScalar(Math.cos(ph)).addScaledVector(eyInc, Math.sin(ph));
+    const pv = SAT_X.clone().multiplyScalar(-Math.sin(ph)).addScaledVector(eyInc, Math.cos(ph));
     const peri = { x: tp[0] + pr.x*rpC, y: tp[1] + pr.y*rpC, z: tp[2] + pr.z*rpC + 15e3,
       vx: tv[0] + pv.x*vpC, vy: tv[1] + pv.y*vpC, vz: tv[2] + pv.z*vpC };
     const st = integrateTo(peri, tC, t0, 20);
@@ -2593,20 +2634,35 @@ const MISSIONS = {
       const fac = targets.filter(t => t.facility && (t.name === 'TITAN SHIPYARD' || t.name === 'STORAGE BAY L1'));
       if (!fac.length && !mission.ended) { endMission('ABANDONED', 'SHIPYARD AND STORAGE BAY LOST'); return; }
       const boss = targets.find(t => t.boss && !t.gone);
-      if (boss && !mission.events.bossWarn) {
-        const tp = titanPos(simT);
-        if (Math.hypot(boss.x - tp[0], boss.y - tp[1], boss.z - tp[2]) < 16000e3) {
-          mission.events.bossWarn = true;
-          log('WARNING · WAVE 3 FLAGSHIP KR-01 BURYIA ENTERING TITAN GRAVITY WELL');
-          log('36 DESTRUCTIBLE SUBSYSTEMS DETECTED · PRESS [U] TO TARGET SUBSYSTEMS');
-          sfx.klaxon();
-        }
-      }
+      const mainFleet = targets.filter(t => t.hostile && !t.boss && !t.gone);
       if (boss && !mission.events.bossCutscene && !dead && !(mission && mission.ended)) {
-        const dShip = Math.hypot(boss.x - ship.x, boss.y - ship.y, boss.z - ship.z);
-        if (boss.arrived || dShip < 2600e3) {
-          mission.events.bossCutscene = true;
-          if (typeof startBossCutscene === 'function') startBossCutscene(boss);
+        if (mainFleet.length > 0) {
+          // Hold KR-01 Buryia in outer staging while the main fleet battle (Group A + Group B) is still in progress
+          boss.arrived = false;
+          boss.fireT = 15;
+          const tp = titanPos(simT), tv = titanVel(simT);
+          const rx = boss.x - tp[0], ry = boss.y - tp[1], rz = boss.z - tp[2], r = Math.hypot(rx, ry, rz);
+          const dShip = Math.hypot(boss.x - ship.x, boss.y - ship.y, boss.z - ship.z);
+          if (r < 8500e3 || dShip < 6500e3) {
+            const s = 8500e3 / Math.max(1, r);
+            boss.x = tp[0] + rx*s; boss.y = tp[1] + ry*s; boss.z = tp[2] + rz*s;
+            boss.px = boss.x; boss.py = boss.y; boss.pz = boss.z;
+            boss.vx = tv[0]; boss.vy = tv[1]; boss.vz = tv[2];
+          }
+        } else {
+          // Main battle finished: sound warning klaxon, drop time warp, and trigger Buryia's arrival after a 3.2s beat
+          if (!mission.events.mainClearedT) {
+            mission.events.mainClearedT = simT;
+            mission.events.bossWarn = true;
+            warpIdx = 0;
+            log('MAIN ATTACK FLEET DESTROYED · HEAVY DRIVE SIGNATURE INBOUND');
+            log('WARNING · WAVE 3 FLAGSHIP KR-01 BURYIA INTERCEPTING TASK GROUP');
+            sfx.klaxon();
+          }
+          if (simT - mission.events.mainClearedT >= 3.2) {
+            mission.events.bossCutscene = true;
+            if (typeof startBossCutscene === 'function') startBossCutscene(boss);
+          }
         }
       }
       if (!targets.some(t => t.req && !t.gone)) endMission('SUCCESS');
@@ -5080,7 +5136,71 @@ function drawMap(g, W, H, idx) {
   const sel = targets[curTarget];
   const known = targets.filter(t => !t.gone).map(t => ({ t, o: tgtKnown(t), stale: !isSeen(t) && trackAge(t) > DL_STALE }));
   let beyond = 0;
-  const label = (s2, x, y, col) => txt(g, x + 9, y - 7, s2, col, '18px monospace');
+  const showMapMissiles = HULL.id === 'cm32';
+  const lbls = [];
+  const label = (s2, x, y, col, isSel = false) => {
+    lbls.push({ s: s2, x, y, lx: x + 11, ly: y - 5, col, isSel, w: s2.length*10.6 + 6, moved: false });
+  };
+  const flushLabels = () => {
+    if (!lbls.length) return;
+    // Group nearby markers into spatial clusters so tight formations fan into a clean 1- or 2-column stack
+    const used = new Uint8Array(lbls.length);
+    for (let i = 0; i < lbls.length; i++) {
+      if (used[i]) continue;
+      const cl = [lbls[i]]; used[i] = 1;
+      for (let j = i + 1; j < lbls.length; j++) {
+        if (!used[j] && cl.some(c => Math.hypot(c.x - lbls[j].x, c.y - lbls[j].y) < 28)) {
+          cl.push(lbls[j]); used[j] = 1;
+        }
+      }
+      if (cl.length > 1) {
+        cl.sort((a, b) => (a.y - b.y) || a.s.localeCompare(b.s));
+        const mx = Math.max(...cl.map(c => c.x)), cy0 = cl.reduce((s, c) => s + c.y, 0) / cl.length;
+        const cols = cl.length > 5 ? 2 : 1, rows = Math.ceil(cl.length / cols);
+        cl.forEach((c, k) => {
+          const r = k % rows, colIdx = Math.floor(k / rows);
+          c.lx = mx + 14 + colIdx * 64;
+          c.ly = cy0 + (r - (rows - 1)/2) * 18 - 4;
+          c.moved = true;
+        });
+      }
+    }
+    // Pairwise vertical separation for any remaining overlapping label boxes
+    lbls.sort((a, b) => a.ly - b.ly);
+    for (let pass = 0; pass < 3; pass++) {
+      for (let i = 0; i < lbls.length; i++) {
+        for (let j = i + 1; j < lbls.length; j++) {
+          const a = lbls[i], b = lbls[j];
+          if (Math.abs(a.lx - b.lx) < Math.min(a.w, b.w) - 2 && Math.abs(b.ly - a.ly) < 17) {
+            const push = (17 - (b.ly - a.ly)) * 0.55;
+            a.ly -= push; b.ly += push; a.moved = true; b.moved = true;
+          }
+        }
+      }
+    }
+    for (const l of lbls) {
+      l.lx = clamp(l.lx, 8, W - Math.min(l.w, 220) - 6);
+      l.ly = clamp(l.ly, 60, 424);
+    }
+    // Draw leader lines first, then non-selected labels, then selected label on top
+    for (const l of lbls) {
+      if (l.moved || Math.hypot(l.lx - (l.x + 11), l.ly - (l.y - 5)) > 6) {
+        g.strokeStyle = l.isSel ? 'rgba(255,176,32,0.75)' : 'rgba(255,95,80,0.38)';
+        g.lineWidth = l.isSel ? 1.4 : 1;
+        g.beginPath(); g.moveTo(l.x, l.y); g.lineTo(l.lx - 3, l.ly - 5); g.stroke();
+      }
+    }
+    for (const passSel of [false, true]) {
+      for (const l of lbls) {
+        if (!!l.isSel !== passSel) continue;
+        if (l.moved || l.isSel) {
+          g.fillStyle = l.isSel ? 'rgba(18,14,4,0.88)' : 'rgba(2,10,5,0.76)';
+          g.fillRect(l.lx - 3, l.ly - 15, l.w, 18);
+        }
+        txt(g, l.lx, l.ly, l.s, l.col, '18px monospace');
+      }
+    }
+  };
 
   if (mapView === 'ORBIT') {
     const B = mapBody, BR = B.R;
@@ -5129,7 +5249,7 @@ function drawMap(g, W, H, idx) {
       }
     }
     for (const sat of sats) drawOrbit2(sat, 'rgba(125,255,154,0.18)', 1, [3, 5]);
-    for (const { t, o } of known) if (o && !isLocal(t)) drawOrbit2(o, t.side === 'HOSTILE' ? 'rgba(255,80,64,0.45)' : 'rgba(125,255,154,0.35)', 1.2, []);
+    for (const { t, o } of known) if (o && (!t.ally || t === sel)) drawOrbit2(o, t.side === 'HOSTILE' ? 'rgba(255,80,64,0.45)' : 'rgba(125,255,154,0.35)', 1.2, []);
     drawOrbit2(ship, PH, 2, []);
     // Predicted paths (numerical, with both bodies): the ship's own (so open trajectories show too), and after
     // the planned burn. Points are taken relative to the body at their own time, so a Moon-centred view stays put.
@@ -5170,15 +5290,31 @@ function drawMap(g, W, H, idx) {
       g.strokeStyle = PH; g.lineWidth = 1.5; g.strokeRect(q.X - 3, q.Y - 3, 6, 6);
       txt(g, q.X + 6, q.Y + 16, sat.name, DIM, '15px monospace');
     }
-    // Tracks: far ones by datalink (track number shown), near ones cluster at the ship and are left unlabelled
+    // Tracks: all hostile & friendly contacts; unselected formation allies right on top of OWN omit their label
     for (const { t, o, stale } of known) {
       if (!o) continue;
       const q = P(o.x, o.y, o.z); if (earthHides(q)) continue;
       const isSel = t === sel;
-      if (isLocal(t) && !isSel) continue;            // within 200 km: drawn at the ship's position anyway
+      if (t.ally && !isSel && Math.hypot(q.X - qs.X, q.Y - qs.Y) < 10) continue;
       const col = mapMarker(g, q.X, q.Y, t, stale, isSel);
-      label(isSel ? `${t.trk} ${t.name}` : t.trk + (stale ? '?' : ''), q.X, q.Y, isSel ? AMB : col);
+      label(isSel ? `${t.trk} ${t.name}` : t.trk + (stale ? '?' : ''), q.X, q.Y, isSel ? AMB : col, isSel);
     }
+    // Friendly/own missiles in flight on the 3D Orbital Map (Missile Cruiser CM-32 only)
+    if (showMapMissiles) {
+      for (const o of ordnance) {
+        if (o.dead) continue;
+        const q = P(o.x, o.y, o.z); if (earthHides(q)) continue;
+        const isAllyMsl = !!(o.src && o.src.ally);
+        const mCol = isAllyMsl ? '#66f0ff' : (ORD[o.kind]?.color || '#ffd250');
+        const qTail = P(o.x - (o.vx - B.v[0])*16, o.y - (o.vy - B.v[1])*16, o.z - (o.vz - B.v[2])*16);
+        g.strokeStyle = isAllyMsl ? 'rgba(102,240,255,0.55)' : 'rgba(255,210,80,0.65)';
+        g.lineWidth = 1.3;
+        g.beginPath(); g.moveTo(qTail.X, qTail.Y); g.lineTo(q.X, q.Y); g.stroke();
+        g.fillStyle = mCol;
+        g.beginPath(); g.moveTo(q.X, q.Y - 3.5); g.lineTo(q.X + 3.5, q.Y); g.lineTo(q.X, q.Y + 3.5); g.lineTo(q.X - 3.5, q.Y); g.closePath(); g.fill();
+      }
+    }
+    flushLabels();
     // Own ship
     g.strokeStyle = PH; g.fillStyle = PH; g.lineWidth = 2;
     g.beginPath(); g.arc(qs.X, qs.Y, 5, 0, Math.PI*2); g.fill();
@@ -5231,14 +5367,24 @@ function drawMap(g, W, H, idx) {
     for (const sat of sats) plot(sat, q => { g.strokeStyle = PH; g.lineWidth = 1.5; g.strokeRect(q.X - 3, q.Y - 3, 6, 6); txt(g, q.X + 6, q.Y + 16, sat.name, DIM, '15px monospace'); });
     for (const { t, o, stale } of known) {
       if (!o) continue;
-      plot(o, q => { const col = mapMarker(g, q.X, q.Y, t, stale, t === sel);
-        label(t === sel ? `${t.trk} ${t.name}` : t.trk + (stale ? '?' : ''), q.X, q.Y, t === sel ? AMB : col); });
+      plot(o, q => { const isSel = t === sel, col = mapMarker(g, q.X, q.Y, t, stale, isSel);
+        label(isSel ? `${t.trk} ${t.name}` : t.trk + (stale ? '?' : ''), q.X, q.Y, isSel ? AMB : col, isSel); });
     }
     for (const tp of torpedoes) {
       if (tp.dead || rangeTo(tp) > sensorRange()) continue;
       plot(tp, q => { g.fillStyle = RED; g.beginPath(); g.moveTo(q.X, q.Y - 6); g.lineTo(q.X + 5, q.Y + 4); g.lineTo(q.X - 5, q.Y + 4); g.closePath(); g.fill(); });
     }
-    for (const o of ordnance) plot(o, q => { g.fillStyle = ORD[o.kind].color; g.fillRect(q.X - 3, q.Y - 3, 6, 6); });
+    if (showMapMissiles) {
+      for (const o of ordnance) {
+        if (o.dead) continue;
+        const isAllyMsl = !!(o.src && o.src.ally);
+        plot(o, q => {
+          g.fillStyle = isAllyMsl ? '#66f0ff' : (ORD[o.kind]?.color || '#ffd250');
+          g.beginPath(); g.moveTo(q.X, q.Y - 4); g.lineTo(q.X + 4, q.Y); g.lineTo(q.X, q.Y + 4); g.lineTo(q.X - 4, q.Y); g.closePath(); g.fill();
+        });
+      }
+    }
+    flushLabels();
     for (const xb of xrayBeams) {
       const a = 1 - clamp(xb.age/xb.dur, 0, 1);
       const qA = P(...loc(xb.x0, xb.y0, xb.z0)), qB = P(...loc(xb.x1, xb.y1, xb.z1));
