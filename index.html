@@ -117,12 +117,13 @@
     <button id="closeSettings">Close (ESC)</button>
   </div>
 </div>
-<div id="help">ESC controls · P pause · . , time warp (stops when you fly) · click MFD softkeys</div>
+<div id="help">ESC controls · P pause · . , time warp · click panel controls · mid/Alt-drag look around</div>
 
 <script type="module">
 import * as THREE from 'three';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
 
 /* ================= CONSTANTS (SI units) ================= */
 const C = 299792458, G0 = 9.80665;
@@ -276,17 +277,17 @@ const MOD_GEOM = {"mod_spinal_railgun":{"box":[-0.71,-0.525,-13.625,0.71,2.676,1
    default loadout and full tanks, which sets the RCS torque. sys: body z ranges of the internal systems for
    the ship view. */
 const NEW_HULLS = {
-  dd84: { name: 'DD-84 DESTROYER', short: 'DD-84', file: 'dd84_destroyer_bare.glb', length: 80,
+  dd84: { name: 'DD-84 DESTROYER', short: 'DD-84', file: 'dd84_destroyer_bare.glb', cockpitFile: 'cockpit_dd84_destroyer.glb', length: 80,
     ship: { hullDry: 210000, mainProp0: 60000, rcsProp0: 4000, rcsThrust: 8000, rcsIsp: 250, mainThrust: 1500000, mainIsp: 3200 },
     power: { reactor: 1.5e6, reactorWaste: 1.0e6, avionics: 120e3, battCap: 200e6 }, therm: { capacity: 5e6, radArea: 300, radStowedArea: 300 },
     turn: 0.35, inertiaBox: [8.8, 9.4, 75], sys: { scope: [-35, -31], capacitors: [-25, -14], reactor: [0, 14], radiators: [22, 28], main: [30, 37.5] }, plume: 3,
     dockZ: 31.2, hitHull: 0.04, dials: { dv: 10000, load: 2000, heat: 1500 } },   // stern docking ring (body z, the hull's HP_Aft_Booster_Dock) for the BS-90 collar
-  cm32: { name: 'CM-32 MISSILE CRUISER', short: 'CM-32', file: 'cm32_missile_cruiser_bare.glb', length: 60,
+  cm32: { name: 'CM-32 MISSILE CRUISER', short: 'CM-32', file: 'cm32_missile_cruiser_bare.glb', cockpitFile: 'cockpit_cm32_missile.glb', length: 60,
     ship: { hullDry: 120000, mainProp0: 70000, rcsProp0: 2500, rcsThrust: 5000, rcsIsp: 250, mainThrust: 200000, mainIsp: 3200 },
     power: { reactor: 0.8e6, reactorWaste: 0.6e6, avionics: 100e3, battCap: 80e6 }, therm: { capacity: 3e6, radArea: 250, radStowedArea: 250 },
     turn: 0.5, inertiaBox: [9, 9, 60], sys: { scope: [-29, -25], capacitors: [-21, -13], reactor: [4, 14], radiators: [16, 21], main: [23, 29.5] }, plume: 2.5,
     hitHull: 0.06, dials: { dv: 8000, load: 1500, heat: 1000 } },
-  cs17: { name: 'CS-17 STEALTH CRUISER', short: 'CS-17', file: 'cs17_stealth_cruiser_bare.glb', length: 82,
+  cs17: { name: 'CS-17 STEALTH CRUISER', short: 'CS-17', file: 'cs17_stealth_cruiser_bare.glb', cockpitFile: 'cockpit_cs17_stealth.glb', length: 82,
     ship: { hullDry: 160000, mainProp0: 45000, rcsProp0: 3000, rcsThrust: 6000, rcsIsp: 250, mainThrust: 200000, mainIsp: 3200 },
     power: { reactor: 0.9e6, reactorWaste: 0.7e6, avionics: 100e3, battCap: 100e6 }, therm: { capacity: 4e6, radArea: 200, radStowedArea: 200 },
     turn: 0.45, inertiaBox: [20, 9, 82], sys: { scope: [-34, -30], capacitors: [-22, -12], reactor: [4, 18], radiators: [22, 30], main: [34, 43] }, plume: 2,
@@ -3362,7 +3363,8 @@ const ceilLight = new THREE.PointLight(0xdfe6ee, 0.25, 4, 2); ceilLight.position
 const panelSpot = new THREE.SpotLight(0xffe0b0, 1.2, 3, Math.PI/5, 0.9, 2);
 panelSpot.position.set(0, 0.55, -0.35);
 panelSpot.target.position.set(0, -0.05, -0.89);
-scene.add(amberLight, coldLight, ceilLight, panelSpot, panelSpot.target, new THREE.HemisphereLight(0x303840, 0x080808, 0.5));
+const hemiLight = new THREE.HemisphereLight(0x303840, 0x080808, 0.5);
+scene.add(amberLight, coldLight, ceilLight, panelSpot, panelSpot.target, hemiLight);
 
 /* ================= COCKPIT CONSTRUCTION (procedural) ================= */
 const cockpit = new THREE.Group();
@@ -3547,7 +3549,7 @@ const dials = [
   { id:'dv',   x: 0.9, y: 0.0,   label:'DELTA-V',    unit:'m/s', min:0,   max:5000, get: () => dvRemaining() },
   { id:'heat', x: 0.9, y:-0.33,  label:'HEAT OUT',   unit:'kW',  min:0,   max:600,  get: () => telem.qout/1e3 },
 ];
-function drawDial(g, d, val) {
+function drawDial(g, d, val, noNeedle = false) {
   const S = 256, c = 128, R = 104;
   g.clearRect(0, 0, S, S);
   g.fillStyle = '#e9e2c9'; g.beginPath(); g.arc(c, c, R+8, 0, Math.PI*2); g.fill();
@@ -3568,10 +3570,12 @@ function drawDial(g, d, val) {
       g.fillText(String(Math.round(v)), c + (R-46)*Math.cos(a), c + (R-46)*Math.sin(a));
     }
   }
-  const f = clamp((val - d.min)/(d.max - d.min), 0, 1), a = ang(f);
-  g.strokeStyle = '#111'; g.lineWidth = 4; g.beginPath();
-  g.moveTo(c - Math.cos(a)*12, c - Math.sin(a)*12); g.lineTo(c + Math.cos(a)*(R-26), c + Math.sin(a)*(R-26)); g.stroke();
-  g.fillStyle = '#111'; g.beginPath(); g.arc(c, c, 8, 0, Math.PI*2); g.fill();
+  if (!noNeedle) {
+    const f = clamp((val - d.min)/(d.max - d.min), 0, 1), a = ang(f);
+    g.strokeStyle = '#111'; g.lineWidth = 4; g.beginPath();
+    g.moveTo(c - Math.cos(a)*12, c - Math.sin(a)*12); g.lineTo(c + Math.cos(a)*(R-26), c + Math.sin(a)*(R-26)); g.stroke();
+    g.fillStyle = '#111'; g.beginPath(); g.arc(c, c, 8, 0, Math.PI*2); g.fill();
+  }
   g.font = 'bold 22px monospace'; g.fillText(d.label, c, c+78);
   g.font = '22px monospace'; g.fillText(d.unit, c, c+108);
 }
@@ -3686,6 +3690,7 @@ function applyCockpitVariant() {
   const dm = HULL.dials || {};
   for (const d of dials) if (d.max0 === undefined) d.max0 = d.max;
   for (const d of dials) d.max = dm[d.id] ?? d.max0;
+  if (typeof sync3DCockpit === 'function') sync3DCockpit();
 }
 applyCockpitVariant();
 function updateVarLamps() {
@@ -3775,7 +3780,14 @@ const mfds = mfdDefs.map((d, i) => {
 const DOCK_MFD = 4;
 let dockPrevPage = 3;
 function toggleDockCam() {
-  const m = mfds[DOCK_MFD], di = MFD_PAGES.indexOf('DOCK');
+  const di = MFD_PAGES.indexOf('DOCK');
+  const ck = typeof active3DCockpit === 'function' ? active3DCockpit() : null;
+  if (ck && ck.mfds[ck.dockMfdIdx]) {
+    const m = ck.mfds[ck.dockMfdIdx];
+    if (m.page === di) m.page = ck.dockPrevPage ?? 1; else { ck.dockPrevPage = m.page; m.page = di; }
+    m.on = true; drawMFD(m);
+  }
+  const m = mfds[DOCK_MFD];
   if (m.page === di) m.page = dockPrevPage; else { dockPrevPage = m.page; m.page = di; }
   m.on = true; drawMFD(m);
 }
@@ -4004,6 +4016,7 @@ function drawKP() {
   g.fillStyle = '#7dff9a'; g.font = 'bold 34px monospace'; g.textAlign = 'left'; g.textBaseline = 'middle';
   g.fillText(`> ${keyBuf}_`, 14, H/2 + 2);
   kpScreen.tex.needsUpdate = true;
+  if (typeof draw3DDsky === 'function') draw3DDsky();
 }
 drawKP();
 const keypadKeys = [['1', '2', '3'], ['4', '5', '6'], ['7', '8', '9'], ['CLR', '0', 'ENT']];
@@ -6161,6 +6174,7 @@ function drawMFD(m) {
   g.fillStyle = 'rgba(0,0,0,0.18)';
   for (let yy = 0; yy < H; yy += 4) g.fillRect(0, yy, W, 2);
   m.T.tex.needsUpdate = true;
+  if (m.present) m.present();
 }
 
 const lampState = {};
@@ -6183,7 +6197,12 @@ function updateDisplays() {
   const torpBlink = Math.floor(performance.now()/250) % 2 === 0;
   torpLampMat.emissiveIntensity = ((torpWarn && torpBlink) || lampTestT > 0) ? 2.5 : 0;
   updateVarLamps();
-  for (const m of mfds) { if (!pageOk(m.page)) m.page = MFD_PAGES[m.page] === 'DOCK' ? 3 : m.page; drawMFD(m); }
+  const ck3 = typeof active3DCockpit === 'function' ? active3DCockpit() : null;
+  if (ck3) {
+    update3DCockpitDisplays(ck3, lampOn, torpBlink);
+  } else {
+    for (const m of mfds) { if (!pageOk(m.page)) m.page = MFD_PAGES[m.page] === 'DOCK' ? 3 : m.page; drawMFD(m); }
+  }
 }
 
 function updateNavball() {
@@ -6207,13 +6226,16 @@ function animateCockpit(dt) {
   // Needles follow their readings through a damped spring, so they accelerate and settle
   // rather than jumping. Positions are normalised 0..1 across each dial's span.
   const sdt = Math.min(dt, 0.05);
+  const ck3 = typeof active3DCockpit === 'function' ? active3DCockpit() : null;
   for (const d of dials) {
     const span = d.max - d.min;
     const tgt = clamp((d.get() - d.min)/span, 0, 1);
     d.pv = (d.pv || 0) + (40*(tgt - (d.p ?? tgt)) - 9*(d.pv || 0)) * sdt;
     d.p = clamp((d.p ?? tgt) + d.pv*sdt, -0.02, 1.02);
-    drawDial(d.g, d, d.min + d.p*span);
-    d.tex.needsUpdate = true;
+    if (!ck3) {
+      drawDial(d.g, d, d.min + d.p*span);
+      d.tex.needsUpdate = true;
+    }
   }
   updateScopeGimbal(sdt);
   // Laser gimbal: slaved to the locked target within a few degrees of the nose, stowed when unlocked
@@ -6250,6 +6272,18 @@ function animateCockpit(dt) {
     ud.pivot.position.z += (tz - ud.pivot.position.z) * k;
   }
   updateNavball();
+  if (ck3) animate3DCockpit(ck3, dt, k, state);
+  const wantFov = ck3 ? ck3.cfg.fov : 72;
+  if (Math.abs(camera.fov - wantFov) > 0.05) {
+    camera.fov += (wantFov - camera.fov) * Math.min(1, dt*10);
+    camera.updateProjectionMatrix();
+  }
+  const lk = 1 - Math.exp(-dt*14);
+  if (!ck3) { ckLook.yawT = 0; ckLook.pitchT = 0; }
+  ckLook.yaw += (ckLook.yawT - ckLook.yaw) * lk;
+  ckLook.pitch += (ckLook.pitchT - ckLook.pitch) * lk;
+  camera.rotation.order = 'YXZ';
+  camera.rotation.set((ck3 ? ck3.cfg.basePitch : 0) + ckLook.pitch, ckLook.yaw, 0);
   const t = performance.now()/1000;
   camera.position.y = 0.05 + 0.0015*Math.sin(t*0.9) + 0.001*Math.sin(t*2.3);
   camera.position.x = 0.001*Math.sin(t*0.6);
@@ -6669,7 +6703,9 @@ function onAction(id) {
       else log('MASTER ARM COVER CLOSED');
       break;
     case 'jettison': jettisonPods(); break;
-    case 'toggleIR': irOn = !irOn; sfx.click(); mfds.forEach(m => drawMFD(m)); break;
+    case 'toggleIR': irOn = !irOn; sfx.click(); mfds.forEach(m => drawMFD(m));
+      if (typeof active3DCockpit === 'function' && active3DCockpit()) active3DCockpit().mfds.forEach(m => drawMFD(m));
+      break;
     case 'warpUp': {
       if (warpIdx >= WARP_THRUST && (held.has(bindings.mainEngine) || attHold)) { log(`THRUST WARP MAX x${WARPS[WARP_THRUST]}`); break; }
       if (warpIdx >= WARP_FULL) { const why = coastBlock(); if (why) { log(`NO COAST WARP · ${why}`); break; } }
@@ -6691,6 +6727,7 @@ function anyFlightInput(c) {
 
 const raycaster = new THREE.Raycaster();
 const ndc = new THREE.Vector2();
+const ckLook = { yaw: 0, pitch: 0, yawT: 0, pitchT: 0, drag: null, lastMid: 0 };
 
 window.addEventListener('keydown', e => {
   if (rebinding) {
@@ -6713,16 +6750,39 @@ window.addEventListener('pointerdown', e => {
   if (hangarOpen || uiOverlay) return;
   if (!started || menuOpen) return;
   if (e.target !== canvas) return;
+  // Middle-drag or Alt+left-drag pans the pilot head view inside 3D cockpits; double-middle-click re-centres
+  const ck3 = typeof active3DCockpit === 'function' ? active3DCockpit() : null;
+  if (ck3 && (e.button === 1 || (e.button === 0 && e.altKey))) {
+    e.preventDefault();
+    const now = performance.now();
+    if (e.button === 1 && now - ckLook.lastMid < 320) {
+      ckLook.yawT = 0; ckLook.pitchT = 0; ckLook.lastMid = 0; return;
+    }
+    if (e.button === 1) ckLook.lastMid = now;
+    ckLook.drag = { x: e.clientX, y: e.clientY, yaw0: ckLook.yawT, pitch0: ckLook.pitchT, btn: e.button };
+    return;
+  }
   // Panel buttons take the click; anything else is a weapon trigger
   ndc.set(e.clientX/window.innerWidth*2 - 1, -(e.clientY/window.innerHeight)*2 + 1);
   raycaster.setFromCamera(ndc, camera);
   const shown = o => { for (let p = o; p; p = p.parent) if (!p.visible) return false; return true; };   // hidden hull panels
-  const hit = raycaster.intersectObjects([...clickables, ...switchHits].filter(shown), false)[0];
-  if (hit) { hit.object.userData.onPress(); hit.object.userData.pressT = 0.12; return; }
+  const targetsHit = ck3 ? ck3.hits : [...clickables, ...switchHits];
+  const hit = raycaster.intersectObjects(targetsHit.filter(shown), false)[0];
+  if (hit) { hit.object.userData.onPress(hit); hit.object.userData.pressT = 0.16; return; }
   held.add(code);
   onEdge(code);
 });
-window.addEventListener('pointerup', e => held.delete('Mouse' + e.button));
+window.addEventListener('pointermove', e => {
+  if (!ckLook.drag) return;
+  const dx = e.clientX - ckLook.drag.x, dy = e.clientY - ckLook.drag.y;
+  ckLook.yawT = clamp(ckLook.drag.yaw0 - dx * 0.0045, -1.05, 1.05);
+  ckLook.pitchT = clamp(ckLook.drag.pitch0 - dy * 0.0038, -0.52, 0.45);
+});
+window.addEventListener('pointerup', e => {
+  if (ckLook.drag && e.button === ckLook.drag.btn) ckLook.drag = null;
+  held.delete('Mouse' + e.button);
+});
+window.addEventListener('auxclick', e => { if (e.button === 1) e.preventDefault(); });
 window.addEventListener('contextmenu', e => e.preventDefault());
 
 // Death screen: clicks only count once the message is showing, so a click mid-fight can't skip it
@@ -6996,6 +7056,9 @@ function buildHangarScene() {
 // One model file, loaded once (cached promise). Tried as .glb (repository, GitHub Pages), then as <name>.glb.json
 // holding the same bytes in base64 under "glb" (the published artifact can't serve .glb files, but serves JSON).
 const gltfLoader = new GLTFLoader();
+const dracoLoader = new DRACOLoader();
+dracoLoader.setDecoderPath('https://unpkg.com/three@0.160.0/examples/jsm/libs/draco/gltf/');
+gltfLoader.setDRACOLoader(dracoLoader);
 function loadModel(file, onProgress) {
   if (hangar.files[file]) return hangar.files[file];
   const viaJson = (res, rej) => {
@@ -7011,6 +7074,1107 @@ function loadModel(file, onProgress) {
   pr.catch(() => { delete hangar.files[file]; });     // a failed file is retried next time
   return (hangar.files[file] = pr);
 }
+
+/* ================= SHIP-SPECIFIC 3D INTERACTIVE COCKPITS (DD-84, CS-17, CM-32) ================= */
+const CK3D_CFG = {
+  dd84: {
+    file: 'cockpit_dd84_destroyer.glb', fov: 55, basePitch: -0.115, dockMfdIdx: 2, fdaiR: 0.124,
+    mfds: [
+      { name: 'Screen_MFD_1', page: 0 },
+      { name: 'Screen_MFD_2', page: 6 },
+      { name: 'Screen_MFD_3', page: 1 },
+      { name: 'Screen_MFD_4', page: 2, map: true },
+      { name: 'Screen_MFD_5', page: 7 },
+      { name: 'Screen_MFD_6', page: 3 },
+    ],
+    dialMap: [0, 1, 2, 5, 3, 4],
+    dialStyle: 'ivory',
+    mfdFilter: 'none', mfdColor: '#66ee98', mfdBorder: 'rgba(72,190,118,0.40)',
+    dskyCol: '#6dff92', dskyBg: '#031107',
+    sub: {
+      base: '#192430', accent: '#d6d0b8', dd84: true,
+      port: { pos: [-0.54, 0.625, -0.785], rotX: -0.58, rotY:  0.10, w: 0.50, h: 0.148 },
+      stbd: { pos: [ 0.36, 0.625, -0.785], rotX: -0.58, rotY: -0.05, w: 0.40, h: 0.156 },
+    },
+    lightScale: 0.00028,
+    spotCol: 0xffe4be, spotI: 0.32,
+  },
+  cs17: {
+    file: 'cockpit_cs17_stealth.glb', fov: 54, basePitch: -0.145, dockMfdIdx: 1, fdaiR: 0.111,
+    mfds: [
+      { name: 'Screen_MFD_1', page: 0 },
+      { name: 'Screen_MFD_2', page: 3 },
+      { name: 'Screen_MFD_3', page: 2, map: true },
+      { name: 'Screen_MFD_4', page: 6 },
+    ],
+    dialMap: [0, 1, 3, 4, 2, 5],
+    dialStyle: 'obsidian',
+    fdaiDark: true,
+    mfdFilter: 'hue-rotate(-88deg) saturate(1.55) brightness(1.06)', mfdColor: '#ff963a', mfdBorder: 'rgba(255,140,48,0.42)',
+    dskyCol: '#ff9638', dskyBg: '#110803',
+    sub: {
+      base: '#121316', accent: '#e0a96e',
+      port: { pos: [-0.53, 0.592, -0.672], rotX: -0.62, rotY:  0.15, w: 0.42, h: 0.138 },
+      stbd: { pos: [ 0.44, 0.592, -0.672], rotX: -0.62, rotY: -0.14, w: 0.45, h: 0.138 },
+    },
+    lightScale: 0.00018,
+    spotCol: 0xff8a3c, spotI: 0.18,
+  },
+  cm32: {
+    file: 'cockpit_cm32_missile.glb', fov: 55, basePitch: -0.125, dockMfdIdx: 1, fdaiR: 0.113,
+    mfds: [
+      { name: 'Screen_MFD_1', page: 0 },
+      { name: 'Screen_MFD_2', page: 6 },
+      { name: 'Screen_MFD_3', page: 2, map: true },
+    ],
+    dialMap: [0, 1, 2, 3, 4, 5],
+    dialStyle: 'bourdon',
+    mfdFilter: 'hue-rotate(48deg) saturate(1.18) brightness(1.06)', mfdColor: '#66e4ff', mfdBorder: 'rgba(90,215,245,0.40)',
+    dskyCol: '#72e6ff', dskyBg: '#041014',
+    sub: {
+      base: '#21251c', accent: '#dcd4b8',
+      port: { pos: [-0.49, 0.655, -0.78], rotX: -0.60, rotY:  0.12, w: 0.44, h: 0.138 },
+      stbd: { pos: [ 0.47, 0.655, -0.78], rotX: -0.60, rotY: -0.12, w: 0.47, h: 0.138 },
+    },
+    lightScale: 0.00024,
+    spotCol: 0xffd6a0, spotI: 0.28,
+  },
+};
+const CK3D_LAMP_MAP = [
+  ['Lamp_OVERHEAT',    'overheat', 'OVERHEAT',    0xff3322],
+  ['Lamp_BATT_LOW',    'batt',     'BATT LOW',    0xffaa22],
+  ['Lamp_LASER_ARMED', 'larm',     'LASER ARMED', 0xff2a2a],
+  ['Lamp_RAD_STOWED',  'radst',    'RAD STOWED',  0xffaa22],
+  ['Lamp_TGT_FWD',     'tgt',      'TGT FWD',     0x33ff66],
+  ['Lamp_SYS_DAMA',    'dmg',      'SYS DAMAGE',  0xff3322],
+];
+const CK3D = { loaded: {}, loading: {}, active: null };
+var CK3D_READY = true;
+const _ckV = new THREE.Vector3(), _ckV2 = new THREE.Vector3(), _ckQ = new THREE.Quaternion();
+const _ckZ = new THREE.Vector3(0, 0, 1), _ckX = new THREE.Vector3(1, 0, 0), _ckY = new THREE.Vector3(0, 1, 0);
+
+// Stealth night-ops dark charcoal/amber FDAI 8-ball texture for CS-17
+const ballTexDark = canvasTex(512, 256, (g, w, h) => {
+  const sky = g.createLinearGradient(0, 0, 0, h/2); sky.addColorStop(0, '#07090d'); sky.addColorStop(1, '#1a2029');
+  g.fillStyle = sky; g.fillRect(0, 0, w, h/2);
+  const gnd = g.createLinearGradient(0, h/2, 0, h); gnd.addColorStop(0, '#2c1708'); gnd.addColorStop(1, '#0e0703');
+  g.fillStyle = gnd; g.fillRect(0, h/2, w, h/2);
+  g.strokeStyle = 'rgba(255,152,58,0.52)'; g.lineWidth = 2;
+  for (let lat = -80; lat <= 80; lat += 10) {
+    if (lat === 0) continue;
+    const y = (90 - lat)/180*h; g.beginPath(); g.moveTo(0, y); g.lineTo(w, y); g.stroke();
+  }
+  for (let k = 0; k < 12; k++) { const x = k/12*w; g.beginPath(); g.moveTo(x, 0); g.lineTo(x, h); g.stroke(); }
+  g.strokeStyle = '#ff9838'; g.lineWidth = 5; g.beginPath(); g.moveTo(0, h/2); g.lineTo(w, h/2); g.stroke();
+});
+
+function active3DCockpit() { return CK3D_READY ? CK3D.active : null; }
+
+function setCabinLighting(is3d) {
+  amberLight.intensity = is3d ? 0.03 : 0.35;
+  coldLight.intensity  = is3d ? 0.01 : 0.12;
+  ceilLight.intensity  = is3d ? 0.02 : 0.25;
+  panelSpot.intensity  = is3d ? 0.08 : 1.20;
+  hemiLight.intensity  = is3d ? 0.08 : 0.50;
+}
+
+// Auto-align a CanvasTexture to any GLB screen/gauge/DSKY quad (fixes inverted normals & mirrored UVs)
+function orientCanvasTex(mesh, tex, eyeW) {
+  const pos = mesh.geometry.attributes.position, uv = mesh.geometry.attributes.uv;
+  if (!pos || !uv) { tex.flipY = false; tex.needsUpdate = true; return null; }
+  const ctr = new THREE.Vector3(), p = new THREE.Vector3();
+  for (let i = 0; i < pos.count; i++) {
+    p.fromBufferAttribute(pos, i).applyMatrix4(mesh.matrixWorld);
+    ctr.add(p);
+  }
+  ctr.divideScalar(pos.count);
+  const toEye = eyeW.clone().sub(ctr).normalize();
+  const rightV = new THREE.Vector3().crossVectors(_ckY, toEye).normalize();
+  const upV = new THREE.Vector3().crossVectors(toEye, rightV).normalize();
+  let sumU = 0, sumV = 0, minR = Infinity, maxR = -Infinity, minU = Infinity, maxU = -Infinity;
+  for (let i = 0; i < pos.count; i++) {
+    p.fromBufferAttribute(pos, i).applyMatrix4(mesh.matrixWorld).sub(ctr);
+    const pr = p.dot(rightV), pu = p.dot(upV);
+    minR = Math.min(minR, pr); maxR = Math.max(maxR, pr);
+    minU = Math.min(minU, pu); maxU = Math.max(maxU, pu);
+    sumU += pr * (uv.getX(i) - 0.5);
+    sumV += pu * (uv.getY(i) - 0.5);
+  }
+  if (sumU < 0) { tex.wrapS = THREE.RepeatWrapping; tex.repeat.x = -1; tex.offset.x = 1; }
+  tex.flipY = sumV > 0;
+  tex.needsUpdate = true;
+  return { ctr, toEye, rightV, upV, w: maxR - minR, h: maxU - minU, minR, maxR, minU, maxU };
+}
+
+// Transparent stenciled aerospace paint lettering (matches OG-1 — no opaque black sticker rectangles!)
+function ck3Stencil(parent, text, w, h, color = '#dcd5ba', fontPx = 0) {
+  const cvW = 512, cvH = Math.max(56, Math.round(512 * h / w));
+  const T = canvasTex(cvW, cvH, (g, W, H) => {
+    g.clearRect(0, 0, W, H);
+    let sz = fontPx || Math.round(H * 0.66);
+    g.font = `bold ${sz}px monospace`;
+    const mw = g.measureText(text).width;
+    if (mw > W * 0.90) { sz = Math.max(12, Math.floor(sz * (W * 0.90) / mw)); g.font = `bold ${sz}px monospace`; }
+    g.textAlign = 'center'; g.textBaseline = 'middle';
+    g.shadowColor = 'rgba(0,0,0,0.95)'; g.shadowBlur = 6; g.shadowOffsetX = 0; g.shadowOffsetY = 2;
+    g.fillStyle = color;
+    g.fillText(text, W / 2, H / 2 + 1);
+  });
+  const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h),
+    new THREE.MeshBasicMaterial({ map: T.tex, transparent: true, depthWrite: false, toneMapped: false }));
+  if (parent) parent.add(m);
+  return m;
+}
+
+// High-res 512x512 analog gauge face (supports obsidian amber stealth gauges for CS-17 & aged-ivory/Bourdon for DD-84/CM-32)
+function draw3DDial(g, d, style = 'ivory') {
+  const S = 512, c = 256, R = 216, dark = style === 'obsidian';
+  g.clearRect(0, 0, S, S);
+  const bg = g.createRadialGradient(c, c, R * 0.2, c, c, R + 26);
+  if (dark) {
+    bg.addColorStop(0, '#14100d'); bg.addColorStop(0.84, '#0c0907'); bg.addColorStop(1, '#040302');
+  } else {
+    bg.addColorStop(0, '#c6bea0'); bg.addColorStop(0.84, '#b0a78a'); bg.addColorStop(1, '#645e4b');
+  }
+  g.fillStyle = bg; g.beginPath(); g.arc(c, c, R + 26, 0, Math.PI * 2); g.fill();
+  g.strokeStyle = dark ? '#ff8e30' : '#25221a'; g.lineWidth = dark ? 4 : 5;
+  g.beginPath(); g.arc(c, c, R + 2, 0, Math.PI * 2); g.stroke();
+  const ang = f => ((-135 + 270 * f) - 90) * Math.PI / 180;
+  if (d.redFrom !== undefined) {
+    const f0 = (d.redFrom - d.min) / (d.max - d.min);
+    g.strokeStyle = dark ? '#ff3c22' : '#b22416'; g.lineWidth = 18;
+    g.beginPath(); g.arc(c, c, R - 20, ang(f0), ang(1)); g.stroke();
+  }
+  g.strokeStyle = dark ? '#ff9e42' : '#151412'; g.fillStyle = dark ? '#ffaa4e' : '#151412';
+  g.textAlign = 'center'; g.textBaseline = 'middle'; g.font = 'bold 34px monospace';
+  for (let i = 0; i <= 20; i++) {
+    const f = i / 20, a = ang(f), maj = i % 10 === 0, med = i % 2 === 0;
+    const r2 = R - (maj ? 40 : med ? 26 : 16);
+    g.lineWidth = maj ? 6 : med ? 3.5 : 2;
+    g.beginPath(); g.moveTo(c + (R - 4) * Math.cos(a), c + (R - 4) * Math.sin(a));
+    g.lineTo(c + r2 * Math.cos(a), c + r2 * Math.sin(a)); g.stroke();
+    if (maj) {
+      const v = d.min + f * (d.max - d.min);
+      g.fillText(String(Math.round(v)), c + (R - 78) * Math.cos(a), c + (R - 78) * Math.sin(a));
+    }
+  }
+  g.fillStyle = dark ? '#2a221c' : '#1e1d1a'; g.beginPath(); g.arc(c, c, 18, 0, Math.PI * 2); g.fill();
+  g.fillStyle = dark ? '#ffaa4e' : '#151412';
+  g.font = 'bold 34px monospace'; g.fillText(d.label, c, c + 120);
+  g.font = 'bold 30px monospace'; g.fillStyle = dark ? '#c4752c' : '#332f25'; g.fillText(d.unit, c, c + 162);
+}
+
+function draw3DDsky(ck) {
+  if (!CK3D_READY) return;
+  if (!ck) ck = CK3D.active;
+  if (!ck || !ck.dsky) return;
+  const g = ck.dsky.g, W = 384, H = 256, col = ck.cfg.dskyCol || '#7dff9a';
+  g.fillStyle = ck.cfg.dskyBg || '#041008'; g.fillRect(0, 0, W, H);
+  g.strokeStyle = col; g.globalAlpha = 0.35; g.lineWidth = 3; g.strokeRect(8, 8, W - 16, H - 16); g.globalAlpha = 1;
+  g.fillStyle = col; g.font = 'bold 20px monospace'; g.textAlign = 'left'; g.textBaseline = 'top';
+  g.fillText(`${HULL.short || HULL.id.toUpperCase()} · DSKY COMP`, 22, 18);
+  g.fillStyle = 'rgba(255,255,255,0.06)'; g.fillRect(18, 52, W - 36, 56);
+  g.fillStyle = col; g.font = 'bold 34px monospace'; g.textBaseline = 'middle';
+  g.fillText(`> ${keyBuf}_`, 28, 82);
+  const t = tgtKnown(targets[curTarget]);
+  g.font = 'bold 21px monospace'; g.textBaseline = 'top';
+  g.fillStyle = t ? col : 'rgba(200,200,200,0.45)';
+  const tDist = t ? fmtDist(Math.hypot(t.x - ship.x, t.y - ship.y, t.z - ship.z)) : '--';
+  g.fillText(t ? `TGT: ${t.name.slice(0, 14)}` : 'TGT: NO LOCK', 22, 126);
+  g.fillText(t ? `RNG: ${tDist}` : 'RNG: ----', 22, 156);
+  const vlsN = Object.values(vlsCells).reduce((a, b) => a + b, 0);
+  const excN = Object.values(excalCells).reduce((a, b) => a + b, 0);
+  g.fillStyle = masterMode === 'ON' ? '#ff6452' : masterMode === 'TNG' ? '#ffbe44' : col;
+  g.fillText(`ARM: ${masterMode.padEnd(3)}  VLS:${vlsN} EX:${excN}`, 22, 198);
+  ck.dsky.tex.needsUpdate = true;
+}
+
+function draw3DSalvoLED(ck) {
+  if (!ck || !ck.salvoLed) return;
+  const g = ck.salvoLed.g, W = 512, H = 128;
+  g.fillStyle = '#0e0302'; g.fillRect(0, 0, W, H);
+  g.strokeStyle = '#5a1a12'; g.lineWidth = 4; g.strokeRect(4, 4, W - 8, H - 8);
+  const vlsN = Object.values(vlsCells).reduce((a, b) => a + b, 0);
+  const excN = Object.values(excalCells).reduce((a, b) => a + b, 0);
+  const t = tgtKnown(targets[curTarget]);
+  let status = 'INTERLOCK SAFE', scol = '#a83828';
+  if (ck.salvoFlashT > 0) { status = 'SALVO LAUNCHED'; scol = '#ff3822'; }
+  else if (!masterGuardOpen) { status = 'KEY 1 LOCKED'; scol = '#c0442c'; }
+  else if (masterMode === 'OFF') { status = 'KEY 2 SAFE'; scol = '#e88822'; }
+  else if (vlsN > 0 || excN > 0) { status = masterMode === 'ON' ? 'SALVO READY · LIVE' : 'SALVO READY · TNG'; scol = '#ff3822'; }
+  else { status = 'MAGAZINE EMPTY'; scol = '#cc6622'; }
+  g.fillStyle = scol; g.font = 'bold 34px monospace'; g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillText(status, W / 2, 42);
+  g.fillStyle = '#ff9840'; g.font = 'bold 26px monospace';
+  const tStr = t ? t.name.slice(0, 10) : 'NO TGT';
+  g.fillText(`VLS:${String(vlsN).padStart(2, '0')}  EX:${excN}  ${tStr}`, W / 2, 94);
+  ck.salvoLed.tex.needsUpdate = true;
+}
+
+function redraw3DDialFaces(ck) {
+  if (!ck) return;
+  for (const gd of ck.gauges) {
+    if (!gd.T) continue;
+    draw3DDial(gd.T.g, dials[gd.dialIdx], ck.cfg.dialStyle);
+    gd.T.tex.needsUpdate = true;
+  }
+}
+
+// Project an Object3D's world-space Box3 onto an orthonormal basis (rightV, upV, fwdV)
+function boxProj(obj, ctr, rightV, upV, fwdV) {
+  const b = new THREE.Box3().setFromObject(obj);
+  const c = ctr || b.getCenter(new THREE.Vector3());
+  let minR = Infinity, maxR = -Infinity, minU = Infinity, maxU = -Infinity, minF = Infinity, maxF = -Infinity;
+  for (const x of [b.min.x, b.max.x]) for (const y of [b.min.y, b.max.y]) for (const z of [b.min.z, b.max.z]) {
+    _ckV.set(x, y, z).sub(c);
+    const pr = _ckV.dot(rightV), pu = _ckV.dot(upV), pf = _ckV.dot(fwdV);
+    if (pr < minR) minR = pr; if (pr > maxR) maxR = pr;
+    if (pu < minU) minU = pu; if (pu > maxU) maxU = pu;
+    if (pf < minF) minF = pf; if (pf > maxF) maxF = pf;
+  }
+  return { b, ctr: c, minR, maxR, minU, maxU, minF, maxF, w: maxR - minR, h: maxU - minU };
+}
+
+function build3DSubPanel(ck, cfg) {
+  const S = cfg.sub;
+  const deckMaps = wearMaps(S.base, { grime: 0.85, scuff: 0.75, size: 512 });
+  const deckMat = new THREE.MeshStandardMaterial({ color: 0xffffff, ...deckMaps, bumpScale: 0.45, roughness: 0.92, metalness: 0.32, envMapIntensity: 0.14 });
+  const skirtMat = new THREE.MeshStandardMaterial({ color: 0x0d0f11, roughness: 0.88, metalness: 0.35, envMapIntensity: 0.08 });
+  const trimMat = new THREE.MeshStandardMaterial({ color: 0x222528, roughness: 0.55, metalness: 0.55, envMapIntensity: 0.22 });
+  const btnCapMat = new THREE.MeshStandardMaterial({ color: 0x1b1d20, roughness: 0.65, metalness: 0.18, envMapIntensity: 0.16 });
+  const metalSubMat = new THREE.MeshStandardMaterial({ color: 0xffffff, ...metalTex, bumpScale: 0.3, roughness: 0.42, metalness: 0.88, envMapIntensity: 0.35 });
+  const guardMetalMat = new THREE.MeshStandardMaterial({ color: 0x2a2d32, roughness: 0.45, metalness: 0.75, envMapIntensity: 0.35 });
+  const guardStripeMat = new THREE.MeshStandardMaterial({ map: stripeTex.tex, roughness: 0.5, metalness: 0.2, envMapIntensity: 0.25, side: THREE.DoubleSide });
+
+  const makeDeck = (D) => {
+    const g = new THREE.Group();
+    g.position.set(...D.pos);
+    g.rotation.order = 'YXZ';
+    g.rotation.set(D.rotX, D.rotY || 0, 0);
+    ck.root.add(g);
+    const plate = new THREE.Mesh(box(D.w, D.h, 0.018), deckMat);
+    plate.position.z = -0.009; g.add(plate);
+    // Deep bulkhead mounting housing underneath so the console bolts cleanly into the cabin (never floating!)
+    const housing = new THREE.Mesh(box(D.w - 0.014, D.h - 0.014, 0.14), skirtMat);
+    housing.position.set(0, -0.01, -0.082); g.add(housing);
+    const ft = 0.007;
+    for (const [bx, by, bw, bh] of [
+      [0, D.h/2 - ft/2, D.w, ft], [0, -D.h/2 + ft/2, D.w, ft],
+      [-D.w/2 + ft/2, 0, ft, D.h], [D.w/2 - ft/2, 0, ft, D.h],
+    ]) {
+      const b = new THREE.Mesh(box(bw, bh, 0.022), trimMat); b.position.set(bx, by, -0.007); g.add(b);
+    }
+    // Rivet rows matching OG-1
+    for (const dy of [-D.h/2 + 0.009, D.h/2 - 0.009]) {
+      for (let x = -D.w/2 + 0.02; x <= D.w/2 - 0.018; x += 0.085) {
+        const bl = new THREE.Mesh(boltGeo, metalSubMat); bl.scale.setScalar(0.42); bl.position.set(x, dy, 0.004); g.add(bl);
+      }
+    }
+    return g;
+  };
+  const portG = makeDeck(S.port);
+  const stbdG = makeDeck(S.stbd);
+
+  const addSubBtn = (par, x, y, label, onPress, bw = 0.056, bh = 0.024) => {
+    const h = new THREE.Mesh(box(bw + 0.007, bh + 0.007, 0.004), skirtMat);
+    h.position.set(x, y, 0.002); par.add(h);
+    const piv = new THREE.Group(); piv.position.set(x, y, 0.005);
+    const cap = new THREE.Mesh(box(bw, bh, 0.010), btnCapMat);
+    cap.position.z = 0.005;
+    cap.userData = { onPress, pivot: piv, baseZ: 0.005, pressT: 0 };
+    piv.add(cap); par.add(piv); ck.hits.push(cap); ck.btns.push(cap);
+    const lb = ck3Stencil(piv, label, bw * 0.90, bh * 0.72, S.accent);
+    lb.position.set(0, 0, 0.0112);
+    return cap;
+  };
+  const addSubRoundBtn = (par, x, y, onPress, r = 0.0105) => {
+    const col = new THREE.Mesh(new THREE.CylinderGeometry(r + 0.003, r + 0.003, 0.004, 24).rotateX(Math.PI/2), skirtMat);
+    col.position.set(x, y, 0.002); par.add(col);
+    const piv = new THREE.Group(); piv.position.set(x, y, 0.005);
+    const cap = new THREE.Mesh(new THREE.CylinderGeometry(r, r, 0.010, 24).rotateX(Math.PI/2), btnCapMat);
+    cap.position.z = 0.005;
+    cap.userData = { onPress, pivot: piv, baseZ: 0.005, pressT: 0 };
+    piv.add(cap); par.add(piv); ck.hits.push(cap); ck.btns.push(cap);
+    return cap;
+  };
+  const addSubLamp = (par, x, y, hex, get, r = 0.0058) => {
+    const collar = new THREE.Mesh(new THREE.CylinderGeometry(r + 0.002, r + 0.0025, 0.004, 16).rotateX(Math.PI/2), trimMat);
+    collar.position.set(x, y, 0.002); par.add(collar);
+    const mat = new THREE.MeshStandardMaterial({ color: new THREE.Color(hex).multiplyScalar(0.22), emissive: hex, emissiveIntensity: 0, roughness: 0.3, envMapIntensity: 0.25 });
+    const sp = new THREE.Mesh(new THREE.SphereGeometry(r, 14, 10), mat);
+    sp.position.set(x, y, 0.005); par.add(sp);
+    ck.subLamps.push({ mat, get, hex });
+    return mat;
+  };
+  const addSubSwitch = (par, x, y, id, label, guarded = false) => {
+    const plate = new THREE.Mesh(box(0.042, 0.030, 0.004), trimMat); plate.position.set(x, y, 0.002); par.add(plate);
+    const base = new THREE.Mesh(box(0.028, 0.018, 0.007), skirtMat); base.position.set(x, y, 0.004); par.add(base);
+    const piv = new THREE.Group(); piv.position.set(x, y, 0.007);
+    const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.0032, 0.0032, 0.025, 8).rotateX(Math.PI/2), metalSubMat);
+    stem.position.z = 0.0125; piv.add(stem);
+    const knob = new THREE.Mesh(new THREE.SphereGeometry(0.0052, 10, 8), metalSubMat);
+    knob.position.z = 0.025; piv.add(knob);
+    par.add(piv);
+    const lb = ck3Stencil(par, label, 0.076, 0.012, S.accent); lb.position.set(x, y - 0.024, 0.004);
+    const hit = new THREE.Mesh(box(0.046, 0.044, 0.032), hitMat);
+    hit.position.set(x, y, 0.018); hit.userData = { onPress: switchActions[id] };
+    par.add(hit); ck.hits.push(hit);
+    let gPiv = null;
+    if (guarded) {
+      // OG-1 style rounded metal flip-guard with hinge barrel, side brackets & hazard-stripe face (flips UPWARD)
+      gPiv = new THREE.Group(); gPiv.position.set(x, y + 0.020, 0.007);
+      const gw = 0.036, gh = 0.040, gd = 0.036, wt = 0.003;
+      const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.0026, 0.0026, gw + 0.006, 10).rotateZ(Math.PI/2), metalSubMat);
+      gPiv.add(barrel);
+      for (const dx of [-gw/2 - 0.001, gw/2 + 0.001]) {
+        const brk = new THREE.Mesh(box(0.004, 0.007, 0.008), metalSubMat); brk.position.set(dx, 0, -0.002); gPiv.add(brk);
+      }
+      const front = new THREE.Mesh(box(gw, gh, wt), guardStripeMat); front.position.set(0, -gh/2, gd); gPiv.add(front);
+      const topW  = new THREE.Mesh(box(gw, wt, gd), guardMetalMat);  topW.position.set(0, -wt/2, gd/2); gPiv.add(topW);
+      const sideL = new THREE.Mesh(box(wt, gh, gd), guardMetalMat);  sideL.position.set(-gw/2 + wt/2, -gh/2, gd/2); gPiv.add(sideL);
+      const sideR = new THREE.Mesh(box(wt, gh, gd), guardMetalMat);  sideR.position.set( gw/2 - wt/2, -gh/2, gd/2); gPiv.add(sideR);
+      const gHit = new THREE.Mesh(box(gw + 0.008, gh + 0.008, 0.014), hitMat);
+      gHit.position.set(0, -gh/2, gd + 0.005); gHit.userData = { onPress: () => onAction('guardLaser') };
+      gPiv.add(gHit); ck.hits.push(gHit);
+      par.add(gPiv);
+    }
+    ck.switches.push({ id, pivot: piv, guardPivot: gPiv });
+  };
+
+  const reset3DMfds = () => {
+    ck.mfds.forEach((m, i) => { m.page = cfg.mfds[i].page; m.on = true; drawMFD(m); });
+    sfx.click();
+  };
+  const centerView = () => { ckLook.yawT = 0; ckLook.pitchT = 0; sfx.click(); };
+  const excalLampFn = () => {
+    if (!hasRole('excalibur')) return 0;
+    const rem = Object.values(excalCells).reduce((a, b) => a + b, 0);
+    if (rem <= 0) return [0xff3322, 0.9];
+    if (excalReload > 0) return [0xffaa22, Math.floor(performance.now()/250) % 2 ? 2.2 : 0.4];
+    return masterMode !== 'OFF' ? [0x3fe0ff, 2.4] : [0x3fe0ff, 0.75];
+  };
+  const swList = [
+    ['rad', 'RADIATORS', false], ['stab', 'RCS STAB', false], ['arm', 'LASER ARM', true],
+    ['aux1', 'AUX PWR', false], ['aux2', 'COMMS', false], ['aux3', 'BEACON', false],
+  ];
+  const utilBtns = [
+    ['BOOK', () => { sfx.click(); toggleManual(); }],
+    ['TEST', () => { lampTestT = 3; sfx.click(); }],
+    ['RESET', reset3DMfds],
+    ['JETT', () => jettisonPods()],
+    ['IR', () => onAction('toggleIR')],
+    ['LEAD', () => onAction('leadHold')],
+    ['EXCAL', () => fireExcalibur()],
+    ['CTR', centerView],
+  ];
+
+  if (S.dd84) {
+    // PORT CONSOLE: 8 DD-84 Point-Defence AUTO/HOLD keys + lamps (top) & 6 switches (bottom)
+    const pdSlots = Object.keys(HULLS.dd84.hardpoints).filter(k => /^HP_(CIWS|LPD)_/.test(k));
+    const pdHdr = ck3Stencil(portG, 'POINT DEFENCE · AUTO / HOLD', 0.32, 0.012, S.accent);
+    pdHdr.position.set(0, 0.060, 0.004);
+    pdSlots.forEach((slot, i) => {
+      const x = -0.210 + i * 0.060;
+      const ab = slot.replace(/^HP_(CIWS|LPD)_/, '').replace(/[a-z]/g, '');
+      addSubBtn(portG, x, 0.025, `${slot.includes('CIWS') ? 'C' : 'L'}-${ab}`, () => {
+        pdHold[slot] = !pdHold[slot]; log(`${slotLabel(slot)} · ${pdHold[slot] ? 'HOLD FIRE' : 'AUTO'}`); sfx.click();
+      }, 0.048, 0.021);
+      addSubLamp(portG, x, 0.046, 0x66ff88, () => {
+        const m = [...PDC_MOUNTS, ...LPD_MOUNTS].find(q => q.sys === slot);
+        if (!m) return 0;
+        if ((damage[slot] ?? 1) <= 0) return [0xff3322, 2.5];
+        if (pdHold[slot]) return [0xffaa22, 2.0];
+        const firing = (m.lastFire !== undefined && simT - m.lastFire < 0.3) || !!m.target;
+        return firing ? [0x66ff88, Math.random() < 0.5 ? 2.8 : 0.6] : m.rounds <= 0 ? [0xff3322, 1.0] : [0x66ff88, 0.9];
+      }, 0.0048);
+    });
+    swList.forEach(([id, lbl, g], i) => addSubSwitch(portG, -0.205 + i * 0.082, -0.030, id, lbl, g));
+
+    // STARBOARD CONSOLE (fits cleanly between Master Arm & Checklist clipboard)
+    utilBtns.forEach(([lbl, fn], i) => {
+      const r = Math.floor(i / 4), c = i % 4;
+      const x = -0.150 + c * 0.070;
+      const y = r === 0 ? 0.046 : 0.008;
+      addSubBtn(stbdG, x, y, lbl, fn, 0.056, 0.020);
+      if (lbl === 'LEAD') addSubLamp(stbdG, x, y + 0.018, 0xffb000, () => leadHold ? [0xffb000, 2.5] : 0, 0.0044);
+      if (lbl === 'EXCAL') addSubLamp(stbdG, x, y + 0.018, 0x3fe0ff, excalLampFn, 0.0044);
+    });
+    addSubLamp(stbdG, 0.154, 0.046, 0xff2a2a, () => (torpWarn && Math.floor(performance.now()/250) % 2 === 0) ? [0xff2a2a, 2.6] : 0, 0.0075);
+    const tLb = ck3Stencil(stbdG, 'TORP', 0.046, 0.010, '#ff8880'); tLb.position.set(0.154, 0.061, 0.004);
+    addSubRoundBtn(stbdG, 0.154, 0.012, () => { torpMute = !torpMute; sfx.click(); log(torpMute ? 'TORP WARN MUTED' : 'TORP WARN UNMUTED'); }, 0.009);
+    const mLb = ck3Stencil(stbdG, 'MUTE', 0.046, 0.010, S.accent); mLb.position.set(0.154, -0.006, 0.004);
+
+    const dHdr = ck3Stencil(stbdG, 'BOOSTER DOCKING', 0.19, 0.011, S.accent); dHdr.position.set(-0.02, -0.019, 0.004);
+    [['CAM', () => { toggleDockCam(); sfx.click(); }],
+     ['LITE', () => { dock.lights = !dock.lights; sfx.click(); log(`DOCKING LIGHTS ${dock.lights ? 'ON' : 'OFF'}`); }],
+     ['CAPT', () => { dock.capArmed = !dock.capArmed; sfx.click(); log(`CAPTURE LATCHES ${dock.capArmed ? 'ARMED' : 'SAFE'}`); }],
+     ['SEP', () => { sfx.click(); stageSep(); }]].forEach(([lbl, fn], i) => addSubBtn(stbdG, -0.156 + i * 0.054, -0.044, lbl, fn, 0.044, 0.020));
+    const sepArmed = () => performance.now()/1000 - dock.sepArmT < 3;
+    [['LT', 0xfff4d0, () => dock.lights ? 1.5 : 0],
+     ['AR', 0xffaa22, () => dock.capArmed ? 2.2 : 0],
+     ['CT', 0x66ff88, () => dock.state === 'FREE' && dock.g && dock.g.s < 2 && dock.g.s > -1 && dock.g.lat < 3 ? 2.5 : 0],
+     ['CP', 0xffaa22, () => dock.state === 'CAPTURE' ? 2.5 : 0],
+     ['DK', 0x66ff88, () => sepArmed() ? (Math.floor(performance.now()/200) % 2 ? 2.5 : 0.2) : dock.state === 'DOCKED' ? 2.5 : 0]].forEach(([lbl, col, on], i) => {
+      const x = 0.046 + i * 0.034;
+      addSubLamp(stbdG, x, -0.038, col, () => { const v = on(); return v ? [lbl === 'DK' && sepArmed() ? 0xff3322 : col, v] : 0; }, 0.0052);
+      const lb = ck3Stencil(stbdG, lbl, 0.030, 0.010, S.accent); lb.position.set(x, -0.055, 0.004);
+    });
+  } else {
+    // CS-17 & CM-32: PORT = 6 Switches + OG-1 brass placard; STARBOARD = 2x4 Utility Keys + TORP/MUTE
+    const pHdr = ck3Stencil(portG, 'SYSTEMS & WEAPONS ARM', 0.24, 0.011, S.accent);
+    pHdr.position.set(-0.06, 0.052, 0.004);
+    const H = HULLS[ck.id];
+    const plT = canvasTex(256, 64, (g, w, h) => {
+      g.fillStyle = ck.id === 'cs17' ? '#241c14' : '#9a8e6b'; g.fillRect(0, 0, w, h);
+      g.strokeStyle = ck.id === 'cs17' ? '#7a4a22' : '#4a3d1c'; g.lineWidth = 4; g.strokeRect(4, 4, w - 8, h - 8);
+      g.fillStyle = ck.id === 'cs17' ? '#e8a45c' : '#1f180c'; g.font = 'bold 26px monospace';
+      g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(`MAX ${defaultAccelG(H).toFixed(2)}G`, w/2, h/2 + 1);
+    });
+    const pl = new THREE.Mesh(new THREE.PlaneGeometry(0.11, 0.022),
+      new THREE.MeshStandardMaterial({ map: plT.tex, roughness: 0.65, metalness: 0.15, envMapIntensity: 0.15 }));
+    pl.position.set(S.port.w/2 - 0.068, 0.046, 0.003); portG.add(pl);
+    swList.forEach(([id, lbl, g], i) => {
+      const span = S.port.w - 0.080;
+      addSubSwitch(portG, -span/2 + i * (span / 5), -0.012, id, lbl, g);
+    });
+
+    const sHdr = ck3Stencil(stbdG, 'UTILITY & WARNINGS', 0.21, 0.011, S.accent);
+    sHdr.position.set(-0.03, 0.053, 0.004);
+    const colStep = (S.stbd.w - 0.14) / 4;
+    utilBtns.forEach(([lbl, fn], i) => {
+      const r = Math.floor(i / 4), c = i % 4;
+      const x = -S.stbd.w/2 + 0.048 + c * colStep;
+      const y = r === 0 ? 0.020 : -0.034;
+      addSubBtn(stbdG, x, y, lbl, fn, colStep * 0.82, 0.023);
+      if (lbl === 'LEAD') addSubLamp(stbdG, x, y + 0.020, 0xffb000, () => leadHold ? [0xffb000, 2.5] : 0, 0.005);
+      if (lbl === 'EXCAL') addSubLamp(stbdG, x, y + 0.020, 0x3fe0ff, excalLampFn, 0.005);
+    });
+    const tx = S.stbd.w/2 - 0.045;
+    addSubLamp(stbdG, tx, 0.030, 0xff2a2a, () => (torpWarn && Math.floor(performance.now()/250) % 2 === 0) ? [0xff2a2a, 2.6] : 0, 0.0082);
+    const tLb = ck3Stencil(stbdG, 'TORP', 0.050, 0.011, '#ff8880'); tLb.position.set(tx, 0.046, 0.004);
+    addSubRoundBtn(stbdG, tx, -0.010, () => { torpMute = !torpMute; sfx.click(); log(torpMute ? 'TORP WARN MUTED' : 'TORP WARN UNMUTED'); }, 0.010);
+    const mLb = ck3Stencil(stbdG, 'MUTE', 0.050, 0.011, S.accent); mLb.position.set(tx, -0.032, 0.004);
+  }
+}
+
+function build3DCockpit(id, tpl) {
+  const cfg = CK3D_CFG[id];
+  const group = new THREE.Group();
+  const root = tpl.clone(true);
+  group.add(root);
+  // Shift the cabin so Pilot_Camera_Eye_Pivot aligns with camera at (0, 0.05, 0)
+  group.updateMatrixWorld(true);
+  const eyeNode = root.getObjectByName('Pilot_Camera_Eye_Pivot');
+  const eye = eyeNode ? eyeNode.getWorldPosition(new THREE.Vector3()) : new THREE.Vector3(0, 1.2, 0.2);
+  group.position.set(-eye.x, 0.05 - eye.y, -eye.z);
+  group.visible = false;
+  scene.add(group);
+  group.updateMatrixWorld(true);
+  const eyeW = new THREE.Vector3(0, 0.05, 0);
+
+  const ck = {
+    id, cfg, group, root, mfds: [], hits: [], btns: [], switches: [], subLamps: [],
+    lamps: [], gauges: [], dockMfdIdx: cfg.dockMfdIdx, dockPrevPage: cfg.mfds[cfg.dockMfdIdx]?.page ?? 1,
+    dsky: null, salvoLed: null, salvoFlashT: 0,
+    navBall: null, markers: null,
+    masterGuard: null, masterToggle: null, throttle: null, rhc: null, thc: null,
+    keyL: null, keyR: null, salvoBtn: null,
+  };
+
+  // Reference-matched moody lighting + tame studio RoomEnvironment reflections & noisy wall bump
+  const lScale = cfg.lightScale ?? 0.00028;
+  root.traverse(o => {
+    if (o.isLight && o.intensity > 5) {
+      o.intensity = Math.min(1.1, o.intensity * lScale);
+      if (o.distance === 0) o.distance = 3.8;
+    }
+    if (o.isMesh && o.material && !Array.isArray(o.material)) {
+      const nm = o.name || '', mnm = o.material.name || '';
+      const mat = o.material.clone();
+      const isBrightHardware = /Chrome|Brass|Lamp|Bulb|Placard|Matrix|Cap/i.test(mnm + nm);
+      if ('envMapIntensity' in mat) mat.envMapIntensity = isBrightHardware ? 0.32 : 0.06;
+      if (mat.normalScale && !isBrightHardware) mat.normalScale.multiplyScalar(0.5);
+      if (nm === 'DD84_Laminated_Checklist') { mat.color.setHex(0xa8a496); mat.roughness = 0.9; mat.envMapIntensity = 0.08; }
+      if (/Throttle_Handle|RHC_Grip|THC_TGrip/.test(nm)) { mat.color.setHex(0x141518); mat.roughness = 0.92; mat.metalness = 0.05; mat.envMapIntensity = 0.14; }
+      if (/Throttle_Arms|THC_Shaft/.test(nm)) { mat.roughness = 0.42; mat.metalness = 0.85; mat.envMapIntensity = 0.35; }
+      o.material = mat;
+    }
+  });
+  // Soft OG-1 style moody down-spot focusing illumination on the main instruments while corners fall into shadow
+  const dashSpot = new THREE.SpotLight(cfg.spotCol || 0xffe0b8, cfg.spotI ?? 0.3, 3.0, Math.PI / 4, 0.95, 2.0);
+  dashSpot.position.set(0, eye.y + 0.32, eye.z - 0.35);
+  dashSpot.target.position.set(0, eye.y - 0.18, -0.95);
+  root.add(dashSpot, dashSpot.target);
+
+  // Dashboard plane basis from FDAI pivot (in glTF Y-up, pivot local +Y faces pilot and -Z points up along dash)
+  const fdaiPivot = root.getObjectByName('Cockpit_FDAI_8Ball_Pivot');
+  const fdaiBaseQ = fdaiPivot ? fdaiPivot.quaternion.clone() : new THREE.Quaternion();
+  const dashRight = new THREE.Vector3(1, 0, 0).applyQuaternion(fdaiBaseQ).normalize();
+  const dashFwd   = new THREE.Vector3(0, 1, 0).applyQuaternion(fdaiBaseQ).normalize();
+  const dashUp    = new THREE.Vector3(0, 0, -1).applyQuaternion(fdaiBaseQ).normalize();
+  const dashQ     = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(dashRight, dashUp, dashFwd));
+
+  // 1. Live CRT MFD screens (ship-specific phosphor palette + smart aspect fit -> large, crisp, zero stretch!)
+  const NATIVE_ASPECT = MFD_TEX_W / MFD_TEX_H;
+  cfg.mfds.forEach((md, idx) => {
+    const mesh = root.getObjectByName(md.name);
+    if (!mesh) return;
+    const T = canvasTex(MFD_TEX_W, MFD_TEX_H);
+    const tmpT = canvasTex(64, 64);
+    const info = orientCanvasTex(mesh, tmpT.tex, eyeW);
+    tmpT.tex.dispose();
+    const physAspect = info ? clamp(info.w / Math.max(0.02, info.h), 0.5, 3.0) : NATIVE_ASPECT;
+    // Within 14% of native aspect, fill edge-to-edge for maximum readability; otherwise 1:1 with rich phosphor margins
+    const closeFit = Math.abs(physAspect / NATIVE_ASPECT - 1) <= 0.14;
+    const dispW = closeFit ? MFD_TEX_W : (physAspect >= NATIVE_ASPECT ? Math.round(MFD_TEX_H * physAspect) : MFD_TEX_W);
+    const dispH = closeFit ? MFD_TEX_H : (physAspect >= NATIVE_ASPECT ? MFD_TEX_H : Math.round(MFD_TEX_W / physAspect));
+    const dispT = canvasTex(dispW, dispH);
+    orientCanvasTex(mesh, dispT.tex, eyeW);
+    mesh.material = new THREE.MeshBasicMaterial({ map: dispT.tex, toneMapped: false, side: THREE.DoubleSide });
+    const m = { i: idx, page: md.page, on: true, T, dispT, map: !!md.map };
+    const mCol = cfg.mfdColor || '#66ee98', mBrd = cfg.mfdBorder || 'rgba(72,180,112,0.38)';
+    const mFilt = cfg.mfdFilter || 'none';
+    m.present = () => {
+      const dg = dispT.g, W = dispW, H = dispH;
+      dg.fillStyle = id === 'cs17' ? '#090402' : id === 'cm32' ? '#02080a' : '#020805';
+      dg.fillRect(0, 0, W, H);
+      const dx = Math.round((W - MFD_TEX_W) / 2), dy = Math.round((H - MFD_TEX_H) / 2);
+      dg.save();
+      if (mFilt !== 'none') dg.filter = mFilt;
+      dg.drawImage(T.cv, dx, dy, MFD_TEX_W, MFD_TEX_H);
+      dg.restore();
+      const hullLbl = HULL.short || HULL.id.toUpperCase();
+      if (!closeFit) {
+        dg.strokeStyle = mBrd; dg.lineWidth = 2;
+        dg.strokeRect(dx + 1, dy + 1, MFD_TEX_W - 2, MFD_TEX_H - 2);
+      }
+      if (dy >= 42) {
+        dg.fillStyle = mCol; dg.font = 'bold 24px monospace'; dg.textAlign = 'left'; dg.textBaseline = 'middle';
+        dg.fillText(`${hullLbl} // ${m.map ? '3D NAV MAP' : MFD_PAGES[m.page]}`, 22, dy * 0.45);
+        dg.textAlign = 'right';
+        dg.fillText(`MFD-${idx + 1}`, W - 22, dy * 0.45);
+        const by = dy + MFD_TEX_H + (H - dy - MFD_TEX_H) / 2;
+        const battPct = clamp(battery / POWER.battCap, 0, 1);
+        const tempPct = clamp((hullT - 260) / 160, 0, 1);
+        if (dy > 110) {
+          // Portrait screen (e.g. CS-17 MFD-2): rich phosphor bar-graph telemetry block filling bottom band
+          const drawBar = (y, lbl, frac, valStr, col = mCol) => {
+            dg.fillStyle = mCol; dg.textAlign = 'left'; dg.font = 'bold 20px monospace'; dg.fillText(lbl, 24, y);
+            dg.strokeStyle = mBrd; dg.lineWidth = 2; dg.strokeRect(150, y - 10, 440, 20);
+            dg.fillStyle = col; dg.fillRect(153, y - 7, Math.round(434 * clamp(frac, 0, 1)), 14);
+            dg.textAlign = 'right'; dg.fillText(valStr, W - 24, y);
+          };
+          drawBar(by - 58, 'CAPACITOR', battPct, `${Math.round(battPct * 100)}%`);
+          drawBar(by - 20, 'HULL TEMP', tempPct, `${Math.round(hullT)} K`, hullT > THERM.tWarn ? '#ff4422' : mCol);
+          drawBar(by + 18, 'DELTA-V', clamp(dvRemaining() / 8000, 0, 1), `${Math.round(dvRemaining())} m/s`);
+          dg.fillStyle = masterMode === 'ON' ? '#ff5533' : masterMode === 'TNG' ? '#ffbe44' : mCol;
+          dg.textAlign = 'left'; dg.fillText(`MASTER ARM: ${masterMode}`, 24, by + 62);
+          dg.fillStyle = mCol; dg.textAlign = 'right';
+          dg.fillText(`VLS:${Object.values(vlsCells).reduce((a, b) => a + b, 0)}  EX:${Object.values(excalCells).reduce((a, b) => a + b, 0)}`, W - 24, by + 62);
+        } else {
+          dg.fillStyle = masterMode === 'ON' ? '#ff5533' : masterMode === 'TNG' ? '#ffbe44' : mCol;
+          dg.textAlign = 'left'; dg.font = 'bold 21px monospace';
+          dg.fillText(`ARM:${masterMode}  BATT:${Math.round(battPct * 100)}%`, 22, by);
+          dg.fillStyle = mCol; dg.textAlign = 'right';
+          dg.fillText(`HULL:${Math.round(hullT)}K  DV:${Math.round(dvRemaining())}m/s`, W - 22, by);
+        }
+      } else if (dx >= 48) {
+        // Ultrawide screen (e.g. DD-84 MFD-1): vertical phosphor telemetry rails flanking the main radar
+        dg.fillStyle = mCol; dg.font = 'bold 18px monospace'; dg.textAlign = 'center'; dg.textBaseline = 'middle';
+        const lx = dx / 2, rx = dx + MFD_TEX_W + (W - dx - MFD_TEX_W) / 2;
+        const drawVRail = (cx, y, lbl, frac, txt, col = mCol) => {
+          dg.fillStyle = mCol; dg.fillText(lbl, cx, y);
+          dg.strokeStyle = mBrd; dg.lineWidth = 1.5; dg.strokeRect(cx - 34, y + 14, 68, 12);
+          dg.fillStyle = col; dg.fillRect(cx - 32, y + 16, Math.round(64 * clamp(frac, 0, 1)), 8);
+          dg.fillStyle = mCol; dg.fillText(txt, cx, y + 42);
+        };
+        dg.fillText(`${hullLbl}`, lx, 34); dg.fillText(`CIC MASTER`, lx, 58);
+        drawVRail(lx, 118, 'BATT', battery / POWER.battCap, `${Math.round(battery/POWER.battCap*100)}%`);
+        drawVRail(lx, 212, 'TEMP', (hullT - 260) / 160, `${Math.round(hullT)}K`, hullT > THERM.tWarn ? '#ff4422' : mCol);
+        drawVRail(lx, 306, 'THRUST', thrustFrac, `${Math.round(thrustFrac*100)}%`);
+        dg.fillStyle = masterMode === 'ON' ? '#ff5533' : masterMode === 'TNG' ? '#ffbe44' : mCol;
+        dg.fillText('MASTER', rx, 34); dg.fillText(masterMode, rx, 58);
+        drawVRail(rx, 118, 'VLS', Object.values(vlsCells).reduce((a, b) => a + b, 0) / 48, `${Object.values(vlsCells).reduce((a, b) => a + b, 0)}`);
+        drawVRail(rx, 212, 'EXCAL', Object.values(excalCells).reduce((a, b) => a + b, 0) / 4, `${Object.values(excalCells).reduce((a, b) => a + b, 0)}`);
+        drawVRail(rx, 306, 'DELTA-V', dvRemaining() / 10000, `${Math.round(dvRemaining())}`);
+      }
+      // Subtle unified CRT scanlines + glass vignette across margins
+      if (!closeFit) {
+        dg.fillStyle = 'rgba(0,0,0,0.16)';
+        for (let yy = 0; yy < H; yy += 4) dg.fillRect(0, yy, W, 2);
+      }
+      dispT.tex.needsUpdate = true;
+    };
+    ck.mfds.push(m);
+
+    const soft = root.getObjectByName(md.name + '_Softkeys');
+    if (soft && info) {
+      // Hide mismatched static GLB softkey mesh & build 5 real, evenly spaced, animated 3D pushbuttons!
+      soft.visible = false;
+      const mq = mesh.getWorldQuaternion(new THREE.Quaternion());
+      const scrFwd = new THREE.Vector3(0, 1, 0).applyQuaternion(mq).normalize();
+      if (scrFwd.dot(info.toEye) < 0) scrFwd.negate();
+      const scrRight = new THREE.Vector3().crossVectors(_ckY, scrFwd).normalize();
+      const scrUp = new THREE.Vector3().crossVectors(scrFwd, scrRight).normalize();
+      const scrQ = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(scrRight, scrUp, scrFwd));
+      const sp = boxProj(soft, null, scrRight, scrUp, scrFwd);
+      const sSz = sp.b.getSize(new THREE.Vector3());
+      const labels = m.map ? MAP_BTNS : mfdBtnLabels;
+      const isCm32Mfd2 = id === 'cm32' && md.name === 'Screen_MFD_2';
+
+      const softGrp = new THREE.Group();
+      const barPosW = sSz.y < 0.12
+        ? info.ctr.clone()
+            .addScaledVector(scrUp, sp.ctr.clone().sub(info.ctr).dot(scrUp) + (isCm32Mfd2 ? 0.015 : 0))
+            .addScaledVector(scrFwd, sp.ctr.clone().sub(info.ctr).dot(scrFwd) + sp.maxF - (isCm32Mfd2 ? 0.002 : 0.011))
+        : info.ctr.clone()
+            .addScaledVector(scrUp, info.minU - 0.036)
+            .addScaledVector(scrFwd, sp.ctr.clone().sub(info.ctr).dot(scrFwd) + sp.maxF - 0.011);
+      softGrp.position.copy(group.worldToLocal(barPosW));
+      softGrp.quaternion.copy(scrQ);
+      group.add(softGrp);
+
+      const rowW = Math.min(info.w * 0.96, 0.56);
+      const step = rowW / 5, bw = step * 0.80, bh = isCm32Mfd2 ? 0.015 : 0.018;
+      const sockMat = new THREE.MeshStandardMaterial({ color: 0x0b0d0f, roughness: 0.9, metalness: 0.2, envMapIntensity: 0.08 });
+      const keyMat  = new THREE.MeshStandardMaterial({ color: 0x1d2024, roughness: 0.62, metalness: 0.22, envMapIntensity: 0.18 });
+      // Subtle recessed rail holding all 5 softkeys
+      const rail = new THREE.Mesh(box(rowW + 0.008, bh + 0.008, 0.005), sockMat);
+      rail.position.z = 0.001; softGrp.add(rail);
+
+      labels.forEach((lbl, k) => {
+        const bx = -rowW / 2 + (k + 0.5) * step;
+        const piv = new THREE.Group(); piv.position.set(bx, 0, 0.004);
+        const cap = new THREE.Mesh(box(bw, bh, 0.010), keyMat);
+        cap.position.z = 0.005;
+        cap.userData = { onPress: () => (m.map ? mapSoftkey(m, k) : mfdSoftkey(m, k)), pivot: piv, baseZ: 0.004, pressT: 0 };
+        piv.add(cap);
+        const lb = ck3Stencil(piv, lbl, bw * 0.92, bh * 0.78, cfg.sub.accent);
+        lb.position.set(0, 0, 0.0108);
+        softGrp.add(piv);
+        ck.hits.push(cap);
+        ck.btns.push(cap);
+      });
+    }
+  });
+
+  // 2. Live FDAI 8-Ball snug to the bezel ring + glossy curved glass cover + clean crosshair clearance
+  if (fdaiPivot) {
+    const staticSphere = root.getObjectByName('FDAI_8Ball_Sphere');
+    if (staticSphere) staticSphere.visible = false;
+    const navBasis = new THREE.Group();
+    navBasis.rotation.x = -Math.PI / 2;
+    fdaiPivot.add(navBasis);
+    const navMount = new THREE.Group();
+    navMount.scale.set(1, 1, -1);
+    navBasis.add(navMount);
+    const bTex = cfg.fdaiDark ? ballTexDark.tex : ballTex.tex;
+    const navBall = new THREE.Mesh(new THREE.SphereGeometry(cfg.fdaiR, 48, 32),
+      new THREE.MeshStandardMaterial({
+        map: bTex, emissiveMap: bTex, emissive: cfg.fdaiDark ? 0xff9a44 : 0xfff0d4,
+        emissiveIntensity: cfg.fdaiDark ? 0.55 : 0.25, roughness: 0.35, metalness: 0, envMapIntensity: 0.15,
+      }));
+    navMount.add(navBall);
+    // Glossy curved glass dome over the FDAI 8-ball (matching OG-1's ballGlass)
+    const navGlass = new THREE.Mesh(new THREE.SphereGeometry(cfg.fdaiR * 1.022, 48, 32),
+      new THREE.MeshPhysicalMaterial({
+        color: 0xffffff, roughness: 0.04, metalness: 0, clearcoat: 1.0, clearcoatRoughness: 0.05,
+        transparent: true, opacity: 0.16, envMapIntensity: 1.8, depthWrite: false,
+      }));
+    navBasis.add(navGlass);
+    // Nudge yellow GLB crosshair cleanly in front of the glass cover so it never clips into the snug ball/glass
+    const xhair = root.getObjectByName('FDAI_8Ball_Crosshair');
+    if (xhair) xhair.position.addScaledVector(dashFwd, 0.026);
+
+    const sc = cfg.fdaiR / BALL_R;
+    const mkPlace = (obj, dir) => { obj.position.copy(dir).multiplyScalar(cfg.fdaiR * 1.008); obj.quaternion.setFromUnitVectors(markerZ, dir); };
+    const mPro = ringMarker(0xffd23a, 0.008 * sc, 0.0105 * sc); mkPlace(mPro, new THREE.Vector3(1, 0, 0));
+    const mRet = new THREE.Group();
+    {
+      const rMat = new THREE.MeshBasicMaterial({ color: 0xffd23a, toneMapped: false, side: THREE.DoubleSide });
+      for (const ang of [Math.PI/4, -Math.PI/4]) {
+        const p = new THREE.Mesh(new THREE.PlaneGeometry(0.02 * sc, 0.0018 * sc), rMat);
+        p.rotation.z = ang; mRet.add(p);
+      }
+    }
+    mkPlace(mRet, new THREE.Vector3(-1, 0, 0));
+    const mTgt = squareMarker(0xff3fd0, false); mTgt.scale.setScalar(sc);
+    const mAnti = squareMarker(0xff3fd0, true); mAnti.scale.setScalar(sc);
+    const mBurn = ringMarker(0x3fe0ff, 0.008 * sc, 0.012 * sc);
+    navBall.add(mPro, mRet, mTgt, mAnti, mBurn);
+    ck.navBall = navBall;
+    ck.markers = { mTgt, mAnti, mBurn, sc };
+  }
+
+  // 3. Six 512x512 analog gauges (obsidian-amber on CS-17, aged-ivory/Bourdon on DD-84/CM-32) + stenciled labels
+  const isObsidian = cfg.dialStyle === 'obsidian';
+  for (let i = 0; i < 6; i++) {
+    const nStr = String(i + 1).padStart(2, '0');
+    const face = root.getObjectByName(`Gauge_${nStr}_Face`);
+    const bezel = root.getObjectByName(`Gauge_${nStr}_Bezel`);
+    const pivot = root.getObjectByName(`Needle_Gauge_${nStr}_Pivot`);
+    const dialIdx = cfg.dialMap[i] ?? i;
+    let T = null;
+    if (face) {
+      T = canvasTex(512, 512);
+      orientCanvasTex(face, T.tex, eyeW);
+      face.material = new THREE.MeshStandardMaterial({
+        map: T.tex, emissiveMap: T.tex,
+        emissive: isObsidian ? 0xffa855 : 0xffe8c2,
+        emissiveIntensity: isObsidian ? 0.85 : 0.24,
+        roughness: 0.85, metalness: 0, envMapIntensity: 0.06, side: THREE.DoubleSide,
+      });
+    }
+    if (bezel || pivot) {
+      const gp = boxProj(bezel || pivot, null, dashRight, dashUp, dashFwd);
+      const lbW = id === 'cs17' ? 0.098 : 0.112, lbH = 0.015;
+      const lb = ck3Stencil(group, dials[dialIdx].label, lbW, lbH, cfg.sub.accent);
+      const posW = gp.ctr.clone().addScaledVector(dashUp, gp.minU - 0.010).addScaledVector(dashFwd, gp.maxF + 0.005);
+      lb.position.copy(group.worldToLocal(posW));
+      lb.quaternion.copy(dashQ);
+    }
+    ck.gauges.push({ pivot, baseQ: fdaiBaseQ.clone(), dialIdx, T });
+  }
+  redraw3DDialFaces(ck);
+
+  // 4. Six overhead warning lamps (clone shared materials!) + transparent stenciled labels below collars
+  for (const [nodeName, lampId, label, hex] of CK3D_LAMP_MAP) {
+    const mesh = root.getObjectByName(nodeName);
+    if (!mesh) continue;
+    const mat = mesh.material.clone();
+    mat.color.setHex(hex).multiplyScalar(0.28);
+    mat.emissive.setHex(hex);
+    mat.emissiveIntensity = 0.15;
+    mesh.material = mat;
+    ck.lamps.push({ id: lampId, mat });
+    const collar = root.getObjectByName(nodeName + '_Collar') || mesh;
+    const lp = boxProj(collar, null, dashRight, dashUp, dashFwd);
+    const lb = ck3Stencil(group, label, 0.125, 0.016, cfg.sub.accent);
+    const posW = lp.ctr.clone().addScaledVector(dashUp, lp.minU - 0.012).addScaledVector(dashFwd, lp.maxF + 0.006);
+    lb.position.copy(group.worldToLocal(posW));
+    lb.quaternion.copy(dashQ);
+  }
+
+  // 5. DSKY EL Display + 4x3 clickable Keypad + crisp subtle engraved keycap legends
+  const dskyScreen = root.getObjectByName('DSKY_EL_Display');
+  if (dskyScreen) {
+    const T = canvasTex(384, 256);
+    orientCanvasTex(dskyScreen, T.tex, eyeW);
+    dskyScreen.material = new THREE.MeshBasicMaterial({ map: T.tex, toneMapped: false, side: THREE.DoubleSide });
+    ck.dsky = T;
+    draw3DDsky(ck);
+  }
+  const dskyKeys = root.getObjectByName('DSKY_Keypad_Buttons');
+  if (dskyKeys) {
+    // Hide merged static GLB keypad & build 12 individual animated 3D Bakelite keys (labels move with each key!)
+    dskyKeys.visible = false;
+    const kp = boxProj(dskyKeys, null, dashRight, dashUp, dashFwd);
+    const dskyGrp = new THREE.Group();
+    dskyGrp.position.copy(group.worldToLocal(kp.ctr.clone().addScaledVector(dashFwd, kp.maxF - 0.013)));
+    dskyGrp.quaternion.copy(dashQ);
+    group.add(dskyGrp);
+
+    const sockMat = new THREE.MeshStandardMaterial({ color: 0x090b0d, roughness: 0.9, metalness: 0.15, envMapIntensity: 0.06 });
+    const keyMat  = new THREE.MeshStandardMaterial({ color: 0x1d2024, roughness: 0.58, metalness: 0.18, envMapIntensity: 0.18 });
+    const back = new THREE.Mesh(box(kp.w + 0.004, kp.h + 0.004, 0.004), sockMat);
+    back.position.z = 0.001; dskyGrp.add(back);
+
+    const cw = kp.w / 3, ch = kp.h / 4, bw = cw * 0.80, bh = ch * 0.78;
+    for (let r = 0; r < 4; r++) {
+      for (let c = 0; c < 3; c++) {
+        const lbl = keypadKeys[r][c];
+        const kx = -kp.w / 2 + (c + 0.5) * cw;
+        const ky =  kp.h / 2 - (r + 0.5) * ch;
+        const piv = new THREE.Group(); piv.position.set(kx, ky, 0.004);
+        const cap = new THREE.Mesh(box(bw, bh, 0.010), keyMat);
+        cap.position.z = 0.005;
+        cap.userData = { onPress: () => keypadPress(lbl), pivot: piv, baseZ: 0.004, pressT: 0 };
+        piv.add(cap);
+        const lCol = lbl === 'ENT' ? cfg.dskyCol : lbl === 'CLR' ? '#ffaa55' : '#ece6d2';
+        const lb = ck3Stencil(piv, lbl, bw * 0.88, bh * 0.76, lCol);
+        lb.position.set(0, 0, 0.0108);
+        dskyGrp.add(piv);
+        ck.hits.push(cap);
+        ck.btns.push(cap);
+      }
+    }
+  }
+
+  // 6. Master Arm Flip-Guard (upgraded to OG-1 hazard stripes!) & independent Toggle + riveted anodized legend plate
+  const mGuardPivot = root.getObjectByName('Control_MasterArm_Guard_Pivot');
+  const mGuardMesh  = root.getObjectByName('Control_MasterArm_FlipGuard');
+  const mToggleMesh = root.getObjectByName('Control_MasterArm_Toggle');
+  if (mGuardPivot) {
+    const mTogglePivot = new THREE.Group();
+    mTogglePivot.position.copy(mGuardPivot.position);
+    mTogglePivot.quaternion.copy(mGuardPivot.quaternion);
+    mGuardPivot.parent.add(mTogglePivot);
+    if (mToggleMesh) mTogglePivot.add(mToggleMesh);
+    ck.masterGuard = { pivot: mGuardPivot, baseQ: mGuardPivot.quaternion.clone(), ang: 0 };
+    ck.masterToggle = { pivot: mTogglePivot, baseQ: mTogglePivot.quaternion.clone(), ang: 0 };
+
+    if (mGuardMesh) {
+      mGuardMesh.material = new THREE.MeshStandardMaterial({ map: stripeTex.tex, roughness: 0.45, metalness: 0.25, envMapIntensity: 0.25, side: THREE.DoubleSide });
+      mGuardMesh.userData = { onPress: () => onAction('guardMaster') };
+      ck.hits.push(mGuardMesh);
+    }
+    const togHit = new THREE.Mesh(box(0.055, 0.055, 0.065), hitMat);
+    togHit.position.set(0, 0.008, 0.032);
+    togHit.userData = { onPress: () => onAction('masterArm') };
+    mTogglePivot.add(togHit);
+    ck.hits.push(togHit);
+
+    // Riveted dark anodized Master Arm legend plate seated flush on top of the throttle pedestal
+    const ped = root.getObjectByName('Throttle_Quadrant_Base');
+    const pedTopY = ped ? new THREE.Box3().setFromObject(ped).max.y : group.localToWorld(mGuardPivot.position.clone()).y + 0.04;
+    const gPosW = mGuardPivot.getWorldPosition(new THREE.Vector3());
+    const legGrp = new THREE.Group();
+    legGrp.position.copy(group.worldToLocal(new THREE.Vector3(gPosW.x + 0.052, pedTopY + 0.002, gPosW.z + 0.016)));
+    legGrp.rotation.x = -Math.PI / 2;
+    const legFace = new THREE.Mesh(new THREE.PlaneGeometry(0.066, 0.050),
+      new THREE.MeshStandardMaterial({ map: legendTex.tex, roughness: 0.72, metalness: 0.2, envMapIntensity: 0.12 }));
+    legGrp.add(legFace);
+    for (const dx of [-0.028, 0.028]) for (const dy of [-0.020, 0.020]) {
+      const rv = new THREE.Mesh(boltGeo, M.metal); rv.scale.setScalar(0.32); rv.position.set(dx, dy, 0.0015); legGrp.add(rv);
+    }
+    group.add(legGrp);
+  }
+
+  // 7. Flight controls (hide obstructing throttle levers; keep RHC & THC flight sticks)
+  const thrPivot = root.getObjectByName('Control_MainThrottle_Pivot');
+  if (thrPivot) thrPivot.visible = false;
+  for (const nm of ['Control_Throttle_Arms', 'Control_Throttle_Handle']) {
+    const o = root.getObjectByName(nm); if (o) o.visible = false;
+  }
+  const rhcPivot = root.getObjectByName('Control_RotationStick_Pivot');
+  if (rhcPivot) ck.rhc = { pivot: rhcPivot, baseQ: rhcPivot.quaternion.clone(), p: 0, r: 0, y: 0 };
+  const thcPivot = root.getObjectByName('Control_TranslationStick_Pivot');
+  if (thcPivot) ck.thc = { pivot: thcPivot, baseQ: thcPivot.quaternion.clone(), baseP: thcPivot.position.clone(), x: 0, y: 0, z: 0 };
+
+  // 8. Ship-unique hardware (CM-32 Salvo LED, Brass Interlock Keys, glowing Mushroom Button; DD-84 Checklist)
+  if (id === 'cm32') {
+    const led = root.getObjectByName('CM32_Salvo_Countdown_LED');
+    if (led) {
+      const T = canvasTex(512, 128);
+      orientCanvasTex(led, T.tex, eyeW);
+      led.material = new THREE.MeshBasicMaterial({ map: T.tex, toneMapped: false, side: THREE.DoubleSide });
+      ck.salvoLed = T;
+      draw3DSalvoLED(ck);
+      const lp = boxProj(led, null, dashRight, dashUp, dashFwd);
+      const lb = ck3Stencil(group, 'VLS / SALVO FIRE CONTROL', 0.28, 0.018, '#dfd5b8');
+      lb.position.copy(group.worldToLocal(lp.ctr.clone().addScaledVector(dashUp, lp.maxU + 0.015).addScaledVector(dashFwd, lp.maxF + 0.010)));
+      lb.quaternion.copy(dashQ);
+    }
+    const keyLPiv = root.getObjectByName('Control_LaunchKey_L_Pivot');
+    const keyLMesh = root.getObjectByName('CM32_LaunchKey_L_Brass');
+    if (keyLPiv) {
+      ck.keyL = { pivot: keyLPiv, baseQ: keyLPiv.quaternion.clone(), ang: 0 };
+      const kh = new THREE.Mesh(box(0.075, 0.085, 0.085), hitMat); kh.position.set(0, 0.032, 0);
+      kh.userData = { onPress: () => onAction('guardMaster') }; keyLPiv.add(kh); ck.hits.push(kh);
+      if (keyLMesh) { keyLMesh.userData = { onPress: () => onAction('guardMaster') }; ck.hits.push(keyLMesh); }
+      const kp = boxProj(keyLMesh || keyLPiv, null, dashRight, dashUp, dashFwd);
+      const lb = ck3Stencil(group, 'KEY 1 · INTERLOCK', 0.145, 0.016, '#edd598');
+      lb.position.copy(group.worldToLocal(kp.ctr.clone().addScaledVector(dashUp, kp.maxU + 0.018).addScaledVector(dashFwd, kp.maxF + 0.006)));
+      lb.quaternion.copy(dashQ);
+    }
+    const keyRPiv = root.getObjectByName('Control_LaunchKey_R_Pivot');
+    const keyRMesh = root.getObjectByName('CM32_LaunchKey_R_Brass');
+    if (keyRPiv) {
+      ck.keyR = { pivot: keyRPiv, baseQ: keyRPiv.quaternion.clone(), ang: 0 };
+      const kh = new THREE.Mesh(box(0.075, 0.085, 0.085), hitMat); kh.position.set(0, 0.032, 0);
+      kh.userData = { onPress: () => onAction('masterArm') }; keyRPiv.add(kh); ck.hits.push(kh);
+      if (keyRMesh) { keyRMesh.userData = { onPress: () => onAction('masterArm') }; ck.hits.push(keyRMesh); }
+      const kp = boxProj(keyRMesh || keyRPiv, null, dashRight, dashUp, dashFwd);
+      const lb = ck3Stencil(group, 'KEY 2 · MASTER ARM', 0.145, 0.016, '#edd598');
+      lb.position.copy(group.worldToLocal(kp.ctr.clone().addScaledVector(dashUp, kp.maxU + 0.018).addScaledVector(dashFwd, kp.maxF + 0.006)));
+      lb.quaternion.copy(dashQ);
+    }
+    const salvoPiv = root.getObjectByName('Control_SalvoFire_Pivot');
+    const salvoMesh = root.getObjectByName('CM32_SalvoFire_MushroomBtn');
+    if (salvoPiv && salvoMesh) {
+      const sMat = salvoMesh.material.clone();
+      sMat.color.setHex(0xb82414);
+      sMat.emissive.setHex(0xff3018); sMat.emissiveIntensity = 0.75;
+      salvoMesh.material = sMat;
+      const fireSalvo = () => {
+        ck.salvoBtn.pressT = 0.22; ck.salvoFlashT = 1.6;
+        const vlsN = Object.values(vlsCells).reduce((a, b) => a + b, 0);
+        if (vlsN > 0 || !hasRole('excalibur')) fireMissile(); else fireExcalibur();
+        draw3DSalvoLED(ck);
+      };
+      salvoMesh.userData = { onPress: fireSalvo };
+      ck.hits.push(salvoMesh);
+      ck.salvoBtn = { pivot: salvoPiv, baseP: salvoPiv.position.clone(), mat: sMat, pressT: 0 };
+      const sp = boxProj(salvoMesh, null, dashRight, dashUp, dashFwd);
+      const lb = ck3Stencil(group, 'SALVO LAUNCH', 0.145, 0.017, '#ff9880');
+      lb.position.copy(group.worldToLocal(sp.ctr.clone().addScaledVector(dashUp, sp.maxU + 0.024).addScaledVector(dashFwd, sp.maxF + 0.006)));
+      lb.quaternion.copy(dashQ);
+    }
+  }
+  if (id === 'dd84') {
+    for (const nm of ['DD84_Laminated_Checklist', 'DD84_Checklist_Clipboard']) {
+      const cm = root.getObjectByName(nm);
+      if (cm) { cm.userData = { onPress: () => { sfx.click(); toggleManual(); } }; ck.hits.push(cm); }
+    }
+  }
+
+  // 9. Bolted weathered Port & Starboard consoles (clear of throttle & Master Arm!)
+  build3DSubPanel(ck, cfg);
+
+  return ck;
+}
+
+function load3DCockpit(id) {
+  const cfg = CK3D_CFG[id];
+  if (!cfg || CK3D.loaded[id] || CK3D.loading[id]) return;
+  CK3D.loading[id] = loadModel(cfg.file).then(tpl => {
+    delete CK3D.loading[id];
+    const ck = build3DCockpit(id, tpl);
+    CK3D.loaded[id] = ck;
+    if (HULL.id === id) sync3DCockpit();
+  }).catch(err => {
+    delete CK3D.loading[id];
+    console.warn('3D cockpit load failed for', id, err);
+  });
+}
+
+function sync3DCockpit() {
+  if (!CK3D_READY) return;
+  for (const ck of Object.values(CK3D.loaded)) ck.group.visible = false;
+  const id = HULL.id;
+  if (!CK3D_CFG[id]) {
+    CK3D.active = null;
+    cockpit.visible = true;
+    setCabinLighting(false);
+    return;
+  }
+  const ck = CK3D.loaded[id];
+  if (!ck) {
+    CK3D.active = null;
+    cockpit.visible = true;    // seamless fallback while GLB streams in
+    setCabinLighting(false);
+    load3DCockpit(id);
+    return;
+  }
+  CK3D.active = ck;
+  cockpit.visible = false;
+  setCabinLighting(true);
+  ck.group.visible = true;
+  ckLook.yawT = 0; ckLook.pitchT = 0;
+  redraw3DDialFaces(ck);
+  draw3DDsky(ck);
+  if (ck.salvoLed) draw3DSalvoLED(ck);
+  for (const m of ck.mfds) drawMFD(m);
+}
+
+function update3DCockpitDisplays(ck, lampOn, torpBlink) {
+  for (const l of ck.lamps) l.mat.emissiveIntensity = (lampOn[l.id] || lampTestT > 0) ? 2.6 : 0;
+  for (const l of ck.subLamps) {
+    const v = lampTestT > 0 ? [l.hex, 2.5] : l.get();
+    if (!v) { l.mat.emissiveIntensity = 0; continue; }
+    if (v[0] !== null) l.mat.emissive.setHex(v[0]);
+    l.mat.emissiveIntensity = v[1];
+  }
+  for (const m of ck.mfds) {
+    if (!pageOk(m.page)) m.page = MFD_PAGES[m.page] === 'DOCK' ? (ck.dockPrevPage ?? 1) : m.page;
+    drawMFD(m);
+  }
+  draw3DDsky(ck);
+  if (ck.salvoLed) draw3DSalvoLED(ck);
+}
+
+function animate3DCockpit(ck, dt, k, state) {
+  // 1. Live FDAI 8-ball & markers mirror OG-1's updated ball quaternion/markers
+  if (ck.navBall) {
+    ck.navBall.quaternion.copy(ball.quaternion);
+    const { mTgt, mAnti, mBurn, sc } = ck.markers;
+    mTgt.visible = markerTgt.visible; mAnti.visible = markerAntiTgt.visible; mBurn.visible = markerBurn.visible;
+    if (mTgt.visible) {
+      mTgt.position.copy(markerTgt.position).multiplyScalar(sc); mTgt.quaternion.copy(markerTgt.quaternion);
+      mAnti.position.copy(markerAntiTgt.position).multiplyScalar(sc); mAnti.quaternion.copy(markerAntiTgt.quaternion);
+    }
+    if (mBurn.visible) {
+      mBurn.position.copy(markerBurn.position).multiplyScalar(sc); mBurn.quaternion.copy(markerBurn.quaternion);
+    }
+  }
+  // 2. Physical 3D gauge needles (glTF pivot local +Y faces pilot, needle extends along -Z)
+  for (const gd of ck.gauges) {
+    if (!gd.pivot) continue;
+    const p = dials[gd.dialIdx].p ?? 0;
+    gd.pivot.quaternion.copy(gd.baseQ).multiply(_ckQ.setFromAxisAngle(_ckY, (135 - 270 * p) * Math.PI / 180));
+  }
+  // 3. Sub-panel switches & guarded laser arm + push-button depress travel
+  for (const s of ck.switches) {
+    if (s.id in state) {
+      const target = state[s.id] ? -0.45 : 0.45;
+      s.pivot.rotation.x += (target - s.pivot.rotation.x) * k;
+    }
+    if (s.guardPivot) {
+      const target = guardOpen ? -1.75 : 0;
+      s.guardPivot.rotation.x += (target - s.guardPivot.rotation.x) * k;
+    }
+  }
+  for (const cap of ck.btns) {
+    const ud = cap.userData;
+    ud.pressT = Math.max(0, ud.pressT - dt);
+    const tz = ud.baseZ - (ud.pressT > 0 ? 0.0065 : 0);
+    ud.pivot.position.z += (tz - ud.pivot.position.z) * k;
+  }
+  // 4. Master Arm flip-guard & independent toggle lever
+  if (ck.masterGuard) {
+    const tgt = masterGuardOpen ? -1.75 : 0;
+    ck.masterGuard.ang += (tgt - ck.masterGuard.ang) * k;
+    ck.masterGuard.pivot.quaternion.copy(ck.masterGuard.baseQ).multiply(_ckQ.setFromAxisAngle(_ckX, ck.masterGuard.ang));
+  }
+  if (ck.masterToggle) {
+    const tgt = ({ ON: -0.42, OFF: 0, TNG: 0.42 })[masterMode] || 0;
+    ck.masterToggle.ang += (tgt - ck.masterToggle.ang) * k;
+    ck.masterToggle.pivot.quaternion.copy(ck.masterToggle.baseQ).multiply(_ckQ.setFromAxisAngle(_ckX, ck.masterToggle.ang));
+  }
+  // 5. Main Throttle, RHC & THC flight sticks (glTF Y-up: grip along +Y, pitch X, roll Z, yaw Y)
+  const c = controlState();
+  if (ck.throttle) {
+    const tgt = 0.35 - 0.85 * thrustFrac;
+    ck.throttle.ang += (tgt - ck.throttle.ang) * k;
+    ck.throttle.pivot.quaternion.copy(ck.throttle.baseQ).multiply(_ckQ.setFromAxisAngle(_ckX, ck.throttle.ang));
+  }
+  if (ck.rhc) {
+    ck.rhc.p += (c.pitch * 0.24 - ck.rhc.p) * k;
+    ck.rhc.r += (-c.roll * 0.24 - ck.rhc.r) * k;
+    ck.rhc.y += (-c.yaw * 0.22 - ck.rhc.y) * k;
+    ck.rhc.pivot.quaternion.copy(ck.rhc.baseQ)
+      .multiply(_ckQ.setFromEuler(new THREE.Euler(ck.rhc.p, ck.rhc.y, ck.rhc.r, 'XYZ')));
+  }
+  if (ck.thc) {
+    ck.thc.z += (c.tz * 0.22 - ck.thc.z) * k;
+    ck.thc.x += (-c.tx * 0.22 - ck.thc.x) * k;
+    ck.thc.y += (c.ty * 0.018 - ck.thc.y) * k;
+    ck.thc.pivot.quaternion.copy(ck.thc.baseQ)
+      .multiply(_ckQ.setFromEuler(new THREE.Euler(ck.thc.z, 0, ck.thc.x, 'XYZ')));
+    ck.thc.pivot.position.set(ck.thc.baseP.x, ck.thc.baseP.y + ck.thc.y, ck.thc.baseP.z);
+  }
+  // 6. CM-32 Brass Launch Interlock Keys & Mushroom Salvo Button (local +Y faces pilot)
+  if (ck.keyL) {
+    const tgt = masterGuardOpen ? -Math.PI / 2 : 0;
+    ck.keyL.ang += (tgt - ck.keyL.ang) * k;
+    ck.keyL.pivot.quaternion.copy(ck.keyL.baseQ).multiply(_ckQ.setFromAxisAngle(_ckY, ck.keyL.ang));
+  }
+  if (ck.keyR) {
+    const tgt = masterMode === 'ON' ? -Math.PI / 2 : masterMode === 'TNG' ? -Math.PI / 4 : 0;
+    ck.keyR.ang += (tgt - ck.keyR.ang) * k;
+    ck.keyR.pivot.quaternion.copy(ck.keyR.baseQ).multiply(_ckQ.setFromAxisAngle(_ckY, ck.keyR.ang));
+  }
+  if (ck.salvoBtn) {
+    ck.salvoFlashT = Math.max(0, ck.salvoFlashT - dt);
+    ck.salvoBtn.pressT = Math.max(0, ck.salvoBtn.pressT - dt);
+    const push = ck.salvoBtn.pressT > 0 ? -0.018 : 0;
+    _ckV.set(0, push, 0).applyQuaternion(ck.salvoBtn.pivot.quaternion);
+    _ckV2.copy(ck.salvoBtn.baseP).add(_ckV);
+    ck.salvoBtn.pivot.position.lerp(_ckV2, k);
+    ck.salvoBtn.mat.emissiveIntensity = (masterMode !== 'OFF' || lampTestT > 0) ? (ck.salvoFlashT > 0 ? 3.5 : 2.2) : 0.75;
+  }
+}
+sync3DCockpit();
 function loadHangar() {
   if (hangar.hullPromise) return;
   hangarLoadEl.style.display = ''; hangarLoadEl.textContent = 'LOADING SHIP';
@@ -7990,8 +9154,16 @@ function updateBook(dt) {
   const e = BOOK.vis < 0.5 ? 2*BOOK.vis*BOOK.vis : 1 - 2*(1 - BOOK.vis)**2;
   const t = performance.now()/1000;
   // Held in front of the panel, tilted toward the eye, with a slight unsteady hand
-  BOOK.root.position.set(0.0 + 0.002*Math.sin(t*0.7), -0.42 + 0.43*e + 0.0015*Math.sin(t*1.1), -0.25 - 0.045*e);
-  BOOK.root.rotation.set(-1.15 + 0.85*e, 0.01*Math.sin(t*0.5), 0.004*Math.sin(t*0.8));
+  const off = new THREE.Vector3(0.0 + 0.002*Math.sin(t*0.7), -0.47 + 0.43*e + 0.0015*Math.sin(t*1.1), -0.25 - 0.045*e);
+  const bq = new THREE.Quaternion().setFromEuler(new THREE.Euler(-1.15 + 0.85*e, 0.01*Math.sin(t*0.5), 0.004*Math.sin(t*0.8)));
+  if (typeof active3DCockpit === 'function' && active3DCockpit()) {
+    off.applyQuaternion(camera.quaternion);
+    BOOK.root.position.copy(camera.position).add(off);
+    BOOK.root.quaternion.copy(camera.quaternion).multiply(bq);
+  } else {
+    BOOK.root.position.set(off.x, 0.05 + off.y, off.z);
+    BOOK.root.quaternion.copy(bq);
+  }
   bookStartNext();
   const a = BOOK.anim;
   if (a) {
