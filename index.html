@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OG — Cockpit prototype v0.14.2</title>
+<title>OG — Cockpit prototype v0.14.3</title>
 <style>
   html, body { margin:0; height:100%; background:#000; overflow:hidden;
     font-family: ui-monospace, Menlo, Consolas, monospace; color:#cfd8c0; }
@@ -97,7 +97,7 @@
 </head>
 <body>
 <canvas id="gl"></canvas>
-<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.14.2</span></div>
+<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.14.3</span></div>
 <div id="hangar"><div class="load" id="hangarLoad">LOADING SHIP</div>
   <div class="hint">DRAG TO ORBIT · WHEEL TO ZOOM · CLICK A HARDPOINT TO CHOOSE ITS MODULE</div>
   <div class="panel"><h2>HANGAR</h2><div class="sub" id="hullName"></div><div id="hullSel"></div><div class="sub">LOADOUT · SELECT A HARDPOINT, THEN A MODULE</div>
@@ -10373,7 +10373,9 @@ function buildCutsceneScene() {
   const pFallback = makeFallbackCarrierMesh(); playerGroup.add(pFallback);
   sc.add(playerGroup);
 
-  const allyOffsets = [[-86, 18, 138], [94, -16, 174], [-22, -32, 218]];
+  const allyOffsets = [[-48, 14, 138], [52, -12, 174], [-16, -24, 218]];
+  // Exact arrival times matching Shot 2's turret delay (ti * 0.12s) + 2400 m/s transit from zStart = -420 along shared dirN
+  const shot3Dir = new THREE.Vector3(-0.05, -0.015, 1.0).normalize();
   const allies = allyOffsets.map((pos, idx) => {
     const grp = new THREE.Group();
     grp.position.set(...pos);
@@ -10399,7 +10401,9 @@ function buildCutsceneScene() {
     }
     grp.add(exp);
     sc.add(grp);
-    return { grp, hull, exp, sections, core, fire, shock, shards, hitT: [8.95, 9.45, 9.95][idx], basePos: new THREE.Vector3(...pos) };
+    const hitDist = (pos[2] - (-420)) / shot3Dir.z;
+    const hitT = 8.2 + 0.35 + idx * 0.12 + hitDist / 2400;
+    return { grp, hull, exp, sections, core, fire, shock, shards, hitT, hitDist, basePos: new THREE.Vector3(...pos) };
   });
 
   // 16 glowing electric-blue 3D railgun plasma bolts (reused across Shot 2 & Shot 3)
@@ -10777,31 +10781,31 @@ function renderBossCutscene(dt) {
 
     let shake = 0;
     const targetsAlly = cutscene.allies;
-    // 16 hypervelocity glowing blue railgun bolts streak past player's bow and PIERCE STRAIGHT THROUGH the 3 allies
-    for (let i = 0; i < 16; i++) {
-      const ally = targetsAlly[i % 3];
-      const hitAt = ally.hitT - 8.2;
-      const travelTime = 0.21;                          // ~3,000+ m/s hypervelocity pass across the frame
-      const launchT = hitAt - travelTime + Math.floor(i/3) * 0.045;
-      const flight = lt - launchT;
-      if (flight > 0 && flight < 0.85) {
-        const sideX = (i % 2 === 0 ? 1 : -1) * (15 + (i % 4)*6);
-        const sideY = ((i % 3) - 1) * 8 + 3;
-        const pStart = new THREE.Vector3(sideX*2.8, sideY*2.1, -460);
-        const pHit = ally.basePos.clone().add(new THREE.Vector3((i%3-1)*3.5, (i%2-0.5)*3.5, 0));
-        const dir = pHit.clone().sub(pStart);
-        const hitDist = dir.length(), dirN = dir.clone().normalize();
-        const prog = flight / travelTime;               // > 1.0 continues straight THROUGH the ally out the far side!
-        const headDist = prog * hitDist;
-        const headP = pStart.clone().addScaledVector(dirN, headDist);
-        const len = Math.min(360, headDist);
-        const midP = headP.clone().addScaledVector(dirN, -len*0.5);
-        const bolt = cutscene.bolts[i];
-        bolt.g.visible = true;
-        bolt.g.position.copy(midP);
-        bolt.g.lookAt(headP);
-        bolt.g.scale.set(1.15, 1.15, len);
-        if (Math.abs(headP.z) < 75) shake = Math.max(shake, 1.5);
+    // All 16 railgun shots arrive along the EXACT same parallel direction vector (dirN) and with the EXACT same
+    // inter-turret (0.12 s) and inter-barrel (0.06 s) firing delays and 2400 m/s velocity as Shot 2!
+    const dirN = new THREE.Vector3(-0.05, -0.015, 1.0).normalize();
+    for (let ti = 0; ti < 4; ti++) {
+      const ally = targetsAlly[Math.min(ti, 2)];        // Turrets 0, 1, 2, 3 -> Allies 0, 1, 2, 2
+      const hitDist = ally.hitDist;
+      const yOff = ti === 3 ? 3.5 : -0.5;
+      for (let b = 0; b < 4; b++) {
+        const i = ti*4 + b;
+        const launchT = 0.35 + ti * 0.12 + b * 0.06;    // identical delay pattern to Shot 2 (fireAt = ti*0.12 + b*0.06)
+        const bt = lt - launchT;
+        if (bt > 0 && bt < 0.78) {
+          const pHit = ally.basePos.clone().add(new THREE.Vector3(BARREL_X[b] * 1.15, yOff + (b - 1.5)*0.45, 0));
+          const pStart = pHit.clone().addScaledVector(dirN, -hitDist);
+          const headDist = bt * 2400;                   // identical 2400 m/s speed, piercing straight through at headDist == hitDist
+          const len = Math.min(340, headDist);
+          const headP = pStart.clone().addScaledVector(dirN, headDist);
+          const midP = pStart.clone().addScaledVector(dirN, headDist - len*0.5);
+          const bolt = cutscene.bolts[i];
+          bolt.g.visible = true;
+          bolt.g.position.copy(midP);
+          bolt.g.lookAt(headP);
+          bolt.g.scale.set(1.1, 1.1, len);
+          if (Math.abs(headP.z) < 75) shake = Math.max(shake, 1.5);
+        }
       }
     }
 
