@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OG — Cockpit prototype v0.14.0</title>
+<title>OG — Cockpit prototype v0.14.1</title>
 <style>
   html, body { margin:0; height:100%; background:#000; overflow:hidden;
     font-family: ui-monospace, Menlo, Consolas, monospace; color:#cfd8c0; }
@@ -97,7 +97,7 @@
 </head>
 <body>
 <canvas id="gl"></canvas>
-<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.14.0</span></div>
+<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.14.1</span></div>
 <div id="hangar"><div class="load" id="hangarLoad">LOADING SHIP</div>
   <div class="hint">DRAG TO ORBIT · WHEEL TO ZOOM · CLICK A HARDPOINT TO CHOOSE ITS MODULE</div>
   <div class="panel"><h2>HANGAR</h2><div class="sub" id="hullName"></div><div id="hullSel"></div><div class="sub">LOADOUT · SELECT A HARDPOINT, THEN A MODULE</div>
@@ -7314,35 +7314,6 @@ const sfx = {
       o.connect(g).connect(intBus); o.start(t0 + off); o.stop(t0 + off + 0.095);
     }
   },
-  // Cutscene sound effects: satellite ram static, heavy turret slew whine, supersonic railgun pass, carrier detonation
-  cutsceneStatic(dur = 0.45) {
-    if (!actx) return;
-    burst(intBus, 'bandpass', 1850, 0.55, dur, 0.30);
-    thump(hullBus, 32, 0.95, 1.15);
-  },
-  cutsceneTurret() {
-    if (!actx) return;
-    const t0 = actx.currentTime;
-    const o = actx.createOscillator(), g = actx.createGain();
-    o.type = 'triangle'; o.frequency.setValueAtTime(140, t0); o.frequency.linearRampToValueAtTime(215, t0 + 1.6);
-    g.gain.setValueAtTime(0.0001, t0); g.gain.linearRampToValueAtTime(0.06, t0 + 0.25); g.gain.exponentialRampToValueAtTime(0.0001, t0 + 1.9);
-    o.connect(g).connect(intBus); o.start(t0); o.stop(t0 + 1.95);
-  },
-  cutsceneRailPass() {
-    if (!actx) return;
-    const t0 = actx.currentTime;
-    const o = actx.createOscillator(), g = actx.createGain();
-    o.type = 'sawtooth'; o.frequency.setValueAtTime(980, t0); o.frequency.exponentialRampToValueAtTime(135, t0 + 0.24);
-    g.gain.setValueAtTime(0.11, t0); g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.26);
-    o.connect(g).connect(intBus); o.start(t0); o.stop(t0 + 0.27);
-    burst(hullBus, 'highpass', 1200, 0.7, 0.16, 0.22);
-  },
-  cutsceneBlast() {
-    if (!actx) return;
-    thump(hullBus, 36, 1.35, 1.2);
-    burst(hullBus, 'lowpass', 240, 0.7, 1.1, 0.85, 0.02);
-    burst(intBus, 'bandpass', 520, 0.9, 0.35, 0.16, 0.04);
-  },
   // Decoy mortars: a quick ripple of pops
   pageTurn(open = false) { if (!actx) return; burst(intBus, 'bandpass', open ? 900 : 1500, 0.7, open ? 0.3 : 0.22, 0.1); burst(intBus, 'highpass', 3200, 0.6, 0.07, 0.05, open ? 0.2 : 0.14); },
   decoy() { if (actx) for (let i = 0; i < 4; i++) thump(hullBus, 95, 0.09, 0.45, i*0.07); },
@@ -10253,12 +10224,60 @@ const cutSkipBtn = document.getElementById('cutSkip');
 const cutscene = {
   active: false, t: 0, dur: 16.6, bossRef: null, built: false,
   scene: null, cam: null, bossGroup: null, turrets: [], radars: [],
-  playerGroup: null, allies: [], bolts: [], flashes: [], saturn: null,
-  events: {},
+  playerGroup: null, playerHullRoot: null, allies: [], bolts: [], flashes: [], saturn: null,
+  lowCv: null, lowCtx: null, hullTpl: null, events: {},
 };
 function preloadCutsceneAssets() {
   loadModel('soviet_dreadnought_boss_lod.glb').catch(() => {});
   loadModel(HULL.file || 'cm32_missile_cruiser_bare.glb').catch(() => {});
+  for (const slot of Object.keys(HARDPOINTS)) {
+    const m = modAt(slot);
+    if (m && m.file) loadModel(m.file).catch(() => {});
+  }
+}
+function attachInstalledHardpoints(hullRoot) {
+  if (!hullRoot) return;
+  for (const [slot, hp] of Object.entries(HARDPOINTS)) {
+    const mod = modAt(slot);
+    if (!mod || !mod.file) continue;
+    const node = hullRoot.getObjectByName(hp.node);
+    if (!node) continue;
+    loadModel(mod.file).then(tpl => {
+      const obj = tpl.clone(true);
+      if (mod.sidePylon && hp.pos[0] < 0) {
+        if (hp.m && hp.m[8] < -0.5) obj.scale.z = -1;
+        else if (hp.m && hp.m[0] > 0.5) obj.scale.x = -1;
+      }
+      node.add(obj);
+    }).catch(() => {});
+  }
+}
+function rebuildCutsceneFleetMeshes() {
+  if (!cutscene.built) return;
+  const clearOld = grp => {
+    if (grp.userData.cutHull) { grp.remove(grp.userData.cutHull); grp.userData.cutHull = null; }
+  };
+  clearOld(cutscene.playerGroup);
+  for (const a of cutscene.allies) clearOld(a.grp);
+  const applyHull = tpl => {
+    cutscene.hullTpl = tpl;
+    cutscene.pFallback.visible = false;
+    const pHull = tpl.clone(true);
+    cutscene.playerGroup.add(pHull);
+    cutscene.playerGroup.userData.cutHull = pHull;
+    attachInstalledHardpoints(pHull);
+    for (const a of cutscene.allies) {
+      a.hull.visible = false;
+      const cl = tpl.clone(true);
+      a.grp.add(cl);
+      a.grp.userData.cutHull = cl;
+      a.hullMesh = cl;
+      attachInstalledHardpoints(cl);
+    }
+  };
+  const hFile = HULL.file || 'cm32_missile_cruiser_bare.glb';
+  if (cutscene.hullTpl && cutscene.hullFile === hFile) applyHull(cutscene.hullTpl);
+  else { cutscene.hullFile = hFile; loadModel(hFile).then(applyHull).catch(() => {}); }
 }
 function makeFallbackCarrierMesh() {
   const g = new THREE.Group();
@@ -10275,6 +10294,26 @@ function makeFallbackCarrierMesh() {
     rad.position.set(s*12, 0, 18); g.add(rad);
   }
   return g;
+}
+function makeBrokenShipSections() {
+  // 3 instant-sheared hull sections (bow, mid, stern) with molten orange-white cut bulkheads
+  const hullMat = new THREE.MeshStandardMaterial({ color: 0x56606b, metalness: 0.6, roughness: 0.55 });
+  const cutMat = new THREE.MeshBasicMaterial({ color: 0xffa040 });
+  const specs = [
+    { len: 18, r0: 2.2, r1: 3.8, z0: -18, v: new THREE.Vector3(-18, 14, 34), spin: new THREE.Vector3(1.1, -0.9, 1.4) },
+    { len: 16, r0: 3.8, r1: 4.1, z0: 0,   v: new THREE.Vector3(24, -12, 46), spin: new THREE.Vector3(-1.5, 1.2, -0.8) },
+    { len: 20, r0: 4.1, r1: 3.5, z0: 19,  v: new THREE.Vector3(-10, -18, 28), spin: new THREE.Vector3(0.8, 1.4, -1.3) },
+  ];
+  return specs.map(sp => {
+    const sec = new THREE.Group();
+    const cyl = new THREE.Mesh(new THREE.CylinderGeometry(sp.r0, sp.r1, sp.len, 10), hullMat);
+    cyl.rotation.x = Math.PI/2; sec.add(cyl);
+    const cap = new THREE.Mesh(new THREE.CircleGeometry(sp.r1*0.92, 10), cutMat);
+    cap.position.z = sp.len*0.505; sec.add(cap);
+    const cap2 = new THREE.Mesh(new THREE.CircleGeometry(sp.r0*0.92, 10), cutMat);
+    cap2.rotation.y = Math.PI; cap2.position.z = -sp.len*0.505; sec.add(cap2);
+    return { sec, z0: sp.z0, v: sp.v, spin: sp.spin };
+  });
 }
 function buildCutsceneScene() {
   if (cutscene.built) return;
@@ -10339,54 +10378,58 @@ function buildCutsceneScene() {
     const grp = new THREE.Group();
     grp.position.set(...pos);
     const hull = makeFallbackCarrierMesh(); grp.add(hull);
-    // Explosion layers (hidden until hit)
+    // Instant structural breakup group (3 sheared hull sections + sharp kinetic flash + spall debris)
     const exp = new THREE.Group(); exp.visible = false;
+    const sections = makeBrokenShipSections();
+    for (const sc of sections) exp.add(sc.sec);
     const core = new THREE.Mesh(new THREE.SphereGeometry(1, 20, 16),
-      new THREE.MeshBasicMaterial({ color: 0xe8faff, transparent: true, opacity: 1, blending: THREE.AdditiveBlending, depthWrite: false }));
+      new THREE.MeshBasicMaterial({ color: 0xd8f8ff, transparent: true, opacity: 1, blending: THREE.AdditiveBlending, depthWrite: false }));
     const fire = new THREE.Mesh(new THREE.SphereGeometry(1, 20, 16),
-      new THREE.MeshBasicMaterial({ color: 0xff7722, transparent: true, opacity: 0.85, blending: THREE.AdditiveBlending, depthWrite: false }));
-    const shock = new THREE.Mesh(new THREE.RingGeometry(0.85, 1.0, 40),
-      new THREE.MeshBasicMaterial({ color: 0x66e0ff, transparent: true, opacity: 0.85, side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false }));
+      new THREE.MeshBasicMaterial({ color: 0xff8830, transparent: true, opacity: 0.85, blending: THREE.AdditiveBlending, depthWrite: false }));
+    const shock = new THREE.Mesh(new THREE.RingGeometry(0.86, 1.0, 40),
+      new THREE.MeshBasicMaterial({ color: 0x66e4ff, transparent: true, opacity: 0.9, side: THREE.DoubleSide, blending: THREE.AdditiveBlending, depthWrite: false }));
     exp.add(core, fire, shock);
     const shards = [];
-    const shGeo = new THREE.BoxGeometry(2.2, 1.2, 4.5);
-    const shMat = new THREE.MeshBasicMaterial({ color: 0xffaa55, transparent: true, opacity: 0.95 });
-    for (let k = 0; k < 14; k++) {
+    const shGeo = new THREE.BoxGeometry(2.0, 1.1, 4.2);
+    const shMat = new THREE.MeshBasicMaterial({ color: 0xffbb66, transparent: true, opacity: 0.95 });
+    for (let k = 0; k < 20; k++) {
       const m = new THREE.Mesh(shGeo, shMat);
-      const v = new THREE.Vector3(Math.random()-0.5, Math.random()-0.5, Math.random()-0.5).normalize().multiplyScalar(28 + Math.random()*55);
-      exp.add(m); shards.push({ m, v, spin: new THREE.Vector3(Math.random()*4, Math.random()*4, Math.random()*4) });
+      const v = new THREE.Vector3((Math.random()-0.5)*1.4, (Math.random()-0.5)*1.4, 0.5 + Math.random()*1.2).normalize().multiplyScalar(42 + Math.random()*85);
+      exp.add(m); shards.push({ m, v, spin: new THREE.Vector3(Math.random()*5, Math.random()*5, Math.random()*5) });
     }
     grp.add(exp);
     sc.add(grp);
-    return { grp, hull, exp, core, fire, shock, shards, hitT: [9.25, 9.95, 10.55][idx], basePos: new THREE.Vector3(...pos) };
+    return { grp, hull, exp, sections, core, fire, shock, shards, hitT: [8.95, 9.45, 9.95][idx], basePos: new THREE.Vector3(...pos) };
   });
 
   // 16 glowing electric-blue 3D railgun plasma bolts (reused across Shot 2 & Shot 3)
   const bolts = [];
-  const outerGeo = new THREE.CylinderGeometry(0.95, 0.35, 1, 8, 1, true);
+  const outerGeo = new THREE.CylinderGeometry(0.75, 0.25, 1, 8, 1, true);
   outerGeo.rotateX(Math.PI/2);
-  const coreGeo = new THREE.CylinderGeometry(0.32, 0.12, 1, 8, 1, true);
+  const coreGeo = new THREE.CylinderGeometry(0.24, 0.08, 1, 8, 1, true);
   coreGeo.rotateX(Math.PI/2);
   for (let i = 0; i < 16; i++) {
     const g = new THREE.Group();
-    const outer = new THREE.Mesh(outerGeo, new THREE.MeshBasicMaterial({ color: 0x2098ff, transparent: true, opacity: 0.65, blending: THREE.AdditiveBlending, depthWrite: false }));
-    const core = new THREE.Mesh(coreGeo, new THREE.MeshBasicMaterial({ color: 0xe6fbff, transparent: true, opacity: 0.98, blending: THREE.AdditiveBlending, depthWrite: false }));
+    const outer = new THREE.Mesh(outerGeo, new THREE.MeshBasicMaterial({ color: 0x2098ff, transparent: true, opacity: 0.68, blending: THREE.AdditiveBlending, depthWrite: false }));
+    const core = new THREE.Mesh(coreGeo, new THREE.MeshBasicMaterial({ color: 0xeafcff, transparent: true, opacity: 0.98, blending: THREE.AdditiveBlending, depthWrite: false }));
     g.add(outer, core); g.visible = false;
     sc.add(g);
     bolts.push({ g, outer, core });
   }
 
-  // 4 turret muzzle flash spheres (blue capacitor discharge)
+  // 4 turret muzzle flash spheres (placed in world space right at exact barrel tips)
   const flashes = [];
   const flGeo = new THREE.SphereGeometry(1, 14, 12);
   for (let i = 0; i < 4; i++) {
-    const m = new THREE.Mesh(flGeo, new THREE.MeshBasicMaterial({ color: 0x80e8ff, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false }));
-    m.visible = false; bossWrap.add(m); flashes.push(m);
+    const m = new THREE.Mesh(flGeo, new THREE.MeshBasicMaterial({ color: 0x88ecff, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false }));
+    m.visible = false; sc.add(m); flashes.push(m);
   }
 
+  const lowCv = document.createElement('canvas'); lowCv.width = 320; lowCv.height = 180;
   Object.assign(cutscene, {
     scene: sc, cam: new THREE.PerspectiveCamera(46, window.innerWidth/window.innerHeight, 1, 9000),
     bossGroup: bossWrap, playerGroup, pFallback, allies, bolts, flashes, saturn: satGroup, titan,
+    lowCv, lowCtx: lowCv.getContext('2d'),
   });
 
   // Load real 3D Buryia GLB & attach articulated turret/radar handles
@@ -10395,10 +10438,10 @@ function buildCutsceneScene() {
     bossWrap.add(clone);
     const turrets = [], radars = [];
     const turDefs = [
-      { az: 'Boss_Turret_QuadRailgun_DorsalFwd_AzimuthPivot',  el: 'Boss_Turret_QuadRailgun_DorsalFwd_ElevPivot',  startY: 0,       endY: -Math.PI/2, p: [0,  7.4, -46] },
-      { az: 'Boss_Turret_QuadRailgun_DorsalAft_AzimuthPivot',  el: 'Boss_Turret_QuadRailgun_DorsalAft_ElevPivot',  startY: Math.PI, endY: -Math.PI/2, p: [0,  7.5,  37] },
-      { az: 'Boss_Turret_QuadRailgun_VentralFwd_AzimuthPivot', el: 'Boss_Turret_QuadRailgun_VentralFwd_ElevPivot', startY: 0,       endY:  Math.PI/2, p: [0, -7.4, -46] },
-      { az: 'Boss_Turret_QuadRailgun_VentralAft_AzimuthPivot', el: 'Boss_Turret_QuadRailgun_VentralAft_ElevPivot', startY: Math.PI, endY:  Math.PI/2, p: [0, -7.5,  37] },
+      { az: 'Boss_Turret_QuadRailgun_DorsalFwd_AzimuthPivot',  el: 'Boss_Turret_QuadRailgun_DorsalFwd_ElevPivot',  startY: 0,       endY: -Math.PI/2 },
+      { az: 'Boss_Turret_QuadRailgun_DorsalAft_AzimuthPivot',  el: 'Boss_Turret_QuadRailgun_DorsalAft_ElevPivot',  startY: Math.PI, endY: -Math.PI/2 },
+      { az: 'Boss_Turret_QuadRailgun_VentralFwd_AzimuthPivot', el: 'Boss_Turret_QuadRailgun_VentralFwd_ElevPivot', startY: 0,       endY:  Math.PI/2 },
+      { az: 'Boss_Turret_QuadRailgun_VentralAft_AzimuthPivot', el: 'Boss_Turret_QuadRailgun_VentralAft_ElevPivot', startY: Math.PI, endY:  Math.PI/2 },
     ];
     clone.traverse(o => {
       if (o.name === 'Boss_Citadel_TopRadar_SpinPivot' || o.name === 'Boss_Citadel_AuxRadar_SpinPivot') radars.push(o);
@@ -10411,21 +10454,11 @@ function buildCutsceneScene() {
     cutscene.turrets = turrets;
     cutscene.radars = radars;
   }).catch(() => {});
-
-  // Load real 3D CM-32 hull GLB for player & allied carriers in Shot 3
-  loadModel(HULL.file || 'cm32_missile_cruiser_bare.glb').then(tpl => {
-    pFallback.visible = false;
-    playerGroup.add(tpl.clone(true));
-    for (const a of allies) {
-      a.hull.visible = false;
-      const cl = tpl.clone(true);
-      a.grp.add(cl); a.hullMesh = cl;
-    }
-  }).catch(() => {});
 }
 function startBossCutscene(boss) {
   if (cutscene.active) return;
   buildCutsceneScene();
+  rebuildCutsceneFleetMeshes();
   cutscene.active = true;
   cutscene.t = 0;
   cutscene.bossRef = boss;
@@ -10437,6 +10470,7 @@ function startBossCutscene(boss) {
     a.grp.position.copy(a.basePos);
     a.grp.rotation.set(0, 0, 0);
     a.exp.visible = false;
+    for (const sc of a.sections) { sc.sec.position.set(0, 0, sc.z0); sc.sec.rotation.set(0, 0, 0); }
     if (a.hullMesh) a.hullMesh.visible = true; else a.hull.visible = true;
   }
   log('!! PRIORITY INTERCEPT FEED · RECON SAT-04 OPTICAL LOCK !!');
@@ -10496,7 +10530,7 @@ window.addEventListener('keydown', e => {
 
 function renderBossCutscene(dt) {
   cutscene.t += dt;
-  const t = cutscene.t, ev = cutscene.events;
+  const t = cutscene.t;
   if (t >= cutscene.dur) { endBossCutscene(); return; }
   const W = window.innerWidth, H = window.innerHeight;
   if (cutHud.width !== W || cutHud.height !== H) { cutHud.width = W; cutHud.height = H; }
@@ -10504,83 +10538,155 @@ function renderBossCutscene(dt) {
   const g = cutHud.getContext('2d');
   g.clearRect(0, 0, W, H);
 
-  // Spin Buryia search radars continuously
+  // Spin Buryia search radars continuously (completely silent — vacuum of space)
   for (const r of cutscene.radars) r.rotation.y += dt * (r.name.includes('Top') ? 0.9 : -1.5);
   for (const b of cutscene.bolts) b.g.visible = false;
   for (const f of cutscene.flashes) f.visible = false;
 
   const smooth = x => { const c = clamp(x, 0, 1); return c*c*(3 - 2*c); };
   const cam = cutscene.cam, boss = cutscene.bossGroup;
+  const BARREL_X = [-2.65, -0.88, 0.88, 2.65];
 
-  // --- SHOT 1 (0.0 - 4.2s): Allied Recon Satellite locked on Buryia -> Direct Ram -> Static Cut ---
+  // --- SHOT 1 (0.0 - 4.2s): Low-Quality Military Recon Satellite TGP Feed -> Direct Ram -> Static Cut ---
   if (t < 4.2) {
     boss.visible = true; cutscene.playerGroup.visible = false;
     for (const a of cutscene.allies) a.grp.visible = false;
-    for (const td of cutscene.turrets) if (td.azNode) td.azNode.rotation.y = td.startY;
+    for (const td of cutscene.turrets) {
+      if (td.azNode) td.azNode.rotation.y = td.startY;
+      if (td.elNode) td.elNode.rotation.x = 0;
+    }
     const u = clamp(t / 3.75, 0, 1);
     const zBoss = -560 + 648 * (0.25*u + 0.75*u*u);   // accelerates into camera; bow tip (+82) slams cam at t=3.75s
     boss.position.set(0, -3, zBoss);
     boss.rotation.set(0.03, Math.PI, 0.04 * Math.sin(t*1.4));
-    const shk = u > 0.6 ? (u - 0.6) * 4.5 : 0.15;
+    const shk = u > 0.55 ? (u - 0.55) * 4.8 : 0.18;
     cam.fov = 42 - 8*u;
     cam.position.set((Math.random()-0.5)*shk, 2.5 + (Math.random()-0.5)*shk, 0);
     cam.lookAt(0, 2, -300);
     cam.updateProjectionMatrix();
     renderer.render(cutscene.scene, cam);
 
-    // Satellite optical feed HUD overlay
     const barH = Math.round(H * 0.09);
     if (t < 3.75) {
-      // Subtle scanlines + green/amber recon telemetry
-      g.fillStyle = 'rgba(20,255,140,0.035)';
-      for (let y = 0; y < H; y += 4) g.fillRect(0, y, W, 1);
+      // Low-resolution military surveillance camera pass (320x180 pixelated, desaturated green-mono CRT + noise + glitch strips)
+      const lw = cutscene.lowCv.width, lh = cutscene.lowCv.height, lctx = cutscene.lowCtx;
+      lctx.imageSmoothingEnabled = false;
+      lctx.drawImage(renderer.domElement, 0, 0, lw, lh);
+      g.save();
+      g.imageSmoothingEnabled = false;
+      g.filter = 'grayscale(0.84) sepia(0.32) hue-rotate(84deg) contrast(1.42) brightness(0.92)';
+      g.drawImage(cutscene.lowCv, 0, 0, W, H);
+      g.filter = 'none';
+      // Occasional horizontal sync-tear glitch bands as closing range shrinks
+      const tearCount = u > 0.55 ? 4 : 1;
+      for (let gi = 0; gi < tearCount; gi++) {
+        if (Math.random() < (0.18 + 0.45*u)) {
+          const gy = Math.random()*H, gh = 3 + Math.random()*14, shift = (Math.random() - 0.5) * (18 + 45*u);
+          g.drawImage(cutscene.lowCv, 0, gy/H*lh, lw, Math.max(1, gh/H*lh), shift, gy, W, gh);
+        }
+      }
+      // Heavy low-quality sensor grain & CRT scanlines
+      for (let i = 0; i < 650; i++) {
+        const v = 90 + (Math.random()*140 | 0);
+        g.fillStyle = `rgba(${v},${Math.min(255, v+30)},${v},0.16)`;
+        g.fillRect(Math.random()*W, Math.random()*H, 3 + Math.random()*4, 2);
+      }
+      g.fillStyle = 'rgba(0,12,6,0.22)';
+      for (let y = 0; y < H; y += 3) g.fillRect(0, y, W, 1);
+      // Dark optical lens vignette
+      const vig = g.createRadialGradient(W/2, H/2, Math.min(W, H)*0.28, W/2, H/2, Math.max(W, H)*0.68);
+      vig.addColorStop(0, 'rgba(0,0,0,0)'); vig.addColorStop(1, 'rgba(0,8,4,0.68)');
+      g.fillStyle = vig; g.fillRect(0, 0, W, H);
+
+      // Military TGP-style targeting pod overlay
+      const ph = '#7dff9a', amb = '#ffb844', red = '#ff5242';
       const distM = Math.max(0, Math.round(-(zBoss + 82)));
-      g.strokeStyle = distM < 150 ? 'rgba(255,80,60,0.85)' : 'rgba(115,245,165,0.7)';
-      g.lineWidth = 2;
-      const box = Math.min(W, H) * (0.14 + 0.34*u*u);
-      const cx = W/2, cy = H/2, arm = Math.max(16, box*0.24);
+      const vClose = Math.round(648 * (0.25 + 1.5*u) / 3.75);
+      const fx = Math.round(W*0.09), fy = barH + 46, fw = W - fx*2, fh = H - barH*2 - 96;
+      const cx = W/2, cy = H/2;
+      g.strokeStyle = 'rgba(125,255,154,0.62)'; g.lineWidth = 1.6;
+      g.strokeRect(fx, fy, fw, fh);
+
+      // Center TGP boresight crosshair with gap & mil ticks
+      g.strokeStyle = 'rgba(125,255,154,0.75)'; g.lineWidth = 1.4;
+      const gap = 14, armL = Math.min(fw, fh)*0.22;
+      g.beginPath();
+      g.moveTo(cx - armL, cy); g.lineTo(cx - gap, cy); g.moveTo(cx + gap, cy); g.lineTo(cx + armL, cy);
+      g.moveTo(cx, cy - armL*0.72); g.lineTo(cx, cy - gap); g.moveTo(cx, cy + gap); g.lineTo(cx, cy + armL*0.72);
+      for (let tk = 1; tk <= 3; tk++) {
+        const d1 = gap + tk*(armL - gap)/3.5;
+        g.moveTo(cx - d1, cy - 4); g.lineTo(cx - d1, cy + 4); g.moveTo(cx + d1, cy - 4); g.lineTo(cx + d1, cy + 4);
+        g.moveTo(cx - 4, cy - d1*0.7); g.lineTo(cx + 4, cy - d1*0.7); g.moveTo(cx - 4, cy + d1*0.7); g.lineTo(cx + 4, cy + d1*0.7);
+      }
+      g.stroke();
+      g.strokeRect(cx - 8, cy - 8, 16, 16);
+
+      // Expanding tracking brackets tightly framing Buryia
+      const box = Math.min(fw, fh) * (0.09 + 0.36*u*u);
+      const bArm = Math.max(14, box*0.28);
+      g.strokeStyle = distM < 180 ? red : ph; g.lineWidth = 2;
       for (const [sx, sy] of [[-1,-1],[1,-1],[1,1],[-1,1]]) {
-        g.beginPath(); g.moveTo(cx + sx*box, cy + sy*(box - arm)); g.lineTo(cx + sx*box, cy + sy*box); g.lineTo(cx + sx*(box - arm), cy + sy*box); g.stroke();
+        g.beginPath(); g.moveTo(cx + sx*box, cy + sy*(box - bArm)); g.lineTo(cx + sx*box, cy + sy*box); g.lineTo(cx + sx*(box - bArm), cy + sy*box); g.stroke();
       }
+
+      // TGP status header & margins
       g.font = 'bold 14px monospace';
-      g.fillStyle = '#7dff9a';
-      g.fillText('RECON SAT-04 // TITAN-L1 OPTICAL RELAY', 26, 36);
-      g.fillText(`OPTIC LOCK: UNIDENTIFIED HEAVY CONTACT  RNG ${distM} M`, 26, 58);
-      if (distM < 260) {
-        g.fillStyle = (Math.floor(t*12) % 2) ? '#ff5544' : '#ffbb44';
-        g.font = 'bold 18px monospace'; g.textAlign = 'center';
-        g.fillText('!! COLLISION COURSE · IMPACT IMMINENT !!', W/2, H - barH - 28);
-        g.textAlign = 'left';
+      g.fillStyle = amb; g.fillText('LOCK  SAT-04', fx + 8, fy - 12);
+      g.fillStyle = ph; g.textAlign = 'center';
+      g.fillText(`MIL-RECON TGP   VIS   AZ +000  EL -001   x${u < 0.5 ? 16 : 64}`, cx, fy - 12);
+      g.textAlign = 'right';
+      g.fillText(`RNG ${distM} M  CL ${vClose} M/S`, fx + fw - 8, fy - 12);
+      g.textAlign = 'left';
+      g.font = '13px monospace';
+      g.fillText('MONO', fx - 54, fy + 24);
+      g.fillText('AGC',  fx - 54, fy + 44);
+      g.fillText('TRK',  fx - 54, fy + 64);
+      g.fillText('INR',  fx - 54, fy + 84);
+      g.fillText('POINT', fx + 8, fy + fh + 20);
+      g.textAlign = 'center';
+      g.fillText('AREA TRACK · TITAN L1 RELAY', cx, fy + fh + 20);
+      // TGP bottom softkey strip (TGP inverted)
+      const sk = ['SWAP', 'SMS', 'HSD', 'TGP', 'DCLT'];
+      for (let si = 0; si < sk.length; si++) {
+        const sx = fx + fw*(0.16 + si*0.17), sy = fy + fh + 38;
+        if (sk[si] === 'TGP') {
+          g.fillStyle = ph; g.fillRect(sx - 24, sy - 13, 48, 18);
+          g.fillStyle = '#04120a'; g.fillText(sk[si], sx, sy);
+        } else { g.fillStyle = ph; g.fillText(sk[si], sx, sy); }
       }
+      if (distM < 280) {
+        g.fillStyle = (Math.floor(t*12) % 2) ? red : amb;
+        g.font = 'bold 18px monospace'; g.textAlign = 'center';
+        g.fillText('!! COLLISION COURSE · IMPACT IMMINENT !!', cx, fy + fh - 16);
+      }
+      g.restore();
     } else {
-      // Impact flash + violent TV static cut
-      if (!ev.satRam) { ev.satRam = true; if (sfx.cutsceneStatic) sfx.cutsceneStatic(0.45); }
+      // Silent violent white-out flash + raw low-res TV static snow
       const st = (t - 3.75) / 0.45;
       g.fillStyle = st < 0.16 ? '#ffffff' : '#080b0a';
       g.fillRect(0, 0, W, H);
       if (st >= 0.16) {
-        for (let k = 0; k < 2600; k++) {
-          const v = (Math.random()*220) | 0;
+        for (let k = 0; k < 2800; k++) {
+          const v = (Math.random()*225) | 0;
           g.fillStyle = `rgb(${v},${v},${v})`;
-          g.fillRect(Math.random()*W, Math.random()*H, 4 + Math.random()*18, 2 + Math.random()*4);
+          g.fillRect(Math.random()*W, Math.random()*H, 4 + Math.random()*20, 2 + Math.random()*5);
         }
-        g.fillStyle = 'rgba(0,0,0,0.68)'; g.fillRect(W/2 - 200, H/2 - 28, 400, 56);
+        g.fillStyle = 'rgba(0,0,0,0.72)'; g.fillRect(W/2 - 210, H/2 - 28, 420, 56);
         g.fillStyle = '#ff5a44'; g.font = 'bold 20px monospace'; g.textAlign = 'center';
         g.fillText('NO SIGNAL // RECON SAT-04 LOST', W/2, H/2 + 7);
         g.textAlign = 'left';
       }
     }
   }
-  // --- SHOT 2 (4.2 - 8.2s): Off-Bow Broadside of Buryia -> Quad Railguns Slew -> Blue Salvo Fires ---
+  // --- SHOT 2 (4.2 - 8.2s): Off-Bow Broadside of Buryia -> Quad Railguns Slew Level -> Bolts Exit Exact Barrels ---
   else if (t < 8.2) {
     const lt = t - 4.2;
-    if (!ev.slewSfx && lt > 0.35) { ev.slewSfx = true; if (sfx.cutsceneTurret) sfx.cutsceneTurret(); }
     boss.visible = true; cutscene.playerGroup.visible = false;
     for (const a of cutscene.allies) a.grp.visible = false;
     boss.position.set(0, 0, 0); boss.rotation.set(0, 0, 0);
 
-    // Slew all 4 articulated quad railgun turrets smoothly to bear starboard (+X) at the allied fleet
-    const slewK = smooth((lt - 0.35) / 2.2);
+    // Slew all 4 articulated quad railgun turrets smoothly to bear level starboard (+X)
+    const slewK = smooth((lt - 0.3) / 2.1);
     for (const td of cutscene.turrets) {
       if (td.azNode) {
         let diff = td.endY - td.startY;
@@ -10588,44 +10694,50 @@ function renderBossCutscene(dt) {
         while (diff < -Math.PI) diff += Math.PI*2;
         td.azNode.rotation.y = td.startY + diff * slewK;
       }
-      if (td.elNode) td.elNode.rotation.x = 0.08 + 0.12 * slewK;
+      if (td.elNode) td.elNode.rotation.x = 0.0;       // level horizontal barrels aligned directly with broadside fire
     }
+    boss.updateMatrixWorld(true);
 
-    // Charge & fire 16 glowing blue railgun bolts out starboard (+X) from all 4 quad turrets
+    // Fire 16 glowing blue railgun bolts directly out of the 4 exact accelerator rail muzzles per turret
     let shake = 0;
-    if (lt > 2.6) {
+    if (lt > 2.55) {
       for (let ti = 0; ti < cutscene.turrets.length; ti++) {
         const td = cutscene.turrets[ti], fl = cutscene.flashes[ti];
-        const fireAt = 2.85 + ti * 0.14;
-        if (lt >= fireAt && lt < fireAt + 0.32) {
-          if (!ev['shot2_' + ti]) { ev['shot2_' + ti] = true; if (sfx.cutsceneRailPass) sfx.cutsceneRailPass(); }
-          const k = 1 - (lt - fireAt)/0.32;
-          fl.visible = true; fl.position.set(td.p[0] + 10, td.p[1], td.p[2]);
-          fl.scale.setScalar(2.5 + 8*k); fl.material.opacity = k;
-          shake = Math.max(shake, 1.8*k);
+        if (!td.elNode) continue;
+        const fireAt = 2.75 + ti * 0.12;
+        const muzCenter = td.elNode.localToWorld(new THREE.Vector3(0, 0, -24.85));
+        const bDir = td.elNode.localToWorld(new THREE.Vector3(0, 0, -25.85)).sub(muzCenter).normalize();
+        if (lt >= fireAt && lt < fireAt + 0.28) {
+          const k = 1 - (lt - fireAt)/0.28;
+          fl.visible = true; fl.position.copy(muzCenter);
+          fl.scale.setScalar(2.4 + 7.5*k); fl.material.opacity = k;
+          shake = Math.max(shake, 1.5*k);
         }
         for (let b = 0; b < 4; b++) {
-          const bt = lt - (fireAt + b * 0.08);
-          if (bt > 0 && bt < 0.9) {
+          const bt = lt - (fireAt + b * 0.06);
+          if (bt > 0 && bt < 0.75) {
+            const mPos = td.elNode.localToWorld(new THREE.Vector3(BARREL_X[b], 0, -24.85));
             const bolt = cutscene.bolts[ti*4 + b];
             bolt.g.visible = true;
-            const len = Math.min(260, bt * 950);
-            const dist = 12 + bt * 1150;
-            bolt.g.position.set(td.p[0] + dist - len*0.5, td.p[1] + (b - 1.5)*0.6, td.p[2] + (b - 1.5)*0.9);
-            bolt.g.rotation.set(0, Math.PI/2, 0);
-            bolt.g.scale.set(1.2, 1.2, len);
+            const dist = bt * 2400;                     // hypervelocity exit straight out of the barrel muzzle
+            const len = Math.min(340, dist);
+            const headPos = mPos.clone().addScaledVector(bDir, dist);
+            const midPos = mPos.clone().addScaledVector(bDir, dist - len*0.5);
+            bolt.g.position.copy(midPos);
+            bolt.g.lookAt(headPos);
+            bolt.g.scale.set(1.05, 1.05, len);
           }
         }
       }
     }
     const camU = smooth(lt / 4.0);
     cam.fov = 44;
-    cam.position.set(74 + 26*camU + (Math.random()-0.5)*shake, 22 - 7*camU + (Math.random()-0.5)*shake, -118 + 44*camU);
-    cam.lookAt(2, 4, -2);
+    cam.position.set(96 + 26*camU + (Math.random()-0.5)*shake, 19 - 7*camU + (Math.random()-0.5)*shake, -112 + 48*camU);
+    cam.lookAt(10, 3, -4);
     cam.updateProjectionMatrix();
     renderer.render(cutscene.scene, cam);
   }
-  // --- SHOT 3 (8.2 - 12.2s): Front View of Player Ship -> Glowing Blue Railgun Trails Rip Past & Destroy Allies ---
+  // --- SHOT 3 (8.2 - 12.2s): Front View of Player Ship (with Installed Hardpoints) -> Fast Piercing Blue Bolts -> Instant Ally Breakup ---
   else if (t < 12.2) {
     const lt = t - 8.2;
     boss.visible = false; cutscene.playerGroup.visible = true;
@@ -10633,38 +10745,36 @@ function renderBossCutscene(dt) {
     cutscene.playerGroup.rotation.set(0.02*Math.sin(lt*1.5), 0, 0.03*Math.cos(lt*1.1));
 
     let shake = 0;
-    // 16 hypervelocity glowing blue railgun bolts streak in from front-right past player's bow into the 3 allied carriers!
     const targetsAlly = cutscene.allies;
+    // 16 hypervelocity glowing blue railgun bolts streak past player's bow and PIERCE STRAIGHT THROUGH the 3 allies
     for (let i = 0; i < 16; i++) {
       const ally = targetsAlly[i % 3];
-      const hitT = ally.hitT - 8.2;
-      const launchT = hitT - 0.55 - (Math.floor(i/3) * 0.07);
+      const hitAt = ally.hitT - 8.2;
+      const travelTime = 0.21;                          // ~3,000+ m/s hypervelocity pass across the frame
+      const launchT = hitAt - travelTime + Math.floor(i/3) * 0.045;
       const flight = lt - launchT;
-      if (flight > 0 && flight < 0.72) {
-        if (!ev['pass_' + i] && flight > 0.18) {
-          ev['pass_' + i] = true;
-          if (i % 4 === 0 && sfx.cutsceneRailPass) sfx.cutsceneRailPass();
-        }
-        const sideX = (i % 2 === 0 ? 1 : -1) * (16 + (i % 4)*7);
-        const sideY = ((i % 3) - 1) * 9 + 4;
-        const pStart = new THREE.Vector3(sideX*3.2, sideY*2.4, -420);
-        const pEnd = ally.basePos.clone().add(new THREE.Vector3((i%3-1)*4, (i%2-0.5)*4, 0));
-        const dir = pEnd.clone().sub(pStart);
-        const totalD = dir.length(), dirN = dir.clone().normalize();
-        const prog = clamp(flight / 0.55, 0, 1.05);
-        const headP = pStart.clone().addScaledVector(dirN, prog * totalD);
-        const len = Math.min(240, prog * totalD);
+      if (flight > 0 && flight < 0.85) {
+        const sideX = (i % 2 === 0 ? 1 : -1) * (15 + (i % 4)*6);
+        const sideY = ((i % 3) - 1) * 8 + 3;
+        const pStart = new THREE.Vector3(sideX*2.8, sideY*2.1, -460);
+        const pHit = ally.basePos.clone().add(new THREE.Vector3((i%3-1)*3.5, (i%2-0.5)*3.5, 0));
+        const dir = pHit.clone().sub(pStart);
+        const hitDist = dir.length(), dirN = dir.clone().normalize();
+        const prog = flight / travelTime;               // > 1.0 continues straight THROUGH the ally out the far side!
+        const headDist = prog * hitDist;
+        const headP = pStart.clone().addScaledVector(dirN, headDist);
+        const len = Math.min(360, headDist);
         const midP = headP.clone().addScaledVector(dirN, -len*0.5);
         const bolt = cutscene.bolts[i];
         bolt.g.visible = true;
         bolt.g.position.copy(midP);
         bolt.g.lookAt(headP);
-        bolt.g.scale.set(1.35, 1.35, len);
-        if (Math.abs(headP.z) < 60) shake = Math.max(shake, 1.6);
+        bolt.g.scale.set(1.15, 1.15, len);
+        if (Math.abs(headP.z) < 75) shake = Math.max(shake, 1.5);
       }
     }
 
-    // Allied carrier explosions & breakup
+    // Instant structural breakup the exact frame the first piercing bolt hits each allied carrier
     for (let ai = 0; ai < targetsAlly.length; ai++) {
       const a = targetsAlly[ai];
       a.grp.visible = true;
@@ -10673,18 +10783,23 @@ function renderBossCutscene(dt) {
         a.exp.visible = false;
         if (a.hullMesh) a.hullMesh.visible = true; else a.hull.visible = true;
       } else {
-        if (!ev['allyBoom_' + ai]) { ev['allyBoom_' + ai] = true; if (sfx.cutsceneBlast) sfx.cutsceneBlast(); }
-        shake = Math.max(shake, Math.max(0, 2.4 * (1 - eT/0.6)));
+        // Instant breakup: intact hull disappears immediately on frame 0 of impact!
+        if (a.hullMesh) a.hullMesh.visible = false; else a.hull.visible = false;
         a.exp.visible = true;
-        const fade = clamp(1 - eT / 2.2, 0, 1);
-        a.core.scale.setScalar(6 + 44 * Math.pow(Math.min(1, eT/0.45), 0.6));
-        a.core.material.opacity = clamp(1 - eT/0.85, 0, 1);
-        a.fire.scale.setScalar(8 + 68 * Math.pow(Math.min(1, eT/1.2), 0.7));
-        a.fire.material.opacity = 0.85 * fade;
-        a.shock.scale.setScalar(10 + 135 * Math.min(1, eT/0.9));
-        a.shock.material.opacity = 0.85 * clamp(1 - eT/1.0, 0, 1);
+        shake = Math.max(shake, Math.max(0, 2.2 * (1 - eT/0.35)));
+        const fade = clamp(1 - eT / 2.4, 0, 1);
+        for (const sc of a.sections) {
+          sc.sec.position.set(sc.v.x*eT, sc.v.y*eT, sc.z0 + sc.v.z*eT);
+          sc.sec.rotation.set(sc.spin.x*eT, sc.spin.y*eT, sc.spin.z*eT);
+        }
+        // Crisp bright kinetic puncture flash (snappy, not a slow balloon)
+        a.core.scale.setScalar(10 + 36 * Math.pow(Math.min(1, eT/0.18), 0.5));
+        a.core.material.opacity = clamp(1 - eT/0.42, 0, 1);
+        a.fire.scale.setScalar(12 + 44 * Math.pow(Math.min(1, eT/0.45), 0.6));
+        a.fire.material.opacity = 0.72 * clamp(1 - eT/0.95, 0, 1);
+        a.shock.scale.setScalar(12 + 125 * Math.min(1, eT/0.55));
+        a.shock.material.opacity = 0.85 * clamp(1 - eT/0.6, 0, 1);
         a.shock.lookAt(cam.position);
-        if (eT > 0.35) { if (a.hullMesh) a.hullMesh.visible = false; else a.hull.visible = false; }
         for (const sh of a.shards) {
           sh.m.position.copy(sh.v).multiplyScalar(eT);
           sh.m.rotation.set(sh.spin.x*eT, sh.spin.y*eT, sh.spin.z*eT);
@@ -10709,14 +10824,17 @@ function renderBossCutscene(dt) {
     boss.rotation.set(0.03, -0.26, 0);
     for (const td of cutscene.turrets) {
       if (td.azNode) td.azNode.rotation.y = td.endY;
-      if (td.elNode) td.elNode.rotation.x = 0.14;
+      if (td.elNode) td.elNode.rotation.x = 0.0;
     }
-    // Faint residual blue muzzle heat on turrets
+    boss.updateMatrixWorld(true);
+    // Faint residual blue muzzle heat right at the exact 24.8 m barrel tips
     for (let ti = 0; ti < cutscene.turrets.length; ti++) {
       const td = cutscene.turrets[ti], fl = cutscene.flashes[ti];
-      fl.visible = true; fl.position.set(td.p[0] + 8, td.p[1], td.p[2]);
-      const glow = 0.25 + 0.12*Math.sin(t*7 + ti);
-      fl.scale.setScalar(2.4); fl.material.opacity = glow * clamp(1 - lt/3.8, 0.2, 1);
+      if (!td.elNode) continue;
+      fl.visible = true;
+      fl.position.copy(td.elNode.localToWorld(new THREE.Vector3(0, 0, -24.85)));
+      const glow = 0.24 + 0.1*Math.sin(t*7 + ti);
+      fl.scale.setScalar(2.6); fl.material.opacity = glow * clamp(1 - lt/3.8, 0.2, 1);
     }
     const u = smooth(lt / 4.4);
     cam.fov = 40;
