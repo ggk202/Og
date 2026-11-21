@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OG — Cockpit prototype v0.14.1</title>
+<title>OG — Cockpit prototype v0.14.2</title>
 <style>
   html, body { margin:0; height:100%; background:#000; overflow:hidden;
     font-family: ui-monospace, Menlo, Consolas, monospace; color:#cfd8c0; }
@@ -97,7 +97,7 @@
 </head>
 <body>
 <canvas id="gl"></canvas>
-<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.14.1</span></div>
+<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.14.2</span></div>
 <div id="hangar"><div class="load" id="hangarLoad">LOADING SHIP</div>
   <div class="hint">DRAG TO ORBIT · WHEEL TO ZOOM · CLICK A HARDPOINT TO CHOOSE ITS MODULE</div>
   <div class="panel"><h2>HANGAR</h2><div class="sub" id="hullName"></div><div id="hullSel"></div><div class="sub">LOADOUT · SELECT A HARDPOINT, THEN A MODULE</div>
@@ -10547,7 +10547,7 @@ function renderBossCutscene(dt) {
   const cam = cutscene.cam, boss = cutscene.bossGroup;
   const BARREL_X = [-2.65, -0.88, 0.88, 2.65];
 
-  // --- SHOT 1 (0.0 - 4.2s): Low-Quality Military Recon Satellite TGP Feed -> Direct Ram -> Static Cut ---
+  // --- SHOT 1 (0.0 - 4.2s): Low-Quality Military Recon Satellite TGP Feed -> Bow Impact -> Violent Spin -> Static Cut ---
   if (t < 4.2) {
     boss.visible = true; cutscene.playerGroup.visible = false;
     for (const a of cutscene.allies) a.grp.visible = false;
@@ -10555,19 +10555,35 @@ function renderBossCutscene(dt) {
       if (td.azNode) td.azNode.rotation.y = td.startY;
       if (td.elNode) td.elNode.rotation.x = 0;
     }
-    const u = clamp(t / 3.75, 0, 1);
-    const zBoss = -560 + 648 * (0.25*u + 0.75*u*u);   // accelerates into camera; bow tip (+82) slams cam at t=3.75s
+    // Buryia's prow tip extends +85.8 m ahead of its origin (when rotated 180 deg).
+    // At tHit = 3.40 s, zBoss reaches -92 m (bow tip at -6.2 m — zero camera clipping), flinging the satellite into a
+    // violent 0.38 s tumble before the feed cuts to static at tCut = 3.78 s.
+    const tHit = 3.40, tCut = 3.78;
+    const u = clamp(t / tHit, 0, 1);
+    const zBoss = t <= tHit
+      ? -580 + 488 * (0.28*u + 0.72*u*u)
+      : -92 + (t - tHit) * 245;                         // Buryia keeps ploughing past after striking the satellite
     boss.position.set(0, -3, zBoss);
     boss.rotation.set(0.03, Math.PI, 0.04 * Math.sin(t*1.4));
-    const shk = u > 0.55 ? (u - 0.55) * 4.8 : 0.18;
-    cam.fov = 42 - 8*u;
-    cam.position.set((Math.random()-0.5)*shk, 2.5 + (Math.random()-0.5)*shk, 0);
-    cam.lookAt(0, 2, -300);
+    cam.fov = 42 - 7*u;
+    if (t <= tHit) {
+      const shk = u > 0.55 ? (u - 0.55) * 4.2 : 0.16;
+      cam.position.set((Math.random()-0.5)*shk, 2.5 + (Math.random()-0.5)*shk, 0);
+      cam.rotation.order = 'YXZ';
+      cam.lookAt(0, 2, -300);
+    } else {
+      // Struck by Buryia's bow: satellite is flung clear off the starboard/dorsal side into a violent multi-axis spin
+      const sp = t - tHit;
+      cam.position.set(6 + 95*sp, 4 + 48*sp, 18 + 130*sp);
+      cam.rotation.order = 'YXZ';
+      cam.rotation.set(-0.35 + sp*13.5, 0.55 + sp*16.0, sp*24.0);
+    }
     cam.updateProjectionMatrix();
     renderer.render(cutscene.scene, cam);
 
     const barH = Math.round(H * 0.09);
-    if (t < 3.75) {
+    if (t < tCut) {
+      const postHit = t > tHit, sp = Math.max(0, t - tHit);
       // Low-resolution military surveillance camera pass (320x180 pixelated, desaturated green-mono CRT + noise + glitch strips)
       const lw = cutscene.lowCv.width, lh = cutscene.lowCv.height, lctx = cutscene.lowCtx;
       lctx.imageSmoothingEnabled = false;
@@ -10577,19 +10593,26 @@ function renderBossCutscene(dt) {
       g.filter = 'grayscale(0.84) sepia(0.32) hue-rotate(84deg) contrast(1.42) brightness(0.92)';
       g.drawImage(cutscene.lowCv, 0, 0, W, H);
       g.filter = 'none';
-      // Occasional horizontal sync-tear glitch bands as closing range shrinks
-      const tearCount = u > 0.55 ? 4 : 1;
+      // Horizontal sync-tear glitch bands (violent tearing during post-impact tumble!)
+      const tearCount = postHit ? 14 : (u > 0.55 ? 4 : 1);
       for (let gi = 0; gi < tearCount; gi++) {
-        if (Math.random() < (0.18 + 0.45*u)) {
-          const gy = Math.random()*H, gh = 3 + Math.random()*14, shift = (Math.random() - 0.5) * (18 + 45*u);
+        if (postHit || Math.random() < (0.18 + 0.45*u)) {
+          const gy = Math.random()*H, gh = (postHit ? 8 : 3) + Math.random()*(postHit ? 34 : 14);
+          const shift = (Math.random() - 0.5) * (postHit ? 180 : 18 + 45*u);
           g.drawImage(cutscene.lowCv, 0, gy/H*lh, lw, Math.max(1, gh/H*lh), shift, gy, W, gh);
         }
       }
       // Heavy low-quality sensor grain & CRT scanlines
-      for (let i = 0; i < 650; i++) {
+      const grainN = postHit ? 1400 : 650;
+      for (let i = 0; i < grainN; i++) {
         const v = 90 + (Math.random()*140 | 0);
-        g.fillStyle = `rgba(${v},${Math.min(255, v+30)},${v},0.16)`;
-        g.fillRect(Math.random()*W, Math.random()*H, 3 + Math.random()*4, 2);
+        g.fillStyle = `rgba(${v},${Math.min(255, v+30)},${v},${postHit ? 0.34 : 0.16})`;
+        g.fillRect(Math.random()*W, Math.random()*H, 3 + Math.random()*(postHit ? 10 : 4), 2);
+      }
+      // Brief bright kinetic impact flash right at t = tHit
+      if (postHit && sp < 0.08) {
+        g.fillStyle = `rgba(225,255,235,${(0.75*(1 - sp/0.08)).toFixed(3)})`;
+        g.fillRect(0, 0, W, H);
       }
       g.fillStyle = 'rgba(0,12,6,0.22)';
       for (let y = 0; y < H; y += 3) g.fillRect(0, y, W, 1);
@@ -10600,11 +10623,11 @@ function renderBossCutscene(dt) {
 
       // Military TGP-style targeting pod overlay
       const ph = '#7dff9a', amb = '#ffb844', red = '#ff5242';
-      const distM = Math.max(0, Math.round(-(zBoss + 82)));
-      const vClose = Math.round(648 * (0.25 + 1.5*u) / 3.75);
+      const distM = Math.max(0, Math.round(-(zBoss + 85.8)));
+      const vClose = Math.round(488 * (0.28 + 1.44*u) / tHit);
       const fx = Math.round(W*0.09), fy = barH + 46, fw = W - fx*2, fh = H - barH*2 - 96;
       const cx = W/2, cy = H/2;
-      g.strokeStyle = 'rgba(125,255,154,0.62)'; g.lineWidth = 1.6;
+      g.strokeStyle = postHit ? 'rgba(255,82,66,0.8)' : 'rgba(125,255,154,0.62)'; g.lineWidth = 1.6;
       g.strokeRect(fx, fy, fw, fh);
 
       // Center TGP boresight crosshair with gap & mil ticks
@@ -10621,28 +10644,32 @@ function renderBossCutscene(dt) {
       g.stroke();
       g.strokeRect(cx - 8, cy - 8, 16, 16);
 
-      // Expanding tracking brackets tightly framing Buryia
-      const box = Math.min(fw, fh) * (0.09 + 0.36*u*u);
-      const bArm = Math.max(14, box*0.28);
-      g.strokeStyle = distM < 180 ? red : ph; g.lineWidth = 2;
-      for (const [sx, sy] of [[-1,-1],[1,-1],[1,1],[-1,1]]) {
-        g.beginPath(); g.moveTo(cx + sx*box, cy + sy*(box - bArm)); g.lineTo(cx + sx*box, cy + sy*box); g.lineTo(cx + sx*(box - bArm), cy + sy*box); g.stroke();
+      // Expanding tracking brackets tightly framing Buryia (lost during post-impact tumble)
+      if (!postHit) {
+        const box = Math.min(fw, fh) * (0.09 + 0.36*u*u);
+        const bArm = Math.max(14, box*0.28);
+        g.strokeStyle = distM < 180 ? red : ph; g.lineWidth = 2;
+        for (const [sx, sy] of [[-1,-1],[1,-1],[1,1],[-1,1]]) {
+          g.beginPath(); g.moveTo(cx + sx*box, cy + sy*(box - bArm)); g.lineTo(cx + sx*box, cy + sy*box); g.lineTo(cx + sx*(box - bArm), cy + sy*box); g.stroke();
+        }
       }
 
       // TGP status header & margins
       g.font = 'bold 14px monospace';
-      g.fillStyle = amb; g.fillText('LOCK  SAT-04', fx + 8, fy - 12);
+      g.fillStyle = postHit ? red : amb; g.fillText(postHit ? 'TRK LOST  SAT-04' : 'LOCK  SAT-04', fx + 8, fy - 12);
       g.fillStyle = ph; g.textAlign = 'center';
-      g.fillText(`MIL-RECON TGP   VIS   AZ +000  EL -001   x${u < 0.5 ? 16 : 64}`, cx, fy - 12);
+      const azDisp = postHit ? ((Math.round(sp*920) % 360) - 180) : 0;
+      const elDisp = postHit ? ((Math.round(sp*770) % 180) - 90) : -1;
+      g.fillText(`MIL-RECON TGP   VIS   AZ ${azDisp >= 0 ? '+' : ''}${azDisp}  EL ${elDisp >= 0 ? '+' : ''}${elDisp}   x${u < 0.5 ? 16 : 64}`, cx, fy - 12);
       g.textAlign = 'right';
-      g.fillText(`RNG ${distM} M  CL ${vClose} M/S`, fx + fw - 8, fy - 12);
+      g.fillText(postHit ? 'GYRO SATURATED' : `RNG ${distM} M  CL ${vClose} M/S`, fx + fw - 8, fy - 12);
       g.textAlign = 'left';
       g.font = '13px monospace';
       g.fillText('MONO', fx - 54, fy + 24);
       g.fillText('AGC',  fx - 54, fy + 44);
-      g.fillText('TRK',  fx - 54, fy + 64);
+      g.fillText(postHit ? 'FAIL' : 'TRK',  fx - 54, fy + 64);
       g.fillText('INR',  fx - 54, fy + 84);
-      g.fillText('POINT', fx + 8, fy + fh + 20);
+      g.fillText(postHit ? 'TUMBLE' : 'POINT', fx + 8, fy + fh + 20);
       g.textAlign = 'center';
       g.fillText('AREA TRACK · TITAN L1 RELAY', cx, fy + fh + 20);
       // TGP bottom softkey strip (TGP inverted)
@@ -10654,18 +10681,22 @@ function renderBossCutscene(dt) {
           g.fillStyle = '#04120a'; g.fillText(sk[si], sx, sy);
         } else { g.fillStyle = ph; g.fillText(sk[si], sx, sy); }
       }
-      if (distM < 280) {
+      if (postHit) {
+        g.fillStyle = red;
+        g.font = 'bold 18px monospace'; g.textAlign = 'center';
+        g.fillText('!! HULL IMPACT · ATTITUDE LOSS · CARRIER DEGRADING !!', cx, fy + fh - 16);
+      } else if (distM < 280) {
         g.fillStyle = (Math.floor(t*12) % 2) ? red : amb;
         g.font = 'bold 18px monospace'; g.textAlign = 'center';
         g.fillText('!! COLLISION COURSE · IMPACT IMMINENT !!', cx, fy + fh - 16);
       }
       g.restore();
     } else {
-      // Silent violent white-out flash + raw low-res TV static snow
-      const st = (t - 3.75) / 0.45;
-      g.fillStyle = st < 0.16 ? '#ffffff' : '#080b0a';
+      // Silent hard cut to raw low-res TV static snow
+      const st = (t - tCut) / (4.2 - tCut);
+      g.fillStyle = st < 0.12 ? '#e8f5ec' : '#080b0a';
       g.fillRect(0, 0, W, H);
-      if (st >= 0.16) {
+      if (st >= 0.12) {
         for (let k = 0; k < 2800; k++) {
           const v = (Math.random()*225) | 0;
           g.fillStyle = `rgb(${v},${v},${v})`;
