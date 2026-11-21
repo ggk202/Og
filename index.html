@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OG — Cockpit prototype v0.14.4</title>
+<title>OG — Cockpit prototype v0.14.5</title>
 <style>
   html, body { margin:0; height:100%; background:#000; overflow:hidden;
     font-family: ui-monospace, Menlo, Consolas, monospace; color:#cfd8c0; }
@@ -97,7 +97,7 @@
 </head>
 <body>
 <canvas id="gl"></canvas>
-<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.14.4</span></div>
+<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.14.5</span></div>
 <div id="hangar"><div class="load" id="hangarLoad">LOADING SHIP</div>
   <div class="hint">DRAG TO ORBIT · WHEEL TO ZOOM · CLICK A HARDPOINT TO CHOOSE ITS MODULE</div>
   <div class="panel"><h2>HANGAR</h2><div class="sub" id="hullName"></div><div id="hullSel"></div><div class="sub">LOADOUT · SELECT A HARDPOINT, THEN A MODULE</div>
@@ -1180,7 +1180,7 @@ const BOSS_RAIL = { range: 200e3, v: 4000, cd: 5.5, burst: 4, ripple: 0.14, dmgA
 const BOSS_LPD = { range: 14000, dwell: 0.42 };
 const BOSS_CIWS = { range: 6500, v: 1800, rate: 5, killRate: 0.85 };
 // Iterative gravity-compensated railgun fire-control solver for KR-01 Buryia:
-// predicts both slug and target through Titan/planet gravity so a non-evading player is hit dead-center even at 150+ km
+// integrates both slug and target with the exact physicsStep rk4() solver so a non-evading player is hit dead-center
 function bossRailLead(wp, owner, vic, V) {
   const rel = new THREE.Vector3(vic.x - wp.x, vic.y - wp.y, vic.z - wp.z);
   const relV = new THREE.Vector3(vic.vx - owner.vx, vic.vy - owner.vy, vic.vz - owner.vz);
@@ -1188,8 +1188,17 @@ function bossRailLead(wp, owner, vic, V) {
   if (tt === null || tt > 55) return null;
   let aim = rel.clone().addScaledVector(relV, tt).normalize();
   for (let iter = 0; iter < 4; iter++) {
-    const slug0 = { x: wp.x, y: wp.y, z: wp.z, vx: owner.vx + aim.x*V, vy: owner.vy + aim.y*V, vz: owner.vz + aim.z*V };
-    const [mx, my, mz] = predOrbitalMiss(slug0, vic, tt, gravAcc, simT);
+    const N = Math.max(4, Math.min(90, Math.ceil(tt / 0.5))), dt = tt / N;
+    const sSim = { x: wp.x, y: wp.y, z: wp.z, vx: owner.vx + aim.x*V, vy: owner.vy + aim.y*V, vz: owner.vz + aim.z*V };
+    const vSim = { x: vic.x, y: vic.y, z: vic.z, vx: vic.vx, vy: vic.vy, vz: vic.vz };
+    const tBase = simT;
+    for (let i = 0; i < N; i++) {
+      simT = tBase + i * dt;
+      rk4(sSim, dt, 0, 0, 0);
+      rk4(vSim, dt, 0, 0, 0);
+    }
+    simT = tBase;
+    const mx = vSim.x - sSim.x, my = vSim.y - sSim.y, mz = vSim.z - sSim.z;
     const dvx = aim.x*V + mx/tt, dvy = aim.y*V + my/tt, dvz = aim.z*V + mz/tt;
     const mag = Math.hypot(dvx, dvy, dvz);
     if (mag < 1) break;
@@ -1331,6 +1340,33 @@ function damageBossSubsystem(t, dmg, hitPos, kind, forcedSub = null) {
 }
 function bossStep(h) {
   eLaserBeams = [];
+  // 0. Advance existing enemy railgun slugs FIRST so newly fired slugs this step stay time-synchronized with ship
+  for (const s of eRailSlugs) {
+    if (s.dead) continue;
+    s.px = s.x; s.py = s.y; s.pz = s.z;
+    rk4(s, h, 0, 0, 0);
+    s.age += h;
+    s.dist += BOSS_RAIL.v * h;
+    if (!dead && segDist(s, ship) < 16) {
+      s.dead = true;
+      flashes.push({ x: s.x, y: s.y, z: s.z, vx: ship.vx, vy: ship.vy, vz: ship.vz, t0: simT, age: 0, dur: 0.55, peak: 0.95, kind: 'railBlue' });
+      sfx.hullThump();
+      if (applyBossRailHit(s)) break;
+      continue;
+    }
+    for (const f of targets) {
+      if (f.gone || f.side !== 'FRIENDLY') continue;
+      if (segDist(s, f) < Math.max(12, f.radius)) {
+        s.dead = true;
+        f.integrity -= BOSS_RAIL.dmgAlly;
+        flashes.push({ x: s.x, y: s.y, z: s.z, vx: f.vx, vy: f.vy, vz: f.vz, t0: simT, age: 0, dur: 0.6, peak: 0.9, kind: 'railBlue' });
+        log(`${f.name} HIT BY RAILGUN · ${Math.max(0, Math.round(100*f.integrity/f.maxInt))}%`);
+        break;
+      }
+    }
+  }
+  eRailSlugs = eRailSlugs.filter(s => !s.dead && s.age < 48);
+
   for (const t of targets) {
     if (!t.boss || t.gone || !t.subsystems) continue;
     const F = targetFrame(t);
@@ -1429,52 +1465,25 @@ function bossStep(h) {
           const wp = bossSubWorldPos(t, q.tur, F);
           const leadAim = bossRailLead(wp, t, q.vic, BOSS_RAIL.v);
           if (!leadAim) continue;
-          // Pinpoint accuracy when both radars are intact (0.00003 rad ~1.5 m at 50 km); widens sharply if radars are destroyed
+          // Pinpoint accuracy when both radars are intact (round 0 < 0.4 m at 40 km); widens sharply if radars are destroyed
           const rdrLoss = 1 - (t.radarScore ?? 1);
-          const baseErr = 0.00003 + rdrLoss * 0.0028;
-          const bracket = q.idx === 0 ? 1.0 : 1.0 + q.idx * 0.85;
+          const baseErr = 0.00001 + rdrLoss * 0.0028;
+          const bracket = q.idx === 0 ? 1.0 : 1.0 + q.idx * 4.5;
           const err = baseErr * bracket;
           const aim = leadAim.clone()
             .add(new THREE.Vector3(Math.random()-0.5, Math.random()-0.5, Math.random()-0.5).multiplyScalar(err)).normalize();
-          const sx = wp.x + aim.x*6, sy = wp.y + aim.y*6, sz = wp.z + aim.z*6;
           eRailSlugs.push({
-            x: sx, y: sy, z: sz, px: sx, py: sy, pz: sz,
+            x: wp.x, y: wp.y, z: wp.z, px: wp.x, py: wp.y, pz: wp.z,
             vx: t.vx + aim.x*BOSS_RAIL.v, vy: t.vy + aim.y*BOSS_RAIL.v, vz: t.vz + aim.z*BOSS_RAIL.v,
             fireDir: [aim.x, aim.y, aim.z], dist: 0,
             age: 0, dead: false, owner: t, tgt: q.vic
           });
-          flashes.push({ x: sx, y: sy, z: sz, vx: t.vx, vy: t.vy, vz: t.vz, t0: simT, age: 0, dur: 0.35, peak: 0.85, kind: 'railBlue' });
+          flashes.push({ x: wp.x, y: wp.y, z: wp.z, vx: t.vx, vy: t.vy, vz: t.vz, t0: simT, age: 0, dur: 0.35, peak: 0.85, kind: 'railBlue' });
         }
         t.railQueue = nextQ;
       }
     }
   }
-  // 3. Advance enemy railgun slugs (trails computed in firing-frame along -fireDir so Saturn's orbital speed never smears them)
-  for (const s of eRailSlugs) {
-    if (s.dead) continue;
-    s.px = s.x; s.py = s.y; s.pz = s.z;
-    rk4(s, h, 0, 0, 0);
-    s.age += h;
-    s.dist += BOSS_RAIL.v * h;
-    if (!dead && segDist(s, ship) < 16) {
-      s.dead = true;
-      flashes.push({ x: s.x, y: s.y, z: s.z, vx: ship.vx, vy: ship.vy, vz: ship.vz, t0: simT, age: 0, dur: 0.55, peak: 0.95, kind: 'railBlue' });
-      sfx.hullThump();
-      if (applyBossRailHit(s)) break;
-      continue;
-    }
-    for (const f of targets) {
-      if (f.gone || f.side !== 'FRIENDLY') continue;
-      if (segDist(s, f) < Math.max(12, f.radius)) {
-        s.dead = true;
-        f.integrity -= BOSS_RAIL.dmgAlly;
-        flashes.push({ x: s.x, y: s.y, z: s.z, vx: f.vx, vy: f.vy, vz: f.vz, t0: simT, age: 0, dur: 0.6, peak: 0.9, kind: 'railBlue' });
-        log(`${f.name} HIT BY RAILGUN · ${Math.max(0, Math.round(100*f.integrity/f.maxInt))}%`);
-        break;
-      }
-    }
-  }
-  eRailSlugs = eRailSlugs.filter(s => !s.dead && s.age < 48);
 }
 
 // side: HOSTILE / NEUTRAL / UNKNOWN (display only). `hostile: true` additionally means it fires torpedoes.
@@ -5986,6 +5995,24 @@ function targetFrame(t) {
   const b = primaryAtState(t, simT);
   const f = new THREE.Vector3(t.vx - b.v[0], t.vy - b.v[1], t.vz - b.v[2]);
   if (f.lengthSq() < 1e-6) f.set(1, 0, 0); else f.normalize();
+  // KR-01 Buryia dreadnought rolls and yaws to hold its starboard broadside (rt) facing the player, with its
+  // dorsal citadel tower (up) standing upright across the player's line of sight so all 4 quad railguns bear cleanly.
+  if (t.boss && !t.wreck) {
+    const toP = new THREE.Vector3(ship.x - t.x, ship.y - t.y, ship.z - t.z);
+    if (toP.lengthSq() > 1) {
+      toP.normalize();
+      f.addScaledVector(toP, -f.dot(toP));
+      if (f.lengthSq() < 1e-6) {
+        const rad = new THREE.Vector3(t.x - b.c[0], t.y - b.c[1], t.z - b.c[2]).normalize();
+        f.crossVectors(toP, rad);
+        if (f.lengthSq() < 1e-6) f.set(0, 1, 0).cross(toP);
+      }
+      f.normalize();
+      const rt = toP.clone().addScaledVector(f, -toP.dot(f)).normalize();
+      const up = new THREE.Vector3().crossVectors(rt, f).normalize();
+      return { f, up, rt };
+    }
+  }
   const up = new THREE.Vector3(t.x - b.c[0], t.y - b.c[1], t.z - b.c[2]);
   up.addScaledVector(f, -up.dot(f));
   if (up.lengthSq() < 1e-6) up.set(0, 0, 1).addScaledVector(f, -f.z);
@@ -6298,6 +6325,10 @@ function preloadBossModel() {
     const emberGeo = new THREE.SphereGeometry(2.6, 8, 6);
     root.traverse(o => {
       if (o.name && KR01_MANIFEST.some(m => m.node === o.name)) subNodes[o.name] = o;
+      // Train all 4 quad railgun turrets to starboard broadside (+X) so they aim at the player in the Scope MFD
+      if (o.name === 'Boss_Turret_QuadRailgun_DorsalFwd_AzimuthPivot' || o.name === 'Boss_Turret_QuadRailgun_DorsalAft_AzimuthPivot') o.rotation.set(0, -Math.PI/2, 0);
+      if (o.name === 'Boss_Turret_QuadRailgun_VentralFwd_AzimuthPivot' || o.name === 'Boss_Turret_QuadRailgun_VentralAft_AzimuthPivot') o.rotation.set(0, Math.PI/2, 0);
+      if (/QuadRailgun_.*_ElevPivot/.test(o.name || '')) o.rotation.set(0, 0, 0);
       if (o.isMesh) {
         const orig = o.material;
         bossScope.visMats.set(o, orig);
@@ -10439,11 +10470,21 @@ function buildCutsceneScene() {
     bolts.push({ g, outer, core });
   }
 
-  // 4 turret muzzle flash spheres (placed in world space right at exact barrel tips)
+  // 4 turret muzzle flash sprites (feathered radial glow texture instead of a hard-edged sphere)
   const flashes = [];
-  const flGeo = new THREE.SphereGeometry(1, 14, 12);
+  const flCv = document.createElement('canvas'); flCv.width = 64; flCv.height = 64;
+  const flCtx = flCv.getContext('2d');
+  const flGr = flCtx.createRadialGradient(32, 32, 0, 32, 32, 32);
+  flGr.addColorStop(0, 'rgba(255,255,255,1)');
+  flGr.addColorStop(0.25, 'rgba(155,240,255,0.85)');
+  flGr.addColorStop(0.58, 'rgba(35,155,255,0.32)');
+  flGr.addColorStop(1, 'rgba(0,0,0,0)');
+  flCtx.fillStyle = flGr; flCtx.fillRect(0, 0, 64, 64);
+  const flTex = new THREE.CanvasTexture(flCv);
   for (let i = 0; i < 4; i++) {
-    const m = new THREE.Mesh(flGeo, new THREE.MeshBasicMaterial({ color: 0x88ecff, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false }));
+    const m = new THREE.Sprite(new THREE.SpriteMaterial({
+      map: flTex, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false
+    }));
     m.visible = false; sc.add(m); flashes.push(m);
   }
 
@@ -10574,8 +10615,8 @@ function renderBossCutscene(dt) {
     boss.visible = true; cutscene.playerGroup.visible = false;
     for (const a of cutscene.allies) a.grp.visible = false;
     for (const td of cutscene.turrets) {
-      if (td.azNode) td.azNode.rotation.y = td.startY;
-      if (td.elNode) td.elNode.rotation.x = 0;
+      if (td.azNode) td.azNode.rotation.set(0, td.startY, 0);
+      if (td.elNode) td.elNode.rotation.set(0, 0, 0);
     }
     // Buryia's prow tip extends +85.8 m ahead of its origin (when rotated 180 deg).
     // At tHit = 3.40 s, zBoss reaches -92 m (bow tip at -6.2 m — zero camera clipping), flinging the satellite into a
@@ -10745,9 +10786,10 @@ function renderBossCutscene(dt) {
         let diff = td.endY - td.startY;
         while (diff > Math.PI) diff -= Math.PI*2;
         while (diff < -Math.PI) diff += Math.PI*2;
-        td.azNode.rotation.y = td.startY + diff * slewK;
+        // Must use rotation.set(0, angle, 0) to clear Three.js's (pi, 0, pi) decomposition of 180-deg Y quaternions on aft turrets!
+        td.azNode.rotation.set(0, td.startY + diff * slewK, 0);
       }
-      if (td.elNode) td.elNode.rotation.x = 0.0;       // level horizontal barrels aligned directly with broadside fire
+      if (td.elNode) td.elNode.rotation.set(0, 0, 0);   // level horizontal barrels aligned directly with broadside fire
     }
     boss.updateMatrixWorld(true);
 
@@ -10763,7 +10805,7 @@ function renderBossCutscene(dt) {
         if (lt >= fireAt && lt < fireAt + 0.28) {
           const k = 1 - (lt - fireAt)/0.28;
           fl.visible = true; fl.position.copy(muzCenter);
-          fl.scale.setScalar(2.4 + 7.5*k); fl.material.opacity = k;
+          fl.scale.setScalar(5.5 + 14.0*k); fl.material.opacity = k;
           shake = Math.max(shake, 1.5*k);
         }
         for (let b = 0; b < 4; b++) {
@@ -10876,8 +10918,8 @@ function renderBossCutscene(dt) {
     boss.position.set(0, 0, 0);
     boss.rotation.set(0.03, -0.26, 0);
     for (const td of cutscene.turrets) {
-      if (td.azNode) td.azNode.rotation.y = td.endY;
-      if (td.elNode) td.elNode.rotation.x = 0.0;
+      if (td.azNode) td.azNode.rotation.set(0, td.endY, 0);
+      if (td.elNode) td.elNode.rotation.set(0, 0, 0);
     }
     boss.updateMatrixWorld(true);
     // Faint residual blue muzzle heat right at the exact 24.8 m barrel tips
@@ -10886,8 +10928,8 @@ function renderBossCutscene(dt) {
       if (!td.elNode) continue;
       fl.visible = true;
       fl.position.copy(td.elNode.localToWorld(new THREE.Vector3(0, 0, -24.85)));
-      const glow = 0.24 + 0.1*Math.sin(t*7 + ti);
-      fl.scale.setScalar(2.6); fl.material.opacity = glow * clamp(1 - lt/3.8, 0.2, 1);
+      const glow = 0.28 + 0.12*Math.sin(t*7 + ti);
+      fl.scale.setScalar(6.5); fl.material.opacity = glow * clamp(1 - lt/3.8, 0.25, 1);
     }
     const u = smooth(lt / 4.4);
     cam.fov = 40;
