@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OG — Cockpit prototype v0.14.3</title>
+<title>OG — Cockpit prototype v0.14.4</title>
 <style>
   html, body { margin:0; height:100%; background:#000; overflow:hidden;
     font-family: ui-monospace, Menlo, Consolas, monospace; color:#cfd8c0; }
@@ -97,7 +97,7 @@
 </head>
 <body>
 <canvas id="gl"></canvas>
-<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.14.3</span></div>
+<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.14.4</span></div>
 <div id="hangar"><div class="load" id="hangarLoad">LOADING SHIP</div>
   <div class="hint">DRAG TO ORBIT · WHEEL TO ZOOM · CLICK A HARDPOINT TO CHOOSE ITS MODULE</div>
   <div class="panel"><h2>HANGAR</h2><div class="sub" id="hullName"></div><div id="hullSel"></div><div class="sub">LOADOUT · SELECT A HARDPOINT, THEN A MODULE</div>
@@ -10356,16 +10356,34 @@ function buildCutsceneScene() {
   titan.position.set(1100, -1180, -1800);
   sc.add(titan);
 
-  // Boss root + N1 drive plume glow
+  // Boss root + feathered vacuum N1 exhaust plume (soft gradient texture on crossed planes instead of a hard-edged solid cone)
   const bossWrap = new THREE.Group();
-  const plumeMat = new THREE.MeshBasicMaterial({ color: 0x80d8ff, transparent: true, opacity: 0.52, blending: THREE.AdditiveBlending, depthWrite: false });
-  const plume = new THREE.Mesh(new THREE.ConeGeometry(8.5, 52, 16, 1, true), plumeMat);
-  plume.rotation.x = -Math.PI/2; plume.position.set(0, 0, 94);
-  bossWrap.add(plume);
-  const plumeCore = new THREE.Mesh(new THREE.ConeGeometry(4.2, 34, 14, 1, true),
-    new THREE.MeshBasicMaterial({ color: 0xe6f8ff, transparent: true, opacity: 0.85, blending: THREE.AdditiveBlending, depthWrite: false }));
-  plumeCore.rotation.x = -Math.PI/2; plumeCore.position.set(0, 0, 84);
-  bossWrap.add(plumeCore);
+  const pCv = document.createElement('canvas'); pCv.width = 128; pCv.height = 64;
+  const pCtx = pCv.getContext('2d');
+  for (let x = 0; x < 128; x++) {
+    const u = x / 127;                                 // 0 at nozzle throat -> 1 at vacuum plume tail
+    const ax = Math.pow(1 - u, 1.7);
+    const halfW = 10 + 20 * Math.pow(u, 0.55);
+    const gr = pCtx.createLinearGradient(0, 32 - halfW, 0, 32 + halfW);
+    gr.addColorStop(0, 'rgba(0,0,0,0)');
+    gr.addColorStop(0.28, `rgba(255,140,55,${(0.32*ax).toFixed(3)})`);
+    gr.addColorStop(0.5,  `rgba(255,235,195,${(0.78*ax).toFixed(3)})`);
+    gr.addColorStop(0.72, `rgba(255,140,55,${(0.32*ax).toFixed(3)})`);
+    gr.addColorStop(1, 'rgba(0,0,0,0)');
+    pCtx.fillStyle = gr; pCtx.fillRect(x, 0, 1, 64);
+  }
+  const plumeTex = new THREE.CanvasTexture(pCv);
+  const plumeMat = new THREE.MeshBasicMaterial({
+    map: plumeTex, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide
+  });
+  const plumeGeo = new THREE.PlaneGeometry(44, 24);
+  plumeGeo.rotateY(Math.PI/2);
+  for (const ang of [0, Math.PI/4, Math.PI/2, 3*Math.PI/4]) {
+    const pm = new THREE.Mesh(plumeGeo, plumeMat);
+    pm.rotation.z = ang;
+    pm.position.set(0, 0, 89);
+    bossWrap.add(pm);
+  }
   sc.add(bossWrap);
 
   // Player + 3 allied CM-32 carriers (for Shot 3)
