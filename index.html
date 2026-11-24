@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OG — Cockpit prototype v0.15.1</title>
+<title>OG — Cockpit prototype v0.16.0</title>
 <style>
   html, body { margin:0; height:100%; background:#000; overflow:hidden;
     font-family: ui-monospace, Menlo, Consolas, monospace; color:#cfd8c0; }
@@ -97,7 +97,7 @@
 </head>
 <body>
 <canvas id="gl"></canvas>
-<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.15.1</span></div>
+<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.16.0</span></div>
 <div id="hangar"><div class="load" id="hangarLoad">LOADING SHIP</div>
   <div class="hint">DRAG TO ORBIT · WHEEL TO ZOOM · CLICK A HARDPOINT TO CHOOSE ITS MODULE</div>
   <div class="panel"><h2>HANGAR</h2><div class="sub" id="hullName"></div><div id="hullSel"></div><div class="sub">LOADOUT · SELECT A HARDPOINT, THEN A MODULE</div>
@@ -299,7 +299,13 @@ const NEW_HULLS = {
     turn: 0.45, inertiaBox: [20, 9, 82], sys: { scope: [-34, -30], capacitors: [-22, -12], reactor: [4, 18], radiators: [22, 30], main: [34, 43] }, plume: 2,
     // Molten-salt heat sink: with the radiators stowed the skin is held cold and the waste heat goes into the salt
     // (2.9 GJ: about an hour of normal running); radar cross-section by aspect in m2 (rad: added by deployed radiators)
-    sink: 2.9e9, rcs: { nose: 0.05, tail: 0.6, side: 1.2, top: 6, rad: 15 },
+    sink: 2.9e9, rcs: { nose: 0.03, tail: 0.6, side: 1.2, top: 6, rad: 15 },
+    // Low-observable bays: the geodesic EW suite retracts behind bow doors; the CIWS and laser turrets sit behind
+    // bay doors (the VLS has its own flush doors and cold launch). Out/open, each adds radar cross-section (m2, all
+    // aspects) and a little to the signature; stowed, the EW suite's DAS, telescopes and most passive range are lost.
+    lo: { ew: 'HP_Bow_Geodesic_Emitter', bays: ['HP_Stealth_CIWS_Dorsal', 'HP_Stealth_CIWS_Ventral', 'HP_Stealth_LPD_Dorsal', 'HP_Stealth_LPD_Ventral'],
+      doors: ['HP_Bow_Geodesic_Emitter', 'HP_Stealth_CIWS_Dorsal', 'HP_Stealth_CIWS_Ventral', 'HP_Stealth_LPD_Dorsal', 'HP_Stealth_LPD_Ventral', 'HP_Stealth_VLS_Port', 'HP_Stealth_VLS_Stbd'],
+      ewRcs: 0.25, bayRcs: 1.0, ewSig: 3, baySig: 4, ewTransit: 6, bayTransit: 3, passive: 0.2 },
     hitHull: 0.07, dials: { dv: 8000, load: 1500, heat: 1000 } },
 };
 // Default module per slot type (LPD slots carry laser point defence)
@@ -376,7 +382,7 @@ const statOf = (role, key) => { const sl = roleSlot(role); return sl && modAt(sl
 // Own-sensor range (the bow radar extends it) and the torpedo warning range (radar or ECM extend it)
 const sensorRange = () => (roleDamage('radar') > 0 && statOf('radar', 'sensorRange')) || LOCAL_R;
 const warnRange = () => Math.max(TORP_WARN_R, roleDamage('radar') > 0 ? statOf('radar', 'warnRange') || 0 : 0,
-  roleDamage('ecm') > 0 ? statOf('ecm', 'warnRange') || 0 : 0);
+  roleDamage('ecm') > 0 && ewOut() ? statOf('ecm', 'warnRange') || 0 : 0);
 let DEFAULT_LOADOUT = HULL.defaultLoadout, LOADOUT_KEY = HULL.loadoutKey;
 // Modules that can go on a hardpoint
 const modulesFor = slot => Object.keys(MODULE_CATALOG).filter(id => MODULE_CATALOG[id].fits.includes(HARDPOINTS[slot].type));
@@ -632,7 +638,7 @@ function shipDestroyed(cause) {
 function restartAfterDeath() {
   // The whole scenario restarts: the ship returns to its starting orbit position, so the targets and the
   // frigate must too, or they are left hundreds of km away (resetTargets also clears torpedoes and flashes)
-  ringF = null; heatSink = 0;
+  ringF = null; heatSink = 0; loReset();
   missionPlan = scenario === 'sandbox' ? null : MISSIONS[scenario].plan(simT);
   applyModuleStats(); resetShip(); resetDamage(); resetPdcMounts(); resetTargets();
   projectiles = [];
@@ -870,6 +876,8 @@ const ACTIONS = [
   { id:'cycleTarget',label:'Cycle target',             def:'KeyT', edge:true },
   { id:'cycleSub',   label:'Cycle boss subsystem',     def:'KeyU', edge:true },
   { id:'toggleDas',  label:'See-through EW view (toggle)', def:'KeyO', edge:true },
+  { id:'toggleEw',   label:'EW suite extend/stow (LO)', def:'BracketLeft', edge:true },
+  { id:'toggleBays', label:'Turret bay doors (LO)',     def:'BracketRight', edge:true },
   { id:'cycleRange', label:'Tactical range scale',     def:'KeyM', edge:true },
   { id:'guardMaster', label:'Master arm cover (toggle)', def:'KeyK', edge:true },
   { id:'masterArm',  label:'Master arm (cycle OFF/ON/TNG)', def:'KeyH', edge:true },
@@ -933,6 +941,16 @@ function podDv() {
 let battery = POWER.battCap, hullT = THERM.tStart;
 const SINK_SKIN_T = 115, SINK_BURN_HEAT = 3e6, SINK_DUMP = 2.5e6;   // K, W per full thrust, W
 let heatSink = 0;                                     // J stored in the CS-17's molten salt
+// LO bays (hulls with HULL.lo): the EW suite out or stowed, the turret bay doors open or shut; each move takes
+// a transit time, during which it counts as out for radar but not yet (or no longer) for sensing or firing
+const lo = { ew: true, bays: true, ewT: -1e9, bayT: -1e9 };
+const ewMoving = () => !!HULL.lo && simT - lo.ewT < HULL.lo.ewTransit;
+const bayMoving = () => !!HULL.lo && simT - lo.bayT < HULL.lo.bayTransit;
+const ewOut = () => !HULL.lo || (lo.ew && !ewMoving());              // the suite's sensors work
+const ewExposed = () => !!HULL.lo && (lo.ew || ewMoving());          // it shows on radar
+const baysExposed = () => !!HULL.lo && (lo.bays || bayMoving());
+const bayShut = sl => !!HULL.lo && HULL.lo.bays.includes(sl) && (!lo.bays || bayMoving());
+function loReset() { lo.ew = true; lo.bays = !HULL.lo; lo.ewT = lo.bayT = -1e9; }
 let radDeployed = true, rcsStab = true, laserArmed = false, guardOpen = false, brownout = false;
 let lampTestT = 0;   // seconds of lamp test remaining
 let keyBuf = '';     // keypad entry buffer, shown on the COMMS page
@@ -1547,7 +1565,7 @@ const rangeTo = o => Math.hypot(o.x-ship.x, o.y-ship.y, o.z-ship.z);
 // enemy uses: 12 km * sqrt(signature)), or actively with the bow radar out to its range. Earth or the Moon in the
 // way blocks both.
 const radarOn = () => roleDamage('radar') > 0;
-const passiveRange = t => DET_BASE*Math.sqrt(targetSig(t));
+const passiveRange = t => DET_BASE*Math.sqrt(targetSig(t))*(ewOut() ? 1 : HULL.lo.passive);   // EW suite stowed: hull apertures only
 // Hysteresis: a contact already held is kept out to CONTACT_HOLD x the range needed to acquire it, so a target
 // at the edge of detection does not flicker in and out
 const CONTACT_HOLD = 1.25, MEM_TIME = 30;
@@ -2595,6 +2613,7 @@ function shipRCS(u) {
   const b = u.clone().applyQuaternion(toBodyQ()), R = HULL.rcs || { nose: 2, tail: 4, side: 10, top: 20 };
   let s = (b.z < 0 ? R.nose : R.tail)*b.z*b.z + R.side*b.x*b.x + R.top*b.y*b.y;
   if (radDeployed) s += R.rad || 15;
+  if (HULL.lo) s += (ewExposed() ? HULL.lo.ewRcs : 0) + (baysExposed() ? HULL.lo.bayRcs : 0);
   if (simT - (ringF ? ringF.bayT : -1e9) < 4) s += 1.5;
   return s;
 }
@@ -2602,6 +2621,7 @@ function shipRCS(u) {
 // with the cold-launch and collision spikes
 function irSignature() {
   let sg = signature() - (radarOn() ? 200 : 0);
+  if (HULL.lo) sg -= (ewExposed() ? HULL.lo.ewSig : 0) + (baysExposed() ? HULL.lo.baySig : 0);   // those are radar returns
   if (ringF && simT - ringF.bumpT < 4) sg += 25;
   return sg;
 }
@@ -2753,6 +2773,7 @@ function ringCollide() {
     if (mission) scoreAdd('COLLISIONS', -150);
     if (hullInt <= 0) { shipDestroyed('COLLISION WITH A RING BOULDER'); return; }
   }
+  if (!ewOut()) warn = null;                          // the cameras that see rocks are in the EW suite
   if (warn && (!F.warn || F.warn.r !== warn.r) && warn.tca < 25) log(`PROXIMITY · ROCK ${warn.r.R.toFixed(0)} M · ${warn.tca.toFixed(0)} S`);
   F.warn = warn;
 }
@@ -3060,6 +3081,8 @@ const MISSIONS = {
       'helmet see-through view: wide-field telescope imagery, rocks, and the RWR showing each radar and when its beam',
       'is on you. Rocks between you and a sensor hide you; dust in the ring plane dims long sight lines. Radiators',
       'stowed, the salt sink holds about an hour of heat. The stealth VLS cold-launches: missiles drift 30 s first.',
+      '[ stows the EW suite (less radar return, but no DAS, telescopes or proximity warning; RWR stays); ] opens the',
+      'turret bays (CIWS and lasers fire only with them open). You start with the suite out and the bays shut.',
     ],
     start() {
       log("OPERATION NIGHTGLASS · DEEP STRIKE · SATURN'S A RING");
@@ -3213,6 +3236,7 @@ function signature() {
   if (simT - lastLaunchT < 5) sg += 80;
   if (simT - pdcLastFire < 2) sg += 40;
   if (radarOn()) sg += 200;                            // an active radar is seen from far away
+  if (HULL.lo) sg += (ewExposed() ? HULL.lo.ewSig : 0) + (baysExposed() ? HULL.lo.baySig : 0);
   return sg;
 }
 const detectionRange = () => DET_BASE*Math.sqrt(signature());
@@ -4000,7 +4024,7 @@ function physicsStep(h) {
         torpWarn = true;
         // ECM: a decoy salvo at each torpedo entering decoy range; it may break the torpedo's lock
         const ecmR = statOf('ecm', 'range');
-        if (ecmR && d < ecmR && !tp.ecmTried && ecmDecoys > 0 && masterMode !== 'OFF' && roleDamage('ecm') > 0) {
+        if (ecmR && d < ecmR && !tp.ecmTried && ecmDecoys > 0 && masterMode !== 'OFF' && roleDamage('ecm') > 0 && ewOut()) {
           tp.ecmTried = true; ecmDecoys--;
           const pS = statOf('ecm', 'pSeduce')*roleDamage('ecm');
           // The decoy cloud drifts away from the ship; a seduced torpedo homes on it instead of the ship
@@ -4027,7 +4051,7 @@ function physicsStep(h) {
     // Barrel cooling, every step; an overheated mount comes back once it has cooled to PDC_HEAT_RESUME
     m.heat = Math.max(0, m.heat - PDC_COOL*h);
     if (m.hot && m.heat <= PDC_HEAT_RESUME) { m.hot = false; log(`${m.name} COOLED · READY`); }
-    if (m.cd > 0 || masterMode === 'OFF' || battery < PDC_ENERGY || damage[m.sys] <= 0 || m.hot || m.rounds <= 0 || pdHold[m.sys]) continue;
+    if (m.cd > 0 || masterMode === 'OFF' || battery < PDC_ENERGY || damage[m.sys] <= 0 || m.hot || m.rounds <= 0 || pdHold[m.sys] || bayShut(m.sys)) continue;
     const nW = new THREE.Vector3(...m.dir).applyQuaternion(shipQ);
     const mP = new THREE.Vector3(...m.pos).applyQuaternion(shipQ).add(new THREE.Vector3(ship.x, ship.y, ship.z));
     // Nearest torpedo inside range and the mount's arc
@@ -4195,7 +4219,7 @@ function physicsStep(h) {
   lpdFiring = false; lpdLoadE = 0;
   for (const m of LPD_MOUNTS) {
     m.target = null;
-    if (masterMode === 'OFF' || (damage[m.sys] ?? 1) <= 0 || battery <= 0 || brownout || hullT >= THERM.tMax || pdHold[m.sys]) continue;
+    if (masterMode === 'OFF' || (damage[m.sys] ?? 1) <= 0 || battery <= 0 || brownout || hullT >= THERM.tMax || pdHold[m.sys] || bayShut(m.sys)) continue;
     const nW = new THREE.Vector3(...m.dir).applyQuaternion(shipQ);
     let best = null, bestR = Infinity;
     for (const tp of torpedoes) {
@@ -5292,9 +5316,10 @@ function drawTactical(g, W, H, idx) {
       const Q = clamp(ringF.Q, 0, 1), qc = Q < 0.3 ? PH : Q < 0.6 ? AMB : RED, S = HULL.sink ? heatSink/HULL.sink : 0;
       g.fillStyle = 'rgba(0,0,0,0.9)'; g.fillRect(56, 433, 200, 16);
       g.strokeStyle = DIM; g.strokeRect(56, 433, 200, 16); g.fillStyle = qc; g.fillRect(58, 435, 196*Q, 12);
-      txt(g, 264, 447, `TRK ${(Q*100).toFixed(0)}% SINK ${(S*100).toFixed(0)}%${ringF.rwr.some(e => simT - e.lastPaint < 1) ? ' PAINT' : ''}`, Q >= 0.6 || S > 0.9 ? RED : qc, '17px monospace');
+      txt(g, 264, 447, `TRK ${(Q*100).toFixed(0)}% SINK ${(S*100).toFixed(0)}%${ringF.rwr.some(e => simT - e.lastPaint < 1) ? ' PAINT' : ''}${HULL.lo ? (ewExposed() ? ' EW' : '') + (baysExposed() ? ' BAYS' : '') : ''}`, Q >= 0.6 || S > 0.9 ? RED : qc, '17px monospace');
     } else {
-    const extra = [radarOn() ? 'RADAR ON' : '', mission && !mission.ended ? (mission.alert ? 'DETECTED' : 'UNSEEN') : ''].filter(Boolean).join(' ');
+    const extra = [radarOn() ? 'RADAR ON' : '', HULL.lo && ewExposed() ? 'EW' : '', HULL.lo && baysExposed() ? 'BAYS' : '',
+      mission && !mission.ended ? (mission.alert ? 'DETECTED' : 'UNSEEN') : ''].filter(Boolean).join(' ');
     txt(g, 264, 447, `${fmtDist(dr)}${extra ? ' ' + extra : ''}`, mission && mission.alert ? RED : col, '17px monospace');
     }
   }
@@ -7054,6 +7079,12 @@ function drawScope(g, W, H, idx) {
   const curZoom = opt.zooms[scopeZoom], curRes = irOn ? opt.resIR : opt.resVis;
   const SCOPE_FOV = SCOPE_FOV0/curZoom;
   mfdHeader(g, W, `SCOPE  ${irOn ? 'IR' : 'VIS'}  x${curZoom}`, idx);
+  if (!ewOut()) {                                     // the telescopes live in the EW suite
+    txt(g, W/2, 250, ewMoving() ? (lo.ew ? 'EW SUITE EXTENDING' : 'EW SUITE RETRACTING') : 'EW SUITE STOWED', AMB, 'bold 30px monospace', 'center');
+    txt(g, W/2, 292, 'TELESCOPES DARK · DAS OFFLINE · RWR ONLY', DIM, '20px monospace', 'center');
+    txt(g, W/2, 330, `[${codeName(bindings.toggleEw) || '['}] OR EW KEY TO EXTEND`, DIM, '18px monospace', 'center');
+    return;
+  }
   // Frame and view area, following the reference layout: status text above, labels at the sides, softkeys below
   const FX = 60, FY = 108, FW = 640, FH = 292, cx = FX + FW/2, cy = FY + FH/2, R = 150;
   const bq = scopeViewQ();
@@ -8217,6 +8248,15 @@ function onAction(id) {
       radDeployed = !radDeployed; sfx.click();
       log(radDeployed ? 'RADIATORS DEPLOYED' : 'RADIATORS STOWED'); break;
     case 'cycleTarget': cycleTarget(); break;
+    case 'toggleEw': case 'toggleBays': {
+      if (!HULL.lo) { log('NO LOW-OBSERVABLE BAYS ON THIS HULL'); break; }
+      const ew = id === 'toggleEw';
+      if (ew ? ewMoving() : bayMoving()) { log(ew ? 'EW SUITE IN TRANSIT' : 'BAY DOORS IN TRANSIT'); break; }
+      if (ew) { lo.ew = !lo.ew; lo.ewT = simT; log(lo.ew ? 'EW SUITE EXTENDING' : 'EW SUITE RETRACTING · DAS AND TELESCOPES OFF'); }
+      else { lo.bays = !lo.bays; lo.bayT = simT; log(lo.bays ? 'BAY DOORS OPENING · TURRETS FREE' : 'BAY DOORS CLOSING · TURRETS HOLD'); }
+      sfx.click(); sfx.dockMotors(ew ? HULL.lo.ewTransit : HULL.lo.bayTransit);   // actuators
+      break;
+    }
     case 'toggleDas': das.on = !das.on; sfx.click(); log(das.on ? 'EW SEE-THROUGH ON' : 'EW SEE-THROUGH OFF'); break;
     case 'cycleSub': cycleBossSub((held.has('ShiftLeft') || held.has('ShiftRight')) ? -1 : 1); break;
     case 'cycleRange': rangeIdx = (rangeIdx+1) % RANGES.length; break;
@@ -8395,7 +8435,9 @@ const SHIP_SPEC = [
   ['[3] MOLTEN SALT HEAT SINK · 2.9 GJ', '#c8ffd6'],
   ['    ~1 H DARK WITH RADIATORS STOWED', null],
   ['    BURNS FILL IT · FULL: RADIATORS DEPLOY', null],
-  ['[4] RCS 0.05 M2 NOSE-ON · 1.2 M2 BEAM', '#c8ffd6'],
+  ['[4] RCS 0.03 M2 NOSE-ON · 1.2 M2 BEAM', '#c8ffd6'],
+  ['[5] EW SUITE AND TURRETS STOW BEHIND', '#c8ffd6'],
+  ['    DOORS · LESS RCS, LESS AWARENESS', null],
 ];
 function drawShipBrief(g, X, Y, W, H, tt, fs) {
   const D = cs17WireData(), v = D.v, e = D.e, gr = D.g;
@@ -9085,10 +9127,10 @@ function build3DSubPanel(ck, cfg) {
     ['BOOK', () => { sfx.click(); toggleManual(); }],
     ['TEST', () => { lampTestT = 3; sfx.click(); }],
     ['RESET', reset3DMfds],
-    ['JETT', () => jettisonPods()],
+    ...(ck.id === 'cs17' ? [['EW', () => onAction('toggleEw')]] : [['JETT', () => jettisonPods()]]),
     ['IR', () => onAction('toggleIR')],
     ['LEAD', () => onAction('leadHold')],
-    ['EXCAL', () => fireExcalibur()],
+    ...(ck.id === 'cs17' ? [['BAYS', () => onAction('toggleBays')]] : [['EXCAL', () => fireExcalibur()]]),
     ['CTR', centerView],
   ];
 
@@ -9172,6 +9214,10 @@ function build3DSubPanel(ck, cfg) {
       addSubBtn(stbdG, x, y, lbl, fn, colStep * 0.82, 0.023);
       if (lbl === 'LEAD') addSubLamp(stbdG, x, y + 0.020, 0xffb000, () => leadHold ? [0xffb000, 2.5] : 0, 0.005);
       if (lbl === 'EXCAL') addSubLamp(stbdG, x, y + 0.020, 0x3fe0ff, excalLampFn, 0.005);
+      // EW: green when the suite is out and seeing, flashing amber in transit; BAYS: amber while open (exposed)
+      const blink = () => Math.floor(performance.now()/300) % 2 ? 2.2 : 0.3;
+      if (lbl === 'EW') addSubLamp(stbdG, x, y + 0.020, 0x66ff88, () => ewMoving() ? [0xffaa22, blink()] : lo.ew ? [0x66ff88, 2.0] : 0, 0.005);
+      if (lbl === 'BAYS') addSubLamp(stbdG, x, y + 0.020, 0xffaa22, () => bayMoving() ? [0xffaa22, blink()] : lo.bays ? [0xffaa22, 2.0] : 0, 0.005);
     });
     const tx = S.stbd.w/2 - 0.045;
     addSubLamp(stbdG, tx, 0.030, 0xff2a2a, () => (torpWarn && Math.floor(performance.now()/250) % 2 === 0) ? [0xff2a2a, 2.6] : 0, 0.0082);
@@ -9854,6 +9900,24 @@ function setHull(id) {
   hangar.sel = hangar.hover = null; hangar.dist = 1.5*HULL.length;
   if (hangarOpen) { loadHangar(); refreshHangar(); }
 }
+// Open bay for a low-observable module in the ship view: a dark well under its footprint and two RAM-coated door
+// leaves hinged at its sides, swung open 115 deg (the bow EW bay's leaves hinge port and starboard as well)
+const loDoorMat = new THREE.MeshStandardMaterial({ color: 0x15171a, roughness: 0.62, metalness: 0.3, side: THREE.DoubleSide });
+const loWellMat = new THREE.MeshStandardMaterial({ color: 0x050506, roughness: 0.9, metalness: 0.1 });
+function loBayDoors(obj, slot) {
+  const b = new THREE.Box3().setFromObject(obj), g = new THREE.Group();
+  const w = (b.max.x - b.min.x)*1.15 + 0.3, d = (b.max.z - b.min.z)*1.15 + 0.3, cz = (b.min.z + b.max.z)/2, cx = (b.min.x + b.max.x)/2;
+  const y0 = slot === HULL.lo.ew ? b.min.y + 0.05 : Math.max(b.min.y, -0.05);
+  const well = new THREE.Mesh(new THREE.BoxGeometry(w, 0.12, d), loWellMat); well.position.set(cx, y0 - 0.08, cz); g.add(well);
+  for (const s of [-1, 1]) {
+    const hinge = new THREE.Group(); hinge.position.set(cx + s*w/2, y0, cz);
+    const leaf = new THREE.Mesh(new THREE.BoxGeometry(w/2, 0.06, d), loDoorMat); leaf.position.x = -s*w/4; hinge.add(leaf);
+    hinge.rotation.z = -s*115*Math.PI/180;            // each leaf swings up and out over its hinge
+    g.add(hinge);
+  }
+  g.traverse(o => { if (o.isMesh) o.userData.slot = slot; });
+  return g;
+}
 // Put the module currently fitted on a hardpoint onto the 3D hull (loading its file if needed)
 function showSlotModel(slot) {
   const hp = HARDPOINTS[slot];
@@ -9870,6 +9934,7 @@ function showSlotModel(slot) {
       else if (hp.m && hp.m[0] > 0.5) obj.scale.x = -1;   // e.g. CM-32 HP_SlavaPod_Port* (unmirrored X)
     }
     obj.traverse(o => { if (o.isMesh) o.userData.slot = slot; });
+    if (HULL.lo && HULL.lo.doors.includes(slot)) obj.add(loBayDoors(obj, slot));
     hp.obj.add(obj); hangar.slotObj[slot] = obj;
   }).catch(err => console.error('module model failed', mod.file, err));
 }
@@ -11741,6 +11806,10 @@ const DAS_K = 3.6e-3;                                  // far-scene scale (Satur
 function dasRender() {
   if (!das.built) dasBuild();
   const bq = toBodyQ(), F = ringF, now = simT;
+  if (!ewOut()) {                                     // EW suite stowed: no imagery, symbology only
+    for (const c of [das.cam]) { c.fov = camera.fov; c.aspect = camera.aspect; c.updateProjectionMatrix(); camera.getWorldQuaternion(c.quaternion); }
+    das.vRel = null; dasOverlay(bq); return;
+  }
   for (const c of [das.cam, das.farCam]) { c.fov = camera.fov; c.aspect = camera.aspect; c.updateProjectionMatrix(); camera.getWorldQuaternion(c.quaternion); }
   const sunB = SUN_DIR.clone().applyQuaternion(bq);
   das.sun.position.copy(sunB).multiplyScalar(1000); das.farSun.position.copy(sunB).multiplyScalar(1e6);
@@ -11829,7 +11898,9 @@ function dasOverlay(bq) {
     for (let k = 0; k < 8 && placed.some(r => x < r.x + r.w && x + w > r.x && Math.abs(yy - r.y) < 14); k++) yy += 14;
     placed.push({ x, y: yy, w }); g.fillStyle = col; g.fillText(text, x, yy);
   };
-  g.fillStyle = GRN; g.fillText('EW SEE-THROUGH · GEODESIC WIDE FIELD', 18, 20);
+  const blind = !ewOut();
+  g.fillStyle = blind ? AMB : GRN;
+  g.fillText(blind ? `DAS OFFLINE · EW SUITE ${ewMoving() ? (lo.ew ? 'EXTENDING' : 'RETRACTING') : 'STOWED'} · RWR ONLY` : 'EW SEE-THROUGH · GEODESIC WIDE FIELD', 18, 20);
   // Track meter (the worst cluster), heat sink, exposure now
   if (F) {
     const Q = clamp(F.Q, 0, 1), col = Q < 0.3 ? GRN : Q < 0.6 ? AMB : RED;
@@ -11851,8 +11922,8 @@ function dasOverlay(bq) {
     if (!p.off) { g.strokeStyle = GRN; g.beginPath(); g.arc(p.x, p.y, 9, 0, 6.283); g.moveTo(p.x - 18, p.y); g.lineTo(p.x - 9, p.y); g.moveTo(p.x + 9, p.y); g.lineTo(p.x + 18, p.y); g.moveTo(p.x, p.y - 9); g.lineTo(p.x, p.y - 16); g.stroke(); }
     g.fillStyle = GRN; g.fillText(`V RING ${das.vRel.length().toFixed(1)} M/S`, p.off ? 18 : p.x + 22, p.off ? H - 60 : p.y);
   }
-  // Proximity warning
-  if (F && F.warn) {
+  // Proximity warning (needs the suite's cameras)
+  if (F && F.warn && !blind) {
     const p0 = rockRel(F.warn.r, simT, { sp: satPos(simT), sv: satVel(simT) }), p = proj(p0.x, p0.y, p0.z);
     g.strokeStyle = RED; g.lineWidth = 2; g.beginPath(); g.arc(p.x, p.y, 22, 0, 6.283); g.stroke(); g.lineWidth = 1;
     g.fillStyle = RED; g.fillText(`ROCK ${F.warn.r.R.toFixed(0)} M · ${F.warn.tca.toFixed(0)} S`, p.x + 28, p.y);
@@ -11886,7 +11957,7 @@ function dasOverlay(bq) {
   for (const a of [-90, 0, 90]) { const x = SX + SW/2 + a/180*SW/2; g.beginPath(); g.moveTo(x, SY); g.lineTo(x, SY + 5); g.stroke(); }
   if (F) {
     for (const e of F.rwr) { const p = strip(e.u.x, e.u.y, e.u.z); g.fillStyle = simT - e.lastPaint < 0.6 ? RED : AMB; g.fillRect(p.x - 3, p.y - 3, 6, 6); }
-    for (const r of F.close) if (r.R > 25 && r.relNow) { const p = strip(r.relNow.x, r.relNow.y, r.relNow.z); g.fillStyle = 'rgba(200,210,205,0.6)'; g.fillRect(p.x - 1, p.y - 1, 2, 2); }
+    if (!blind) for (const r of F.close) if (r.R > 25 && r.relNow) { const p = strip(r.relNow.x, r.relNow.y, r.relNow.z); g.fillStyle = 'rgba(200,210,205,0.6)'; g.fillRect(p.x - 1, p.y - 1, 2, 2); }
   }
   for (const t of targets) if (!t.gone && t.side === 'HOSTILE' && isSeen(t)) { const p = strip(t.x - ship.x, t.y - ship.y, t.z - ship.z); g.strokeStyle = GRN; g.strokeRect(p.x - 3, p.y - 3, 6, 6); }
 }
