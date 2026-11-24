@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OG — Cockpit prototype v0.14.6</title>
+<title>OG — Cockpit prototype v0.14.7</title>
 <style>
   html, body { margin:0; height:100%; background:#000; overflow:hidden;
     font-family: ui-monospace, Menlo, Consolas, monospace; color:#cfd8c0; }
@@ -97,7 +97,7 @@
 </head>
 <body>
 <canvas id="gl"></canvas>
-<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.14.6</span></div>
+<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.14.7</span></div>
 <div id="hangar"><div class="load" id="hangarLoad">LOADING SHIP</div>
   <div class="hint">DRAG TO ORBIT · WHEEL TO ZOOM · CLICK A HARDPOINT TO CHOOSE ITS MODULE</div>
   <div class="panel"><h2>HANGAR</h2><div class="sub" id="hullName"></div><div id="hullSel"></div><div class="sub">LOADOUT · SELECT A HARDPOINT, THEN A MODULE</div>
@@ -2334,6 +2334,7 @@ function arriveAI(t, h) {
   const A = t.arrive, acc = t.ai ? t.ai.acc : 3;
   let dir = null;
   if (A.mode === 'capture') {
+    if (t.staged) return null;                       // KR-01 held in outer staging by the mission: coast, don't arrive
     // Brake retrograde around periapsis (within 2500 km of it) until the orbit is nearly circular
     const b = bodyAt('TITAN', simT), rv = new THREE.Vector3(t.x - b.c[0], t.y - b.c[1], t.z - b.c[2]), r = rv.length();
     const vv = new THREE.Vector3(t.vx - b.v[0], t.vy - b.v[1], t.vz - b.v[2]);
@@ -2341,7 +2342,7 @@ function arriveAI(t, h) {
     const dShip = Math.hypot(t.x - ship.x, t.y - ship.y, t.z - ship.z);
     if (el.e <= 0.15 || vv.length() < 200 || (t.boss && dShip < 1200e3 && el.e < 0.7) || (t.huntTaskGroup && dShip < 850e3 && el.e < 0.55)) {
       t.arrived = true;
-      if (isSeen(t) || t.boss) log(t.boss ? `${t.name} IN TITAN ORBIT · CLOSING ON TASK GROUP` : `${t.name} IN TITAN ORBIT · ENGAGING TASK GROUP`);
+      if ((isSeen(t) || t.boss) && !t.arriveLogged) t.arriveLogged = true, log(t.boss ? `${t.name} IN TITAN ORBIT · CLOSING ON TASK GROUP` : `${t.name} IN TITAN ORBIT · ENGAGING TASK GROUP`);
       return null;
     }
     // from just before periapsis on; a low periapsis is held up with a radial-out component
@@ -2638,7 +2639,7 @@ const MISSIONS = {
       if (boss && !mission.events.bossCutscene && !dead && !(mission && mission.ended)) {
         if (mainFleet.length > 0) {
           // Hold KR-01 Buryia in outer staging while the main fleet battle (Group A + Group B) is still in progress
-          boss.arrived = false;
+          boss.arrived = false; boss.staged = true;   // held: its capture logic stands down (see arriveAI)
           boss.fireT = 15;
           const tp = titanPos(simT), tv = titanVel(simT);
           const rx = boss.x - tp[0], ry = boss.y - tp[1], rz = boss.z - tp[2], r = Math.hypot(rx, ry, rz);
@@ -2651,6 +2652,7 @@ const MISSIONS = {
           }
         } else {
           // Main battle finished: sound warning klaxon, drop time warp, and trigger Buryia's arrival after a 3.2s beat
+          boss.staged = false;
           if (!mission.events.mainClearedT) {
             mission.events.mainClearedT = simT;
             mission.events.bossWarn = true;
