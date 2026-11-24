@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OG — Cockpit prototype v0.14.7</title>
+<title>OG — Cockpit prototype v0.15.0</title>
 <style>
   html, body { margin:0; height:100%; background:#000; overflow:hidden;
     font-family: ui-monospace, Menlo, Consolas, monospace; color:#cfd8c0; }
@@ -97,7 +97,7 @@
 </head>
 <body>
 <canvas id="gl"></canvas>
-<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.14.7</span></div>
+<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.15.0</span></div>
 <div id="hangar"><div class="load" id="hangarLoad">LOADING SHIP</div>
   <div class="hint">DRAG TO ORBIT · WHEEL TO ZOOM · CLICK A HARDPOINT TO CHOOSE ITS MODULE</div>
   <div class="panel"><h2>HANGAR</h2><div class="sub" id="hullName"></div><div id="hullSel"></div><div class="sub">LOADOUT · SELECT A HARDPOINT, THEN A MODULE</div>
@@ -237,7 +237,7 @@ Object.assign(MODULE_CATALOG, {
   mod_vls_16cell: { name: 'VLS 16-CELL', short: 'VLS', role: 'vls', fits: ['vls_16cell_bay'], file: 'mod_vls_16cell.glb',
     mass: 14000, com: [0, 0.15, 0], launch: [0, 0.6, 0], stats: { cells: 16 }, desc: '16 guided anti-ship missiles' },
   mod_stealth_vls_12cell: { name: 'LO VLS 12-CELL', short: 'VLS', role: 'vls', fits: ['stealth_vls_bay'], file: 'mod_stealth_vls_12cell.glb',
-    mass: 10000, com: [0, 0.05, 0], launch: [0, 0.5, 0], stats: { cells: 12 }, desc: '12 missiles under flush doors' },
+    mass: 10000, com: [0, 0.05, 0], launch: [0, 0.5, 0], stats: { cells: 12, cold: 30 }, desc: '12 missiles under flush doors · cold launch, motor lights 30 s out' },
   mod_slava_quad_canister_pod: { name: 'QUAD CANISTER POD', short: 'QUAD', role: 'vls', fits: ['heavy_canister_pylon', 'external_tank_pylon'], file: 'mod_slava_quad_canister_pod.glb',
     mass: 12000, com: [-0.7, 0, 0.5], launch: [-0.7, 0, -5.6], launchDir: [0, 0, -1], stats: { cells: 4, ord: 'torpedo' }, desc: '4 heavy anti-ship torpedoes, fired forward' },
   mod_excalibur_xray_launcher: { name: 'EXCALIBUR X-RAY POD', short: 'EXCAL', role: 'excalibur', fits: ['heavy_canister_pylon', 'external_tank_pylon'], file: 'mod_excalibur_xray_launcher.glb',
@@ -297,6 +297,9 @@ const NEW_HULLS = {
     ship: { hullDry: 160000, mainProp0: 45000, rcsProp0: 3000, rcsThrust: 6000, rcsIsp: 250, mainThrust: 200000, mainIsp: 3200 },
     power: { reactor: 0.9e6, reactorWaste: 0.7e6, avionics: 100e3, battCap: 100e6 }, therm: { capacity: 4e6, radArea: 200, radStowedArea: 200 },
     turn: 0.45, inertiaBox: [20, 9, 82], sys: { scope: [-34, -30], capacitors: [-22, -12], reactor: [4, 18], radiators: [22, 30], main: [34, 43] }, plume: 2,
+    // Molten-salt heat sink: with the radiators stowed the skin is held cold and the waste heat goes into the salt
+    // (2.9 GJ: about an hour of normal running); radar cross-section by aspect in m2 (rad: added by deployed radiators)
+    sink: 2.9e9, rcs: { nose: 0.05, tail: 0.6, side: 1.2, top: 6, rad: 15 },
     hitHull: 0.07, dials: { dv: 8000, load: 1500, heat: 1000 } },
 };
 // Default module per slot type (LPD slots carry laser point defence)
@@ -629,6 +632,7 @@ function shipDestroyed(cause) {
 function restartAfterDeath() {
   // The whole scenario restarts: the ship returns to its starting orbit position, so the targets and the
   // frigate must too, or they are left hundreds of km away (resetTargets also clears torpedoes and flashes)
+  ringF = null; heatSink = 0;
   missionPlan = scenario === 'sandbox' ? null : MISSIONS[scenario].plan(simT);
   applyModuleStats(); resetShip(); resetDamage(); resetPdcMounts(); resetTargets();
   projectiles = [];
@@ -865,6 +869,7 @@ const ACTIONS = [
   { id:'toggleRad',  label:'Radiators deploy / stow',  def:'KeyN', edge:true },
   { id:'cycleTarget',label:'Cycle target',             def:'KeyT', edge:true },
   { id:'cycleSub',   label:'Cycle boss subsystem',     def:'KeyU', edge:true },
+  { id:'toggleDas',  label:'See-through EW view (toggle)', def:'KeyO', edge:true },
   { id:'cycleRange', label:'Tactical range scale',     def:'KeyM', edge:true },
   { id:'guardMaster', label:'Master arm cover (toggle)', def:'KeyK', edge:true },
   { id:'masterArm',  label:'Master arm (cycle OFF/ON/TNG)', def:'KeyH', edge:true },
@@ -926,6 +931,8 @@ function podDv() {
   return SHIP.mainIsp*G0*Math.log((m + podProp)/m);
 }
 let battery = POWER.battCap, hullT = THERM.tStart;
+const SINK_SKIN_T = 115, SINK_BURN_HEAT = 3e6, SINK_DUMP = 2.5e6;   // K, W per full thrust, W
+let heatSink = 0;                                     // J stored in the CS-17's molten salt
 let radDeployed = true, rcsStab = true, laserArmed = false, guardOpen = false, brownout = false;
 let lampTestT = 0;   // seconds of lamp test remaining
 let keyBuf = '';     // keypad entry buffer, shown on the COMMS page
@@ -1065,7 +1072,8 @@ function enemyPD(h) {
     }
     if (!best) { t.pdTrack = null; continue; }
     if (t.pdTrack !== best) { t.pdTrack = best; t.pdTrackT = simT; }   // a new track must be acquired first
-    const acq = EPD.acquire / (t.boss ? Math.max(0.35, t.radarScore ?? 1) : 1);
+    let acq = EPD.acquire / (t.boss ? Math.max(0.35, t.radarScore ?? 1) : 1);
+    if (t.ringSens && ringF) acq *= ringPdAcq(t);     // KOLTSO stations cued by their base's radar and the hub
     if (simT - t.pdTrackT < acq) continue;
     const rel = new THREE.Vector3(best.x-t0.x, best.y-t0.y, best.z-t0.z);
     const relV = new THREE.Vector3(best.vx-t0.vx, best.vy-t0.vy, best.vz-t0.vz);
@@ -2477,6 +2485,353 @@ function saturnForces(t0) {
   }
   return out;
 }
+/* ================= OPERATION NIGHTGLASS: DEEP STRIKE IN SATURN'S A RING =================
+   The field: a dense boulder belt in the outer A ring (a0 = 136,300 km, just inside the Keeler gap). Every rock
+   moves on its own circular orbit about Saturn, slightly inclined: its radial offset x from a0 is fixed, its
+   along-track position drifts at (n(a0 + x) - n0)*a0 (Keplerian shear, ~0.18 m/s per km of radial offset) and its
+   height oscillates z = zAmp*cos(n t + psi) once per orbit. Rocks are generated per 1 km cell from a seeded hash,
+   so the belt is the same every run and only the rocks near the ship exist at any time.
+   The real A ring is centimetre-to-metre particles; this belt is denser and lumpier (3-140 m rocks, plus the base
+   boulders) so that it can hide a ship. Its dust also dims long sight lines that run close to the ring plane:
+   extinction tau = RING.tauMid per metre in the mid-plane, falling off with height like a Gaussian of RING.dustZ. */
+const RING = { a0: 136.30e6, halfW: 8000, cell: 1000, perCell: 18, sigZ: 230, rMin: 3, rMax: 140, slope: 2.4,
+  renderR: 7000, closeR: 2600, refresh: 0.5, tauMid: 2.4e-5, dustZ: 420, shipR: 7, rockRho: 900 };
+let ringF = null;            // live field state while the ring mission runs (null otherwise)
+const ringN = a => Math.sqrt(GM_SAT/(a*a*a));
+function wrapPi(a) { a = (a + Math.PI) % (2*Math.PI); if (a < 0) a += 2*Math.PI; return a - Math.PI; }
+function erfApprox(x) {                               // Abramowitz-Stegun 7.1.26, |error| < 1.5e-7
+  const s = x < 0 ? -1 : 1; x = Math.abs(x);
+  const t = 1/(1 + 0.3275911*x);
+  return s*(1 - (((((1.061405429*t - 1.453152027)*t) + 1.421413741)*t - 0.284496736)*t + 0.254829592)*t*Math.exp(-x*x));
+}
+function rng32(seed) { return () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed);
+  t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0)/4294967296; }; }
+// State (world frame) of a point riding the ring: radial offset x, along-track arc s at the field epoch, and
+// either a fixed height z (bases on their boulders: z = 0) or an inclined orbit (zAmp, psi)
+function ringState(x, s, z, t, zAmp = 0, psi = 0) {
+  const a = RING.a0 + x, n = ringN(a), dt = t - ringF.te, ph = ringF.th0 + s/RING.a0 + n*dt;
+  const c = Math.cos(ph), sn = Math.sin(ph), sp = satPos(t), sv = satVel(t), X = SAT_X, Y = SAT_Y, N = SAT_POLE;
+  const zz = zAmp ? zAmp*Math.cos(n*dt + psi) : z, vz = zAmp ? -zAmp*n*Math.sin(n*dt + psi) : 0;
+  return { x: sp[0] + a*(c*X.x + sn*Y.x) + zz*N.x, y: sp[1] + a*(c*X.y + sn*Y.y) + zz*N.y, z: sp[2] + a*(c*X.z + sn*Y.z) + zz*N.z,
+    vx: sv[0] + a*n*(-sn*X.x + c*Y.x) + vz*N.x, vy: sv[1] + a*n*(-sn*X.y + c*Y.y) + vz*N.y, vz: sv[2] + a*n*(-sn*X.z + c*Y.z) + vz*N.z };
+}
+// Field coordinates of a world point: radial offset x, along-track s in the frame turning at n0, height z
+function ringCoords(p, t = simT) {
+  const sp = satPos(t), rx = p.x - sp[0], ry = p.y - sp[1], rz = p.z - sp[2];
+  const z = rx*SAT_POLE.x + ry*SAT_POLE.y + rz*SAT_POLE.z, px = rx*SAT_X.x + ry*SAT_X.y + rz*SAT_X.z, py = rx*SAT_Y.x + ry*SAT_Y.y + rz*SAT_Y.z;
+  const ph = Math.atan2(py, px), d = wrapPi(ph - ringF.th0 - ringF.n0*(t - ringF.te));
+  return { x: Math.hypot(px, py) - RING.a0, s: d*RING.a0, z };
+}
+// Rocks of one cell, generated once from the cell's seed
+function ringCell(i, j) {
+  const key = i*1000003 + j; let c = ringF.cells.get(key);
+  if (c) return c;
+  const R = rng32((i*73856093) ^ (j*19349663) ^ 0x5eed);
+  c = []; const n = Math.floor(RING.perCell*(0.55 + 0.9*R()));
+  for (let k = 0; k < n; k++) {
+    const x = -RING.halfW + (i + R())*RING.cell, s0 = (j + R())*RING.cell;
+    const zAmp = RING.sigZ*Math.sqrt(-2*Math.log(1 - R()*0.999)), psi = 2*Math.PI*R();
+    let rad = RING.rMin*Math.pow(1 - R()*0.9999, -1/(RING.slope - 1));
+    if (rad > RING.rMax) rad = RING.rMax*(0.45 + 0.55*R());   // the tail beyond rMax folds back into the big boulders
+    c.push({ x, s0, zAmp, psi, R: rad, n: ringN(RING.a0 + x), shape: Math.floor(R()*6), ax: [R() - 0.5, R() - 0.5, R() - 0.5], rot0: 6.28*R(), spin: 0.02*(R() - 0.5),
+      flat: 0.65 + 0.35*R(), id: key*64 + k });
+  }
+  ringF.cells.set(key, c);
+  if (ringF.cells.size > 4000) { const it = ringF.cells.keys(); for (let k = 0; k < 1500; k++) ringF.cells.delete(it.next().value); }
+  return c;
+}
+// Ship-relative position and velocity of a rock now (world axes); satPos/satVel cancel in the difference
+function rockRel(r, t, sx) {
+  const dt = t - ringF.te, a = RING.a0 + r.x, ph = ringF.th0 + r.s0/RING.a0 + r.n*dt, c = Math.cos(ph), sn = Math.sin(ph);
+  const zz = r.zAmp*Math.cos(r.n*dt + r.psi), vz = -r.zAmp*r.n*Math.sin(r.n*dt + r.psi);
+  const X = SAT_X, Y = SAT_Y, N = SAT_POLE;
+  return { x: sx.sp[0] + a*(c*X.x + sn*Y.x) + zz*N.x - ship.x, y: sx.sp[1] + a*(c*X.y + sn*Y.y) + zz*N.y - ship.y, z: sx.sp[2] + a*(c*X.z + sn*Y.z) + zz*N.z - ship.z,
+    vx: sx.sv[0] + a*r.n*(-sn*X.x + c*Y.x) + vz*N.x - ship.vx, vy: sx.sv[1] + a*r.n*(-sn*X.y + c*Y.y) + vz*N.y - ship.vy, vz: sx.sv[2] + a*r.n*(-sn*X.z + c*Y.z) + vz*N.z - ship.vz };
+}
+// Rebuild the list of rocks within renderR of the ship (and the close list used for collisions and cover)
+function ringRefresh() {
+  const F = ringF, me = ringCoords(ship), dtE = simT - F.te, near = [], sx = { sp: satPos(simT), sv: satVel(simT) };
+  const i0 = Math.max(0, Math.floor((me.x - RING.renderR + RING.halfW)/RING.cell)), i1 = Math.min(Math.ceil(2*RING.halfW/RING.cell) - 1, Math.floor((me.x + RING.renderR + RING.halfW)/RING.cell));
+  if (Math.abs(me.z) < 6*RING.sigZ + RING.renderR) for (let i = i0; i <= i1; i++) {
+    const xm = -RING.halfW + (i + 0.5)*RING.cell, drift = (ringN(RING.a0 + xm) - F.n0)*dtE*RING.a0;
+    const marg = 1.5*F.n0*RING.cell*Math.abs(dtE) + 400;
+    const j0 = Math.floor((me.s - RING.renderR - drift - marg)/RING.cell), j1 = Math.floor((me.s + RING.renderR - drift + marg)/RING.cell);
+    for (let j = j0; j <= j1; j++) for (const r of ringCell(i, j)) near.push(r);
+  }
+  for (const r of F.anchors) near.push(r);
+  const keep = [], close = [];
+  for (const r of near) {
+    const p = rockRel(r, simT, sx), d = Math.hypot(p.x, p.y, p.z);
+    if (d < RING.renderR + r.R) { keep.push(r); if (d < RING.closeR + r.R) close.push(r); }
+  }
+  F.near = keep; F.close = close; F.refT = simT; F.me = me;
+}
+// Dust extinction (optical depth) along the segment p1 -> p2, from their heights above the ring plane
+function ringTau(z1, z2, L) {
+  const s = RING.dustZ*Math.SQRT2;
+  if (Math.abs(z2 - z1) < 1) return RING.tauMid*L*Math.exp(-(((z1 + z2)/2)**2)/(s*s));
+  return RING.tauMid*L*(RING.dustZ*Math.sqrt(Math.PI/2))*(erfApprox(z2/s) - erfApprox(z1/s))/(z2 - z1);
+}
+// How much of the ship a sensor at world point q can see past the rocks near the ship (1 = all of it): each rock
+// between them covers the part of the ship's disc (radius shipR) that its own disc overlaps, seen from the sensor
+function rockCover(q, rel = null) {
+  const F = ringF; if (!F || !F.close.length) return 1;
+  const dx = q.x - ship.x, dy = q.y - ship.y, dz = q.z - ship.z, D = Math.hypot(dx, dy, dz), ux = dx/D, uy = dy/D, uz = dz/D;
+  const sx = { sp: F.sp, sv: F.sv }; let tr = 1;
+  for (const r of F.close) {
+    const p = r.relNow || rockRel(r, simT, sx);
+    const along = p.x*ux + p.y*uy + p.z*uz;
+    if (along <= r.R || along > D) continue;           // behind the ship, or beyond the sensor
+    const px = p.x - ux*along, py = p.y - uy*along, pz = p.z - uz*along, perp = Math.hypot(px, py, pz);
+    const shipR = RING.shipR*(1 - along/D);             // the ship's disc as projected onto the rock's distance
+    const cov = clamp((r.R + shipR - perp)/(2*shipR), 0, 1);
+    if (cov > 0) { tr *= 1 - cov; if (tr < 0.01) return 0; }
+  }
+  return tr;
+}
+// Radar cross-section of the CS-17 seen from direction u (world, ship -> sensor): small nose-on, larger from
+// the side and largest from above or below; deployed radiators and open bay doors add to it
+function shipRCS(u) {
+  const b = u.clone().applyQuaternion(toBodyQ()), R = HULL.rcs || { nose: 2, tail: 4, side: 10, top: 20 };
+  let s = (b.z < 0 ? R.nose : R.tail)*b.z*b.z + R.side*b.x*b.x + R.top*b.y*b.y;
+  if (radDeployed) s += R.rad || 15;
+  if (simT - (ringF ? ringF.bayT : -1e9) < 4) s += 1.5;
+  return s;
+}
+// Heat the enemy's infrared sensors see: the usual signature without the radar term (the CS-17 has no radar),
+// with the cold-launch and collision spikes
+function irSignature() {
+  let sg = signature() - (radarOn() ? 200 : 0);
+  if (ringF && simT - ringF.bumpT < 4) sg += 25;
+  return sg;
+}
+
+/* ---------- The base network and its sensors ----------
+   Each sensor belongs to a network cluster. While the relay hub stands, every base, weapon station and guard
+   ship shares one cluster; with the hub gone each outpost (with its station) and each guard is on its own.
+   A cluster fuses what its sensors see into one track quality Q: radar paints and infrared contact add to it,
+   it decays while nothing sees the ship, and the mission fails when it reaches 1 (a firm track).
+   Search radars sweep a beam around the ring plane (period, beam width, elevation limit); the RWR hears a radar
+   whenever its one-way signal reaches the ship, long before the radar's own two-way echo is strong enough.
+   Weapon-station tracking radars stay silent until their cluster is alerted or its track builds past 0.35;
+   then they stare at the cue (the explosion, the missile, or the track estimate). */
+const RSENS = {
+  search: { R0: 26e3, period: 9, beam: 4*Math.PI/180, elev: 25*Math.PI/180, rwr: 9 },     // base search radar (R0: 1 m2, no dust)
+  guard:  { R0: 17e3, period: 5, beam: 6*Math.PI/180, elev: 40*Math.PI/180, rwr: 9 },     // guard ship radar
+  track:  { R0: 42e3, beam: 7*Math.PI/180, rwr: 9 },                               // weapon-station tracker (when cued)
+  ir:     { base: 3.0e3, guard: 2.6e3 },                                    // IR: range for signature 1
+  Qpaint: 0.10, Qir: 0.08, Qtrack: 0.15, Qdecay: 0.012, cueTrack: 0.5, alertGain: 1.35, missileCue: 0.15,
+};
+// Weapon-station fire control is cued by the outpost's search radar and the hub's fused picture: without them
+// each new missile takes longer to acquire
+function ringPdAcq(t) {
+  let k = t.cls === 'corvette' ? 1.6 : 1;            // guard corvettes: light fire control
+  if (t.base && !targets.some(b => b.base === t.base && b !== t && !b.gone && b.ringSens && b.ringSens.radars && b.ringSens.radars.includes('search'))) k *= 1.8;
+  if (ringF.hub && ringF.hub.gone) k *= 1.3;
+  return k;
+}
+function ringCluster(t) {
+  const F = ringF, hub = F.hub && !F.hub.gone;
+  if (hub) return 'NET';
+  return t.base ? t.base : t.name;
+}
+function ringSensorStep(dt) {
+  const F = ringF; F.rwr = []; F.irNow = 0; F.radNow = 0;
+  const got = {}, sigIR = irSignature(), me = ringCoords(ship);
+  F.sp = satPos(simT); F.sv = satVel(simT);
+  const sx = { sp: F.sp, sv: F.sv };
+  for (const r of F.close) r.relNow = rockRel(r, simT, sx);
+  for (const t of targets) {
+    if (t.gone || !t.ringSens) continue;
+    const cl = ringCluster(t), C = F.clusters[cl] || (F.clusters[cl] = { Q: 0, alert: false, cue: null, peak: 0 });
+    const rel = new THREE.Vector3(ship.x - t.x, ship.y - t.y, ship.z - t.z), r = rel.length(), u = rel.clone().divideScalar(-r);
+    const tz = ringCoords(t).z, tau = ringTau(tz, me.z, r);
+    const cover = r < 400e3 ? rockCover(t) : 1;
+    const aF = C.alert ? RSENS.alertGain : 1;
+    // Infrared: always staring
+    if (t.ringSens.ir) {
+      const Rir = t.ringSens.ir*Math.sqrt(sigIR*aF), snr = (Rir/r)**2*Math.exp(-tau)*cover;
+      F.irNow = Math.max(F.irNow, snr);
+      if (snr >= 1) { got[cl] = (got[cl] || 0) + RSENS.Qir*Math.min(snr, 5)*dt; C.by = t.name; }
+    }
+    for (const kind of t.ringSens.radars || []) {
+      const S = RSENS[kind]; if (!S) continue;
+      if (kind === 'track' && !(C.alert || C.Q > RSENS.cueTrack)) continue;
+      // Beam direction: search radars turn about the ring normal; the tracker stares at the cue
+      let painted = false;
+      const el = Math.asin(clamp(rel.dot(SAT_POLE)/r, -1, 1));
+      if (kind === 'track') {
+        const cue = C.cue ? new THREE.Vector3(C.cue.x - t.x, C.cue.y - t.y, C.cue.z - t.z).normalize() : null;
+        painted = !!cue && cue.dot(rel.clone().normalize()) > Math.cos(S.beam/2);
+      } else {
+        const loc = new THREE.Vector3().crossVectors(SAT_POLE, new THREE.Vector3(t.x - F.sp[0], t.y - F.sp[1], t.z - F.sp[2])).normalize();   // along-track at the sensor
+        const rad = new THREE.Vector3().crossVectors(loc, SAT_POLE);
+        const az = Math.atan2(rel.dot(rad), rel.dot(loc));
+        const ph = 2*Math.PI*((simT/S.period + (t.radarPh || 0)) % 1) - Math.PI, ph0 = ph - 2*Math.PI*dt/S.period;
+        const da = wrapPi(az - ph), da0 = wrapPi(az - ph0);
+        painted = Math.abs(el) < S.elev && (Math.abs(da) < S.beam/2 || (da0 > 0 && da <= 0));   // in the beam, or swept across it this tick
+        t.beamAz = ph; t.beamEl = S.elev;
+      }
+      // RWR: the one-way signal
+      const oneWay = (S.R0*S.rwr/r)**2*Math.exp(-tau)*cover;
+      if (oneWay > 1) F.rwr.push({ t, kind, r, u, painted, strength: oneWay, cover, lastPaint: painted ? simT : (t.rwrPaint && t.rwrPaint[kind]) || -1e9 });
+      if (painted) { t.rwrPaint = t.rwrPaint || {}; t.rwrPaint[kind] = simT; }
+      if (!painted) continue;
+      const Rdet = S.R0*Math.pow(shipRCS(u)*aF, 0.25), snr = (Rdet/r)**4*Math.exp(-2*tau)*cover*cover;
+      F.radNow = Math.max(F.radNow, snr);
+      if (snr >= 1) { got[cl] = (got[cl] || 0) + (kind === 'track' ? RSENS.Qtrack*Math.min(snr, 3)*dt : RSENS.Qpaint*Math.min(snr, 3)); C.by = t.name; }
+    }
+  }
+  // Missiles: a burning motor is bright; one first seen close to the ship points back at where it came from
+  for (const o of ordnance) {
+    if (o.dead || o.ringSeen || (o.coldUntil && simT < o.coldUntil)) continue;
+    for (const t of targets) {
+      if (t.gone || !t.ringSens || !t.ringSens.ir) continue;
+      const r = Math.hypot(o.x - t.x, o.y - t.y, o.z - t.z), Rir = t.ringSens.ir*Math.sqrt(150);
+      if (r > Rir*Math.exp(-ringTau(ringCoords(t).z, ringCoords(o).z, r)/2)) continue;
+      o.ringSeen = true;
+      const cl = ringCluster(t), C = F.clusters[cl] || (F.clusters[cl] = { Q: 0, alert: false, cue: null, peak: 0 });
+      if (!C.alert) log(`RWR · MISSILE SEEN BY ${t.name} · NETWORK ALERT`);
+      C.alert = true;                                 // more gain on every sensor; the trackers follow the missile itself
+      // A motor lighting close to the ship points back at it (once per 30 s per network)
+      if (Math.hypot(o.x - ship.x, o.y - ship.y, o.z - ship.z) < 1000 && simT - (C.cueT ?? -1e9) > 30) {
+        C.cueT = simT; got[cl] = (got[cl] || 0) + RSENS.missileCue; C.by = t.name;
+      }
+      break;
+    }
+  }
+  for (const [cl, C] of Object.entries(F.clusters)) {
+    if (got[cl]) { C.Q += got[cl]; C.cue = C.Q > RSENS.cueTrack ? { x: ship.x + (Math.random() - 0.5)*600*(1 - C.Q), y: ship.y + (Math.random() - 0.5)*600*(1 - C.Q), z: ship.z } : C.cue; }
+    else C.Q = Math.max(0, C.Q - RSENS.Qdecay*dt);
+    C.peak = Math.max(C.peak, C.Q);
+    if (C.Q >= 0.5 && !C.warned) { C.warned = true; log(`RWR · TRACK BUILDING · ${C.by}`); sfx.klaxon(); }
+    if (C.Q < 0.3) C.warned = false;
+  }
+  F.Q = Math.max(0, ...Object.values(F.clusters).map(C => C.Q));
+  F.peakQ = Math.max(F.peakQ, F.Q);
+  if (F.Q >= 1 && mission && !mission.ended) {
+    const C = Object.values(F.clusters).find(c => c.Q >= 1);
+    log(`TRACK FIRM · ${C.by} · STRIKE COMPROMISED`); sfx.klaxon();
+    endMission('DETECTED', `DETECTED BY ${C.by}`);
+  }
+}
+// Collisions: the ship is a capsule along its axis (half-length HULL.length/2, radius RING.shipR); a rock that
+// touches it bounces it off (restitution 0.3, weighted by the masses) and damages the hull with the impact energy
+function ringCollide() {
+  const F = ringF, sx = { sp: satPos(simT), sv: satVel(simT) };
+  const ax = new THREE.Vector3(0, 0, -1).applyQuaternion(shipQ), half = HULL.length/2, mS = shipMass();
+  let warn = null;
+  for (const r of F.close) {
+    const p = rockRel(r, simT, sx), d = Math.hypot(p.x, p.y, p.z);
+    if (d > r.R + half + 400) continue;
+    // time to closest approach (straight-line relative motion), for the proximity warning
+    const vr2 = p.vx*p.vx + p.vy*p.vy + p.vz*p.vz, tca = vr2 > 1e-6 ? -(p.x*p.vx + p.y*p.vy + p.z*p.vz)/vr2 : 0;
+    if (tca > 0 && tca < 40) {
+      const mx = p.x + p.vx*tca, my = p.y + p.vy*tca, mz = p.z + p.vz*tca;
+      if (Math.hypot(mx, my, mz) < r.R + half*0.6 && (!warn || tca < warn.tca)) warn = { r, tca, d };
+    }
+    if (d > r.R + half + RING.shipR) continue;
+    const along = clamp(p.x*ax.x + p.y*ax.y + p.z*ax.z, -half, half);
+    const nx = p.x - ax.x*along, ny = p.y - ax.y*along, nz = p.z - ax.z*along, dn = Math.hypot(nx, ny, nz);
+    if (dn > r.R + RING.shipR || dn < 1e-6) continue;
+    const ux = -nx/dn, uy = -ny/dn, uz = -nz/dn;       // from the rock to the ship
+    const vc = -(-p.vx*ux - p.vy*uy - p.vz*uz);        // ship-rock closing speed along the normal (>0: closing)
+    const mR = RING.rockRho*4/3*Math.PI*r.R**3, mu = mR/(mR + mS), pen = r.R + RING.shipR - dn;
+    ship.x += ux*pen; ship.y += uy*pen; ship.z += uz*pen;
+    if (vc <= 0) continue;
+    ship.vx += 1.3*vc*mu*ux; ship.vy += 1.3*vc*mu*uy; ship.vz += 1.3*vc*mu*uz;
+    const E = 0.5*(mR*mS/(mR + mS))*vc*vc, dmg = E/2.5e7;
+    F.bumpT = simT; hitShakeUntil = performance.now()/1000 + 0.4 + Math.min(1, dmg*8);
+    sfx.torpHit();
+    if (dmg < 0.002) { log(`HULL CONTACT · ROCK ${r.R.toFixed(0)} M · ${vc.toFixed(2)} M/S`); continue; }
+    hullInt = Math.max(0, hullInt - dmg); hullHits++;
+    log(`COLLISION · ROCK ${r.R.toFixed(0)} M · ${vc.toFixed(1)} M/S · HULL ${(hullInt*100).toFixed(0)}%`);
+    if (dmg > 0.03) {
+      const live = DMG_SYSTEMS.filter(s => damage[s.id] > 0), s = live[Math.floor(Math.random()*live.length)];
+      if (s) { damage[s.id] = Math.max(0, damage[s.id] - Math.min(1, dmg*3)); log(`${s.name} ${damage[s.id] > 0 ? 'DAMAGED ' + (damage[s.id]*100).toFixed(0) + '%' : 'OFFLINE'}`); }
+    }
+    if (mission) scoreAdd('COLLISIONS', -150);
+    if (hullInt <= 0) { shipDestroyed('COLLISION WITH A RING BOULDER'); return; }
+  }
+  if (warn && (!F.warn || F.warn.r !== warn.r) && warn.tca < 25) log(`PROXIMITY · ROCK ${warn.r.R.toFixed(0)} M · ${warn.tca.toFixed(0)} S`);
+  F.warn = warn;
+}
+function ringStep(h) {
+  const F = ringF; if (!F) return;
+  // The ship and the targets have already moved to the end of this step: evaluate the field there too (at ring
+  // orbital speed, half a step of mismatch is hundreds of metres)
+  const s0 = simT; simT = s0 + h;
+  if (simT - F.refT > RING.refresh || !F.near) ringRefresh();
+  ringCollide();
+  F.sensAcc += h;
+  if (F.sensAcc >= 0.2) { ringSensorStep(F.sensAcc); F.sensAcc = 0; }
+  simT = s0;
+  // A loss in a linked cluster alerts it, with the wreck as the cue
+  for (const t of F.watch) {
+    if (!t.gone || t.ringLost) continue;
+    t.ringLost = true;
+    if (t === F.hub) { log('KOLTSO HUB DOWN · RELAY SEVERED · OUTPOSTS ISOLATED'); continue; }
+    const cl = ringCluster(t), C = F.clusters[cl] || (F.clusters[cl] = { Q: 0, alert: false, cue: null, peak: 0 });
+    if (!C.alert) log(`${cl === 'NET' ? 'KOLTSO NETWORK' : cl} ALERT · ${t.name} LOST`);
+    C.alert = true; C.cue = { x: t.x, y: t.y, z: t.z };
+  }
+}
+
+/* ---------- Mission plan: the hub, three outposts on boulders, three guard ships on patrol ---------- */
+const NG = { start: { x: -5200, s: -98e3, z: 950 } };
+function planRing(t0) {
+  const sp = satPos(t0);
+  // Field epoch: the start time; the hub sits at s = 0, longitude chosen on Saturn's dawn side
+  ringF = { te: t0, th0: 0.6, n0: ringN(RING.a0), cells: new Map(), anchors: [], near: null, close: [], refT: -1e9, sensAcc: 0,
+    clusters: {}, rwr: [], Q: 0, peakQ: 0, bumpT: -1e9, bayT: -1e9, watch: [], hub: null, sp, sv: satVel(t0) };
+  const st = ringState(NG.start.x, NG.start.s, NG.start.z, t0);
+  // Keep the ship's height oscillation small: a circular orbit at that height is a slightly inclined orbit
+  const fwd = new THREE.Vector3(st.vx - ringF.sv[0], st.vy - ringF.sv[1], st.vz - ringF.sv[2]).normalize();
+  const q = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, -1), fwd);
+  return { ship: { ...st, vz: st.vz }, q, targets: () => ringForces(t0) };
+}
+function ringForces(t0) {
+  const out = [], F = ringF;
+  const hostile = (name, st, radius, integ, extra) => mkTargetAt(name, st, radius, integ, 'HOSTILE',
+    { req: true, intel: true, orbitKnown: true, ...extra });
+  // A base: its boulder (a field anchor), the base module on it, a weapon station beside it
+  const base = (id, name, x, s, R, hub) => {
+    F.anchors.push({ x, s0: s, zAmp: 0, psi: 0, R, n: ringN(RING.a0 + x), shape: 0, ax: [0.3, 1, 0.2], rot0: 0, spin: 0, flat: 0.8, anchor: true, id: -out.length - 1 });
+    const pin = tt => ringState(x, s, R + 8, tt);
+    const b = hostile(name, pin(t0), hub ? 35 : 28, hub ? 230 : 110,
+      { cls: 'station', len: hub ? 120 : 80, score: hub ? 3000 : 1500, pin, base: id, ringSens: { ir: RSENS.ir.base, radars: ['search'] }, radarPh: Math.random(), sig: 60 });
+    const spin = tt => ringState(x + R*0.9, s + R*0.6, 0, tt);
+    const w = hostile(`${id} WEAPON STATION`, spin(t0), 12, 110,
+      { cls: 'station', len: 30, score: 800, pin: spin, base: id, hostile: true, needsAlert: true, pd: 2, ringSens: { ir: RSENS.ir.base, radars: ['track'] }, sig: 25 });
+    out.push(b, w); F.watch.push(b, w);
+    return b;
+  };
+  F.hub = base('KOLTSO HUB', 'KOLTSO HUB · RELAY', 0, 0, 170, true);
+  base('KOLTSO-2', 'KOLTSO-2 OUTPOST', 3000, -50e3, 130, false);
+  base('KOLTSO-3', 'KOLTSO-3 OUTPOST', -3500, 38e3, 140, false);
+  base('KOLTSO-4', 'KOLTSO-4 OUTPOST', 4200, 82e3, 120, false);
+  // Guard ships: patrol legs along the ring between two bases at about 30 m/s, a few hundred metres above the
+  // dense layer, turning at each end (positions are a fixed patrol schedule riding the ring)
+  const guard = (name, x, s1, s2, z, v, ph) => {
+    const L = Math.abs(s2 - s1), T = 2*L/v;
+    const pin = tt => {
+      const u = (((tt - t0)/T + ph) % 1 + 1) % 1, f = u < 0.5 ? 2*u : 2 - 2*u;     // there and back
+      const st = ringState(x, s1 + (s2 - s1)*f, z, tt);
+      // patrol velocity along-track (the derivative of the schedule), added to the ring motion
+      const dir = (u < 0.5 ? 1 : -1)*Math.sign(s2 - s1)*v, along = new THREE.Vector3().crossVectors(SAT_POLE, new THREE.Vector3(st.x - satPos(tt)[0], st.y - satPos(tt)[1], st.z - satPos(tt)[2])).normalize();
+      st.vx += along.x*dir; st.vy += along.y*dir; st.vz += along.z*dir;
+      return st;
+    };
+    const g = hostile(name, pin(t0), 7, 110, { cls: 'corvette', score: 1000, pin, hostile: true, needsAlert: true, pd: 1, orbitKnown: false, intel: false,
+      ringSens: { ir: RSENS.ir.guard, radars: ['guard'] }, radarPh: Math.random(), sig: 40 });
+    out.push(g); F.watch.push(g);
+  };
+  guard('GUARD STOROZHEVOY', 600, -46e3, -6e3, 380, 30, 0.15);
+  guard('GUARD BDITELNY', -1500, 6e3, 34e3, -420, 28, 0.6);
+  guard('GUARD RETIVY', 800, 44e3, 78e3, 330, 32, 0.35);
+  return out;
+}
+
 const MISSIONS = {
   m1: { id: 'm1', name: 'OPERATION LANTERN', title: 'HELIUM-3 DEPOT STRIKE', plan: planMission1,
     // Briefing transmission: [text, typing speed in chars/s, pause after in s]; 'ANIM' is the transfer diagram
@@ -2676,6 +3031,58 @@ const MISSIONS = {
       scoreAdd('MISSILES LEFT', Math.round(2000*af));
     },
     perfect: () => hullHits === 0 && targets.filter(t => t.facility && !t.gone).length === 4,
+  },
+  ring: { id: 'ring', name: 'OPERATION NIGHTGLASS', title: "DEEP STRIKE · SATURN'S A RING", plan: planRing, hull: 'cs17', max: 21000,
+    scoring: 'SCORE: +3000 for the relay hub, +1500 per outpost, +800 per weapon station, +1000 per guard ship; on success up to ' +
+      '+3000 for the lowest track any network built on you, +1000 for heat-sink capacity left, +1500 for missiles left, +2000 ' +
+      'for time (full under 1 h, none after 3 h). −150 per collision. The mission fails the moment a network holds a firm track. ' +
+      'S: no track above 25 %, no collisions.',
+    orders: [
+      ['// LASER LINK ESTABLISHED - FLEET COMMAND, CHEYENNE · 74 MIN LIGHT DELAY //', 38, 1.4],
+      ['ORDERS RECEIVED. STAND BY FOR FILE TRANSMISSION.', 32, 1.6],
+      ['', 0, 0.2],
+      ['FILE 0901-NG // BLACK // CS-17 COMMANDER EYES ONLY', 160, 0.12],
+      ['OPERATION NIGHTGLASS', 160, 0.12],
+      ['SITUATION ....... SOVIET SENSOR AND WEAPONS NETWORK "KOLTSO" BUILT', 170, 0.08],
+      ['                  INTO A BOULDER BELT OF THE OUTER A RING', 170, 0.08],
+      ['TARGETS ......... RELAY HUB, OUTPOSTS KOLTSO-2/3/4, THEIR WEAPON', 170, 0.08],
+      ['                  STATIONS AND THREE GUARD SHIPS', 170, 0.25],
+      ['1. DESTROY THE NETWORK WITHOUT BEING TRACKED. A FIRM TRACK', 170, 0.06],
+      ['   ON YOUR HULL ENDS THE OPERATION.', 170, 0.06],
+      ['2. RUN DARK ON THE SALT SINK. KEEP THE RADIATORS STOWED.', 170, 0.06],
+      ['3. USE THE BOULDERS AS COVER. MIND THE ROCKS.', 170, 0.06],
+      ['4. THE HUB RELAYS THEIR TRACKS. KILL IT AND THE OUTPOSTS', 170, 0.06],
+      ['   STAND ALONE.', 170, 0.2],
+      ['// END OF TRANSMISSION //', 60, 0],
+    ],
+    brief: [
+      'Your CS-17 rides the outer A ring, 98 km behind the KOLTSO relay hub and 950 m above the ring plane.',
+      'Destroy the hub, outposts KOLTSO-2 (48 km ahead), -3 and -4, their weapon stations and three guard ships.',
+      'Every radar paint and infrared contact builds the network\'s track on you; a firm track fails the mission.',
+      'Press [O] for the helmet see-through view: wide-field telescope imagery, rocks, and the RWR showing where',
+      'each radar is and when its beam is on you. Rocks between you and a sensor hide you; dust in the ring plane',
+      'dims long sight lines. Radiators stowed, the molten-salt sink holds about an hour of heat; burns fill it fast.',
+      'The stealth VLS cold-launches: missiles drift 30 s before their motors light. Killing the hub first cuts the alarm.',
+    ],
+    start() {
+      log("OPERATION NIGHTGLASS · DEEP STRIKE · SATURN'S A RING");
+      log('RUNNING DARK · RADIATORS STOWED · SALT SINK ONLINE');
+      log(`KOLTSO NETWORK: ${targets.filter(t => t.req).length} TARGETS · PRESS [${codeName(bindings.toggleDas) || 'O'}] FOR SEE-THROUGH`);
+      radDeployed = false;
+    },
+    step(h) {
+      if (!targets.some(t => t.req && !t.gone)) endMission('SUCCESS');
+    },
+    bonus(result) {
+      if (result !== 'SUCCESS' || !ringF) return;
+      scoreAdd('STEALTH', Math.round(3000*clamp(1 - ringF.peakQ, 0, 1)));
+      scoreAdd('HEAT SINK LEFT', Math.round(1000*clamp(1 - heatSink/HULL.sink, 0, 1)));
+      const am = ammoState(), af = am.length ? am.reduce((x, [c, m]) => x + (m ? c/m : 1), 0)/am.length : 1;
+      scoreAdd('MISSILES LEFT', Math.round(1500*af));
+      const T = simT - mission.t0;
+      scoreAdd('MISSION TIME', Math.round(2000*clamp((3*3600 - T)/(2*3600), 0, 1)));
+    },
+    perfect: () => ringF && ringF.peakQ <= 0.25 && hullHits === 0,
   },
 };
 
@@ -2884,7 +3291,7 @@ function endMission(result, cause = '') {
   const perfect = result === 'SUCCESS' && (MM.perfect ? MM.perfect() : hullHits === 0 && !anyDamage() && !mission.alert && mission.neutrals === 0);
   if (perfect) rank = 'S';
   if (result === 'KIA') rank = 'F-';
-  if (result === 'ABANDONED') rank = RANKS[Math.min(RANKS.indexOf(rank), 1)];
+  if (result === 'ABANDONED' || result === 'DETECTED') rank = RANKS[Math.min(RANKS.indexOf(rank), 1)];
   mission.score = score; mission.rank = rank;
   saveMissionResult({ date: new Date().toISOString(), score, rank, result, time: T,
     breakdown: { ...mission.events }, loadout: Object.keys(HARDPOINTS).filter(modAt).map(slotLabel).join(' · ') });
@@ -3343,7 +3750,11 @@ function launchOrdnance(kind, fromBody, dirBody, target, src) {
   const o = { kind, src, target, targetSub: (target && target.boss) ? activeBossSub(target) : null, age: 0, burn: T.burn, dead: false,
     x: ship.x + p.x, y: ship.y + p.y, z: ship.z + p.z, vx: ship.vx + d.x*T.launchV, vy: ship.vy + d.y*T.launchV, vz: ship.vz + d.z*T.launchV };
   o.px = o.x; o.py = o.y; o.pz = o.z;
-  ordnance.push(o); lastLaunchT = simT;
+  // Cold launch (stealth VLS): the round is pushed out and coasts for stats.cold s before its motor lights,
+  // so the launch shows only as a brief opening of the bay doors
+  const cold = src && modAt(src) && modAt(src).stats && modAt(src).stats.cold;
+  if (cold) { o.coldUntil = simT + cold; if (ringF) ringF.bayT = simT; }
+  ordnance.push(o); if (!cold) lastLaunchT = simT;
   return o;
 }
 // The guidance needs a target the ship knows about: own sensors, or a datalink track
@@ -3674,6 +4085,7 @@ function physicsStep(h) {
   dockStep(h);
   enemyPD(h);
   bossStep(h);
+  ringStep(h);
   contactStep(h);
   datalinkStep(h);
   // Interceptors launch automatically at closing torpedoes in range (not in TNG: they are expendable)
@@ -3700,7 +4112,8 @@ function physicsStep(h) {
     o.px = o.x; o.py = o.y; o.pz = o.z;
     const tg = o.target, alive = tg && !tg.gone && !tg.dead;
     const ts = alive ? (tg.s0 || tg) : null;
-    const a = ts ? computeTorpedoGuidance(o, ts, h, { maxAccel: ORD[o.kind].maxAccel, gravFn: gravAcc, t: simT }) : [0, 0, 0];
+    const coasting = o.coldUntil && simT < o.coldUntil;   // cold-launched: no motor (and no guidance) until it lights
+    const a = ts && !coasting ? computeTorpedoGuidance(o, ts, h, { maxAccel: ORD[o.kind].maxAccel, gravFn: gravAcc, t: simT }) : [0, 0, 0];
     o.cmd = a;
     rk4(o, h, a[0], a[1], a[2]); o.age += h;
   }
@@ -3938,8 +4351,22 @@ function physicsStep(h) {
   /* --- thermal: all electrical load + reactor waste heat (+ absorbed laser light); radiators reject by Stefan-Boltzmann --- */
   const qin = loadE + POWER.reactorWaste*damage.reactor + laserHeat;
   const A = radAreaEff();
-  const qout = THERM.eps*THERM.sigma*A*(Math.pow(hullT,4) - Math.pow(THERM.tSpace,4));
-  const dT = (qin - qout)*h/THERM.capacity;
+  let qout = THERM.eps*THERM.sigma*A*(Math.pow(hullT,4) - Math.pow(THERM.tSpace,4)), dT;
+  if (HULL.sink && !radDeployed) {
+    // Running dark: the skin stays at SINK_SKIN_T and radiates almost nothing; the rest goes into the salt, with
+    // the main engine's own waste heat while it burns
+    qout = THERM.eps*THERM.sigma*A*(SINK_SKIN_T**4 - THERM.tSpace**4);
+    heatSink += (qin + SINK_BURN_HEAT*thrustFrac - qout)*h; dT = 0;
+    if (heatSink >= HULL.sink) {
+      heatSink = HULL.sink; radDeployed = true; sfx.klaxon();
+      log('HEAT SINK SATURATED · RADIATORS DEPLOYED');
+    }
+  } else {
+    // Radiators out: they also dump the salt's heat, up to SINK_DUMP, which shows on every infrared sensor
+    const P = HULL.sink && heatSink > 0 ? Math.min(SINK_DUMP, heatSink/h) : 0;
+    qout += P; heatSink -= P*h;
+    dT = (qin - (qout - P))*h/THERM.capacity;        // the dump comes out of the salt, not the hull
+  }
   hullT += dT;
   telem.loadE = loadE; telem.qin = qin; telem.qout = qout;
   if (Math.abs(dT) > 0.001 && Math.random() < 0.02) sfx.tick();
@@ -4864,8 +5291,15 @@ function drawTactical(g, W, H, idx) {
     g.strokeStyle = DIM; g.lineWidth = 1.5; g.strokeRect(56, 433, 200, 16);
     for (const tk of [0.25, 0.5, 0.75]) { g.beginPath(); g.moveTo(56 + 200*tk, 433); g.lineTo(56 + 200*tk, 449); g.stroke(); }
     g.fillStyle = col; g.fillRect(58, 435, 196*f, 12);
+    if (ringF) {                                       // NIGHTGLASS: the network's track on the ship and the salt sink
+      const Q = clamp(ringF.Q, 0, 1), qc = Q < 0.3 ? PH : Q < 0.6 ? AMB : RED, S = HULL.sink ? heatSink/HULL.sink : 0;
+      g.fillStyle = 'rgba(0,0,0,0.9)'; g.fillRect(56, 433, 200, 16);
+      g.strokeStyle = DIM; g.strokeRect(56, 433, 200, 16); g.fillStyle = qc; g.fillRect(58, 435, 196*Q, 12);
+      txt(g, 264, 447, `TRK ${(Q*100).toFixed(0)}% SINK ${(S*100).toFixed(0)}%${ringF.rwr.some(e => simT - e.lastPaint < 1) ? ' PAINT' : ''}`, Q >= 0.6 || S > 0.9 ? RED : qc, '17px monospace');
+    } else {
     const extra = [radarOn() ? 'RADAR ON' : '', mission && !mission.ended ? (mission.alert ? 'DETECTED' : 'UNSEEN') : ''].filter(Boolean).join(' ');
     txt(g, 264, 447, `${fmtDist(dr)}${extra ? ' ' + extra : ''}`, mission && mission.alert ? RED : col, '17px monospace');
+    }
   }
   // Threat summary: closing torpedoes, enemy railgun fire, time to impact of the nearest, PDC state, hull
   const lasing = targets.filter(t => t.lasing && !t.gone);
@@ -7781,9 +8215,12 @@ function onAction(id) {
       if (guardOpen) { laserArmed = !laserArmed; sfx.click(); log(laserArmed ? 'LASER ARMED' : 'LASER SAFED'); }
       else log('ARM GUARD CLOSED');
       break;
-    case 'toggleRad': radDeployed = !radDeployed; sfx.click();
+    case 'toggleRad':
+      if (radDeployed && HULL.sink && heatSink > 0.97*HULL.sink) { log(`HEAT SINK FULL ${(100*heatSink/HULL.sink).toFixed(0)}% · RADIATORS STAY OUT`); break; }
+      radDeployed = !radDeployed; sfx.click();
       log(radDeployed ? 'RADIATORS DEPLOYED' : 'RADIATORS STOWED'); break;
     case 'cycleTarget': cycleTarget(); break;
+    case 'toggleDas': das.on = !das.on; sfx.click(); log(das.on ? 'EW SEE-THROUGH ON' : 'EW SEE-THROUGH OFF'); break;
     case 'cycleSub': cycleBossSub((held.has('ShiftLeft') || held.has('ShiftRight')) ? -1 : 1); break;
     case 'cycleRange': rangeIdx = (rangeIdx+1) % RANGES.length; break;
     case 'guardMaster': masterGuardOpen = !masterGuardOpen; sfx.click(); break;
@@ -8109,7 +8546,7 @@ function openDebrief() {
   uiOverlay = true; debriefEl.style.display = 'flex';
   if (actx && actx.state === 'running') actx.suspend();
   const M = MISSIONS[mission.id], all = loadScores()[mission.id] || { runs: [] };
-  const resultText = { SUCCESS: 'MISSION COMPLETE', KIA: 'SHIP LOST', ABANDONED: mission.id === 'm1' ? 'OBJECTIVE NOT DESTROYED' : 'MISSION FAILED' }[mission.result];
+  const resultText = { SUCCESS: 'MISSION COMPLETE', KIA: 'SHIP LOST', DETECTED: 'STRIKE COMPROMISED', ABANDONED: mission.id === 'm1' ? 'OBJECTIVE NOT DESTROYED' : 'MISSION FAILED' }[mission.result];
   document.getElementById('debriefSub').textContent = `${M.name} · ${M.title} · T+ ${fmtTime(mission.T)}`;
   const rk = document.getElementById('debriefRank');
   rk.textContent = mission.rank; rk.className = 'rank' + (mission.rank === 'S' ? ' s' : mission.rank.startsWith('F') ? ' f' : '');
@@ -10341,6 +10778,7 @@ function keplerAdvance(o, t0, dt) {
 }
 // Why the coast warp cannot be used now (null when it can)
 function coastBlock() {
+  if (ringF) return 'RING FIELD';
   if (torpedoes.some(t => !t.dead) || ordnance.length || projectiles.length) return 'WEAPONS IN FLIGHT';
   if (thrustFrac > 0 || (plan && plan.frozen)) return 'BURN IN PROGRESS';
   if (plan && plan.t - simT < 1200) return 'MANEUVER NODE';
@@ -11115,6 +11553,250 @@ function renderBossCutscene(dt) {
   }
 }
 
+/* ================= EW SEE-THROUGH VIEW (helmet display) =================
+   The geodesic EW suite stitches its telescope cameras into one sphere of imagery. With the view on, the cockpit
+   dims and that imagery is drawn over it in the direction the pilot looks (look around with mid/Alt-drag):
+   ring rocks near the ship, the haze of small particles, Saturn and its rings, bases and ships. A 2D layer adds the
+   RWR (each radar the ship can hear, red while its beam is on the hull, grey when a rock masks it), the network
+   track meter, the heat sink, a proximity warning, the velocity relative to the local ring, and a 360 deg strip. */
+const das = { on: false, built: false };
+function dasBuild() {
+  das.built = true;
+  das.scene = new THREE.Scene(); das.far = new THREE.Scene(); das.dim = new THREE.Scene();
+  das.cam = new THREE.PerspectiveCamera(72, innerWidth/innerHeight, 0.5, 30000);
+  das.farCam = new THREE.PerspectiveCamera(72, innerWidth/innerHeight, 0.002, 2e6);   // near: the ring plane passes metres from the ship
+  das.ortho = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+  const dimQ = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.72, depthTest: false }));
+  dimQ.position.z = -0.5; das.dim.add(dimQ);
+  das.sun = new THREE.DirectionalLight(0xfff4e6, 2.6); das.scene.add(das.sun, das.sun.target);
+  das.scene.add(new THREE.AmbientLight(0x9fb6bc, 1.1));           // ringshine and saturnshine, plus the sensors' gain
+  das.farSun = new THREE.DirectionalLight(0xfff4e6, 2.4); das.far.add(das.farSun, das.farSun.target);
+  das.far.add(new THREE.AmbientLight(0x404850, 0.15));
+  // Rock shapes: displaced icosahedra, each instanced
+  das.rockMeshes = [];
+  const mat = new THREE.MeshStandardMaterial({ color: 0xc9d2cf, roughness: 1, metalness: 0, flatShading: true });
+  for (let k = 0; k < 6; k++) {
+    const g = new THREE.IcosahedronGeometry(1, 2), p = g.attributes.position, R = rng32(911 + k*37);
+    const bumps = Array.from({ length: 7 }, () => [new THREE.Vector3(R() - 0.5, R() - 0.5, R() - 0.5).normalize(), 0.12 + 0.25*R()]);
+    const v = new THREE.Vector3();
+    for (let i = 0; i < p.count; i++) {
+      v.fromBufferAttribute(p, i); const u = v.clone().normalize();
+      let f = 1; for (const [d, a] of bumps) f += a*Math.max(0, u.dot(d))**3 - 0.08*a;
+      p.setXYZ(i, v.x*f, v.y*f*(0.75 + 0.2*k/5), v.z*f);
+    }
+    g.computeVertexNormals();
+    const m = new THREE.InstancedMesh(g, mat, 1400); m.frustumCulled = false; m.count = 0;
+    das.scene.add(m); das.rockMeshes.push(m);
+  }
+  // Ring haze: small particles within ~700 m that drift past with the ship's motion relative to the ring
+  const NH = 2200, hp = new Float32Array(NH*3), HR = rng32(77);
+  for (let i = 0; i < NH*3; i++) hp[i] = (HR() - 0.5)*1400;
+  das.haze = new THREE.Points(new THREE.BufferGeometry(), new THREE.PointsMaterial({ color: 0xd8e0dc, size: 1.6, sizeAttenuation: false, transparent: true, opacity: 0.55 }));
+  das.haze.geometry.setAttribute('position', new THREE.BufferAttribute(hp, 3)); das.haze.frustumCulled = false;
+  das.hazeBase = hp.slice(); das.hazeOff = new THREE.Vector3(); das.scene.add(das.haze);
+  // Saturn and its rings, scaled about the ship by DAS_K so they sit inside the far camera's range
+  const sc = document.createElement('canvas'); sc.width = 8; sc.height = 256; const sg = sc.getContext('2d');
+  for (let y = 0; y < 256; y++) { const b = 0.5 + 0.5*Math.sin(y*0.21) * Math.sin(y*0.047 + 1); sg.fillStyle = `rgb(${200 + 30*b | 0},${170 + 30*b | 0},${120 + 25*b | 0})`; sg.fillRect(0, y, 8, 1); }
+  const satTex = new THREE.CanvasTexture(sc); satTex.colorSpace = THREE.SRGBColorSpace;
+  das.saturn = new THREE.Mesh(new THREE.SphereGeometry(1, 64, 32), new THREE.MeshStandardMaterial({ map: satTex, roughness: 1 }));
+  das.far.add(das.saturn);
+  const rc = document.createElement('canvas'); rc.width = 512; rc.height = 4; const rg = rc.getContext('2d');
+  // Radial profile from 74,500 km (C ring) to 136,780 km (A ring edge): C faint, B bright, Cassini gap, A medium
+  for (let x = 0; x < 512; x++) {
+    const r = 74.5 + (136.78 - 74.5)*x/511;
+    let o = r < 92 ? 0.12 : r < 117.5 ? 0.85 : r < 122.2 ? 0.06 : 0.5;
+    if (r > 133.4 && r < 133.75) o = 0.05; if (r > 136.48 && r < 136.53) o = 0.05;     // Encke and Keeler gaps
+    o *= 0.85 + 0.15*Math.sin(r*7.3);
+    rg.fillStyle = `rgba(222,214,196,${o.toFixed(3)})`; rg.fillRect(x, 0, 1, 4);
+  }
+  const ringTex = new THREE.CanvasTexture(rc); ringTex.colorSpace = THREE.SRGBColorSpace;
+  const rgeo = new THREE.RingGeometry(74.5e6, 136.78e6, 256, 1), uv = rgeo.attributes.uv, pp = rgeo.attributes.position;
+  for (let i = 0; i < pp.count; i++) { const r = Math.hypot(pp.getX(i), pp.getY(i)); uv.setXY(i, (r - 74.5e6)/(136.78e6 - 74.5e6), 0.5); }
+  das.rings = new THREE.Mesh(rgeo, new THREE.MeshBasicMaterial({ map: ringTex, transparent: true, opacity: 0.4, side: THREE.DoubleSide, depthWrite: false }));
+  das.far.add(das.rings);
+  // Stars
+  const NS = 1500, sp = new Float32Array(NS*3), SR = rng32(5);
+  for (let i = 0; i < NS; i++) { const v = new THREE.Vector3(SR() - 0.5, SR() - 0.5, SR() - 0.5).normalize().multiplyScalar(1.5e6); sp.set([v.x, v.y, v.z], i*3); }
+  das.stars = new THREE.Points(new THREE.BufferGeometry(), new THREE.PointsMaterial({ color: 0xffffff, size: 1.2, sizeAttenuation: false }));
+  das.stars.geometry.setAttribute('position', new THREE.BufferAttribute(sp, 3)); das.far.add(das.stars);
+  das.objs = new Map();
+  // 2D layer
+  das.cv = document.createElement('canvas'); das.cv.style.cssText = 'position:fixed;left:0;top:0;width:100vw;height:100vh;pointer-events:none;z-index:5;display:none';
+  document.body.appendChild(das.cv); das.g = das.cv.getContext('2d');
+}
+// Simple stand-ins for the bases, weapon stations and guard ships (metres, built along -Z = forward)
+function dasObj(t) {
+  let o = das.objs.get(t); if (o) return o;
+  o = new THREE.Group();
+  const M = c => new THREE.MeshStandardMaterial({ color: c, roughness: 0.7, metalness: 0.3 });
+  if (t.cls === 'corvette') {
+    const h = new THREE.Mesh(new THREE.CylinderGeometry(3, 3, 34, 12), M(0x9aa3a8)); h.rotation.x = Math.PI/2; o.add(h);
+    for (const s of [-1, 1]) { const r = new THREE.Mesh(new THREE.BoxGeometry(10, 0.4, 12), M(0x606a70)); r.position.set(s*9, 0, 4); o.add(r); }
+  } else if (t.len >= 80) {                           // base module on its boulder: habitat cylinders, mast, dish
+    for (let k = 0; k < 3; k++) { const c = new THREE.Mesh(new THREE.CylinderGeometry(6, 6, 30, 16), M(0xb8bcb6)); c.position.set((k - 1)*14, 6, 0); o.add(c); }
+    const mast = new THREE.Mesh(new THREE.CylinderGeometry(0.8, 0.8, 40, 8), M(0x8a8f8a)); mast.position.set(0, 26, 0); o.add(mast);
+    const dish = new THREE.Mesh(new THREE.BoxGeometry(14, 1, 3), M(0xd0d4cc)); dish.position.set(0, 46, 0); dish.name = 'radar'; o.add(dish);
+  } else {                                            // weapon station: turret on a squat base
+    const b = new THREE.Mesh(new THREE.CylinderGeometry(5, 6, 5, 12), M(0x7c8580)); o.add(b);
+    const tur = new THREE.Mesh(new THREE.BoxGeometry(5, 3, 7), M(0x9aa09c)); tur.position.y = 4; o.add(tur);
+  }
+  das.scene.add(o); das.objs.set(t, o); return o;
+}
+const DAS_K = 3.6e-3;                                  // far-scene scale (Saturn ~490 km away, radius ~210 km)
+function dasRender() {
+  if (!das.built) dasBuild();
+  const bq = toBodyQ(), F = ringF, now = simT;
+  for (const c of [das.cam, das.farCam]) { c.fov = camera.fov; c.aspect = camera.aspect; c.updateProjectionMatrix(); camera.getWorldQuaternion(c.quaternion); }
+  const sunB = SUN_DIR.clone().applyQuaternion(bq);
+  das.sun.position.copy(sunB).multiplyScalar(1000); das.farSun.position.copy(sunB).multiplyScalar(1e6);
+  // Saturn system
+  const sp = satPos(now), sv = new THREE.Vector3(sp[0] - ship.x, sp[1] - ship.y, sp[2] - ship.z).applyQuaternion(bq);
+  das.saturn.position.copy(sv).multiplyScalar(DAS_K); das.saturn.scale.setScalar(R_SAT*DAS_K);
+  const poleB = SAT_POLE.clone().applyQuaternion(bq);
+  das.saturn.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), poleB);
+  das.rings.position.copy(das.saturn.position); das.rings.scale.setScalar(DAS_K);
+  das.rings.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), poleB);
+  das.stars.quaternion.copy(bq);
+  // Near the ring plane the rendered rocks and haze are the ring; the far annulus fades so it doesn't wall the view
+  if (F) das.rings.material.opacity = 0.4*clamp(Math.abs((F.me || ringCoords(ship)).z)/2500, 0.2, 1);
+  else das.rings.material.opacity = 0.4;
+  // Rocks
+  const counts = [0, 0, 0, 0, 0, 0], m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), qr = new THREE.Quaternion(), pos = new THREE.Vector3(), scl = new THREE.Vector3(), ax = new THREE.Vector3();
+  if (F && F.near) {
+    const sx = { sp, sv: satVel(now) };
+    for (const r of F.near) {
+      const m = das.rockMeshes[r.shape]; if (counts[r.shape] >= 1400) continue;
+      const p = rockRel(r, now, sx); pos.set(p.x, p.y, p.z).applyQuaternion(bq);
+      if (pos.lengthSq() > 7200*7200) continue;
+      ax.set(r.ax[0], r.ax[1], r.ax[2]).normalize(); qr.setFromAxisAngle(ax, r.rot0 + r.spin*(now - F.te));
+      q.copy(bq).multiply(qr); scl.set(r.R, r.R*r.flat, r.R);
+      m4.compose(pos, q, scl); m.setMatrixAt(counts[r.shape]++, m4);
+    }
+    // Haze: particles fixed in the local ring, wrapped into a 1.4 km box about the ship
+    const vRel = new THREE.Vector3(), me = F.me || ringCoords(ship);
+    { const st = ringState(me.x, me.s, 0, now); vRel.set(ship.vx - st.vx, ship.vy - st.vy, ship.vz - st.vz); }
+    const dtF = das.lastT !== undefined ? clamp(now - das.lastT, 0, 5) : 0; das.lastT = now;
+    das.hazeOff.addScaledVector(vRel, -dtF);
+    const arr = das.haze.geometry.attributes.position.array, b = das.hazeBase, W = 1400, off = das.hazeOff, v = new THREE.Vector3();
+    const dens = Math.exp(-0.5*(me.z/(RING.sigZ*1.6))**2);
+    for (let i = 0; i < arr.length; i += 3) {
+      const wrap = x => ((x % W) + 1.5*W) % W - W/2;
+      v.set(wrap(b[i] + off.x), wrap(b[i + 1] + off.y), wrap(b[i + 2] + off.z)).applyQuaternion(bq);
+      arr[i] = v.x; arr[i + 1] = v.y; arr[i + 2] = v.z;
+    }
+    das.haze.geometry.attributes.position.needsUpdate = true;
+    das.haze.material.opacity = 0.15 + 0.5*dens;
+    das.vRel = vRel;
+  }
+  das.rockMeshes.forEach((m, k) => { m.count = counts[k]; m.instanceMatrix.needsUpdate = true; });
+  // Bases and ships
+  for (const [t, o] of das.objs) o.visible = false;
+  for (const t of targets) {
+    if (t.gone || t.side !== 'HOSTILE' || !t.ringSens) continue;
+    const p = new THREE.Vector3(t.x - ship.x, t.y - ship.y, t.z - ship.z), d = p.length();
+    if (d > 25000) continue;
+    const o = dasObj(t); o.visible = true; o.position.copy(p.applyQuaternion(bq));
+    const up = new THREE.Vector3(t.x - sp[0], t.y - sp[1], t.z - sp[2]).normalize();
+    if (t.cls === 'corvette') {
+      const fw = new THREE.Vector3(t.vx - ship.vx, t.vy - ship.vy, t.vz - ship.vz);
+      if (fw.lengthSq() > 1) o.quaternion.copy(bq).multiply(new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, -1), fw.normalize()));
+    } else o.quaternion.copy(bq).multiply(new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), SAT_POLE));
+    const rad = o.getObjectByName('radar'); if (rad && t.beamAz !== undefined) rad.rotation.y = -t.beamAz;
+    void up;
+  }
+  renderer.autoClear = false;
+  renderer.clearDepth(); renderer.render(das.dim, das.ortho);
+  renderer.clearDepth(); renderer.render(das.far, das.farCam);
+  renderer.clearDepth(); renderer.render(das.scene, das.cam);
+  renderer.autoClear = true;
+  dasOverlay(bq);
+}
+// 2D layer: RWR, meters, warnings, markers
+function dasOverlay(bq) {
+  const cv = das.cv, W = innerWidth, H = innerHeight;
+  if (cv.width !== W || cv.height !== H) { cv.width = W; cv.height = H; }
+  cv.style.display = 'block';
+  const g = das.g, F = ringF, cam = das.cam; g.clearRect(0, 0, W, H);
+  const GRN = '#8dffb0', AMB = '#ffcf6a', RED = '#ff5050', DIMC = 'rgba(160,190,170,0.6)';
+  g.font = '13px monospace'; g.textBaseline = 'middle';
+  // world direction -> screen (or the screen edge, with off = true)
+  const proj = (wx, wy, wz) => {
+    const v = new THREE.Vector3(wx, wy, wz).applyQuaternion(bq), c = v.clone().applyQuaternion(cam.quaternion.clone().invert());
+    const behind = c.z > 0; v.project(cam);
+    let x = (v.x*0.5 + 0.5)*W, y = (-v.y*0.5 + 0.5)*H;
+    const off = behind || x < 0 || x > W || y < 0 || y > H;
+    if (off) { let dx = c.x, dy = -c.y; if (behind && Math.hypot(dx, dy) < 1e-6) dy = 1; const s = Math.min((W/2 - 30)/Math.abs(dx || 1e-9), (H/2 - 30)/Math.abs(dy || 1e-9)); x = W/2 + dx*s; y = H/2 + dy*s; }
+    return { x, y, off };
+  };
+  const placed = [];
+  const label = (text, x, y, col) => {
+    const w = g.measureText(text).width + 4; let yy = y;
+    for (let k = 0; k < 8 && placed.some(r => x < r.x + r.w && x + w > r.x && Math.abs(yy - r.y) < 14); k++) yy += 14;
+    placed.push({ x, y: yy, w }); g.fillStyle = col; g.fillText(text, x, yy);
+  };
+  g.fillStyle = GRN; g.fillText('EW SEE-THROUGH · GEODESIC WIDE FIELD', 18, 20);
+  // Track meter (the worst cluster), heat sink, exposure now
+  if (F) {
+    const Q = clamp(F.Q, 0, 1), col = Q < 0.3 ? GRN : Q < 0.6 ? AMB : RED;
+    g.strokeStyle = col; g.strokeRect(18, 36, 260, 14); g.fillStyle = col; g.fillRect(18, 36, 260*Q, 14);
+    g.fillText(`NETWORK TRACK ${(Q*100).toFixed(0)}%${F.hub && F.hub.gone ? ' · HUB DOWN' : ''}`, 290, 43);
+    const S = HULL.sink ? heatSink/HULL.sink : 0, sc = S < 0.7 ? GRN : S < 0.9 ? AMB : RED;
+    g.strokeStyle = sc; g.strokeRect(18, 58, 260, 10); g.fillStyle = sc; g.fillRect(18, 58, 260*S, 10);
+    g.fillStyle = sc; g.fillText(`SALT SINK ${(S*100).toFixed(0)}% · ${radDeployed ? 'RADIATORS OUT' : 'DARK'}`, 290, 63);
+    g.fillStyle = F.irNow >= 1 ? RED : F.irNow > 0.4 ? AMB : DIMC;
+    g.fillText(`IR ${irSignature().toFixed(1)} · EXPOSURE ${(Math.min(9.9, F.irNow)).toFixed(2)}`, 18, 82);
+    g.fillStyle = F.radNow >= 1 ? RED : F.radNow > 0.4 ? AMB : DIMC;
+    g.fillText(`RADAR LAST PAINT ${(Math.min(9.9, F.radNow)).toFixed(2)}`, 220, 82);
+    const cls = Object.entries(F.clusters).filter(([k, C]) => C.Q > 0.01 || C.alert);
+    cls.forEach(([k, C], i) => { g.fillStyle = C.alert ? AMB : DIMC; g.fillText(`${k} ${(C.Q*100).toFixed(0)}%${C.alert ? ' ALERT' : ''}`, 18, 100 + i*16); });
+  }
+  // Ring-relative velocity marker
+  if (das.vRel && das.vRel.length() > 0.05) {
+    const v = das.vRel.clone().normalize(), p = proj(v.x, v.y, v.z);
+    if (!p.off) { g.strokeStyle = GRN; g.beginPath(); g.arc(p.x, p.y, 9, 0, 6.283); g.moveTo(p.x - 18, p.y); g.lineTo(p.x - 9, p.y); g.moveTo(p.x + 9, p.y); g.lineTo(p.x + 18, p.y); g.moveTo(p.x, p.y - 9); g.lineTo(p.x, p.y - 16); g.stroke(); }
+    g.fillStyle = GRN; g.fillText(`V RING ${das.vRel.length().toFixed(1)} M/S`, p.off ? 18 : p.x + 22, p.off ? H - 60 : p.y);
+  }
+  // Proximity warning
+  if (F && F.warn) {
+    const p0 = rockRel(F.warn.r, simT, { sp: satPos(simT), sv: satVel(simT) }), p = proj(p0.x, p0.y, p0.z);
+    g.strokeStyle = RED; g.lineWidth = 2; g.beginPath(); g.arc(p.x, p.y, 22, 0, 6.283); g.stroke(); g.lineWidth = 1;
+    g.fillStyle = RED; g.fillText(`ROCK ${F.warn.r.R.toFixed(0)} M · ${F.warn.tca.toFixed(0)} S`, p.x + 28, p.y);
+  }
+  // Targets
+  for (const t of targets) {
+    if (t.gone || t.side !== 'HOSTILE' || !isSeen(t)) continue;
+    const p = proj(t.x - ship.x, t.y - ship.y, t.z - ship.z), r = rangeTo(t);
+    g.strokeStyle = t === targets[curTarget] ? AMB : 'rgba(200,220,210,0.7)';
+    if (p.off) { g.beginPath(); g.arc(p.x, p.y, 4, 0, 6.283); g.stroke(); continue; }
+    const s = 10; g.beginPath();
+    for (const [sx, sy] of [[-1, -1], [1, -1], [1, 1], [-1, 1]]) { g.moveTo(p.x + sx*s, p.y + sy*(s - 5)); g.lineTo(p.x + sx*s, p.y + sy*s); g.lineTo(p.x + sx*(s - 5), p.y + sy*s); }
+    g.stroke(); label(`${t.name} ${fmtDist(r)}`, p.x + 14, p.y - 12, g.strokeStyle);
+  }
+  // RWR emitters
+  if (F) for (const e of F.rwr) {
+    const p = proj(e.u.x, e.u.y, e.u.z), hot = simT - e.lastPaint < 0.6 || (e.kind === 'track' && e.painted);
+    const masked = e.cover < 0.5, col = masked ? 'rgba(150,150,150,0.8)' : hot ? RED : AMB;
+    g.strokeStyle = col; g.fillStyle = col; g.lineWidth = hot ? 2.5 : 1.5;
+    const s = hot ? 13 : 10; g.beginPath(); g.moveTo(p.x, p.y - s); g.lineTo(p.x + s, p.y); g.lineTo(p.x, p.y + s); g.lineTo(p.x - s, p.y); g.closePath(); g.stroke();
+    g.fillText({ search: 'S', guard: 'G', track: 'T' }[e.kind], p.x - 4, p.y + 1);
+    if (masked || hot || !isSeen(e.t)) label(`${isSeen(e.t) ? '' : e.t.name.replace(' · RELAY', '') + ' '}${masked ? 'MASKED' : hot ? 'PAINT' : fmtDist(e.r)}`, p.x + s + 6, p.y + 12, col);
+    g.lineWidth = 1;
+  }
+  // 360 deg strip: azimuth about the ship's up axis, elevation +-45 deg
+  const SX = W/2 - 360, SY = H - 46, SW = 720, SH = 34;
+  g.strokeStyle = 'rgba(141,255,176,0.5)'; g.strokeRect(SX, SY, SW, SH);
+  g.fillStyle = 'rgba(141,255,176,0.5)'; g.fillText('360', SX - 30, SY + SH/2);
+  const strip = (wx, wy, wz) => { const v = new THREE.Vector3(wx, wy, wz).applyQuaternion(bq).normalize(); const az = Math.atan2(v.x, -v.z), el = Math.asin(clamp(v.y, -1, 1));
+    return { x: SX + SW/2 + az/Math.PI*SW/2, y: SY + SH/2 - clamp(el/(Math.PI/4), -1, 1)*SH/2 }; };
+  for (const a of [-90, 0, 90]) { const x = SX + SW/2 + a/180*SW/2; g.beginPath(); g.moveTo(x, SY); g.lineTo(x, SY + 5); g.stroke(); }
+  if (F) {
+    for (const e of F.rwr) { const p = strip(e.u.x, e.u.y, e.u.z); g.fillStyle = simT - e.lastPaint < 0.6 ? RED : AMB; g.fillRect(p.x - 3, p.y - 3, 6, 6); }
+    for (const r of F.close) if (r.R > 25 && r.relNow) { const p = strip(r.relNow.x, r.relNow.y, r.relNow.z); g.fillStyle = 'rgba(200,210,205,0.6)'; g.fillRect(p.x - 1, p.y - 1, 2, 2); }
+  }
+  for (const t of targets) if (!t.gone && t.side === 'HOSTILE' && isSeen(t)) { const p = strip(t.x - ship.x, t.y - ship.y, t.z - ship.z); g.strokeStyle = GRN; g.strokeRect(p.x - 3, p.y - 3, 6, 6); }
+}
+function dasHide() { if (das.cv) das.cv.style.display = 'none'; }
+
 /* ================= MAIN LOOP ================= */
 function step(dt) {
   const c = controlState();
@@ -11139,6 +11821,7 @@ function frame(now) {
   requestAnimationFrame(frame);
   const dt = Math.min((now - lastFrame)/1000, 0.1);
   lastFrame = now;
+  if (cutscene.active || hangarOpen) dasHide();
   if (cutscene.active) { renderBossCutscene(dt); return; }
   if (hangarOpen) { renderHangar(dt); return; }
   if (started && !paused && !menuOpen && !dead && !uiOverlay && !(mission && mission.ended)) step(dt);
@@ -11148,6 +11831,7 @@ function frame(now) {
   updateBook(dt);
   audioFrame();
   renderer.render(scene, camera);
+  if (das.on && started && !uiOverlay && !dead) dasRender(); else dasHide();
 }
 updateDisplays();
 buildTable();
