@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OG — Cockpit prototype v0.16.0</title>
+<title>OG — Cockpit prototype v0.16.1</title>
 <style>
   html, body { margin:0; height:100%; background:#000; overflow:hidden;
     font-family: ui-monospace, Menlo, Consolas, monospace; color:#cfd8c0; }
@@ -97,7 +97,7 @@
 </head>
 <body>
 <canvas id="gl"></canvas>
-<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.16.0</span></div>
+<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.16.1</span></div>
 <div id="hangar"><div class="load" id="hangarLoad">LOADING SHIP</div>
   <div class="hint">DRAG TO ORBIT · WHEEL TO ZOOM · CLICK A HARDPOINT TO CHOOSE ITS MODULE</div>
   <div class="panel"><h2>HANGAR</h2><div class="sub" id="hullName"></div><div id="hullSel"></div><div class="sub">LOADOUT · SELECT A HARDPOINT, THEN A MODULE</div>
@@ -2855,7 +2855,7 @@ function ringForces(t0) {
 
 const MISSIONS = {
   m1: { id: 'm1', name: 'OPERATION LANTERN', title: 'HELIUM-3 DEPOT STRIKE', plan: planMission1,
-    // Briefing transmission: [text, typing speed in chars/s, pause after in s]; 'ANIM' is the transfer diagram
+    // Briefing transmission: [text, typing speed in chars/s, pause after in s]; 'ANIM' lines are figures (BRIEF_FIGS)
     orders: [
       ['// LASER LINK ESTABLISHED - MILITARY SATELLITE LCM-52C092 //', 38, 1.4],
       ['ORDERS RECEIVED. STAND BY FOR FILE TRANSMISSION.', 32, 1.6],
@@ -2896,6 +2896,7 @@ const MISSIONS = {
       ['', 0, 0.2],
       ['FILE 0412-CT // CLASSIFIED // COMMANDING OFFICER EYES ONLY', 160, 0.12],
       ['OPERATION CATACLYSM', 160, 0.12],
+      ['ANIM:cat', 0, 0.3],
       ['THEATRE ......... MARS. ENEMY FLEET, ORBITAL STATIONS, SPACE ELEVATOR', 170, 0.08],
       ['YOUR VESSEL ..... DD-84, 400 KM PARKING ORBIT', 170, 0.08],
       ['TRANSPORT ....... BS-90 HEAVY STAGE, HOLDING 150 M AFT OF YOU', 170, 0.25],
@@ -2977,6 +2978,7 @@ const MISSIONS = {
       ['', 0, 0.2],
       ['FILE 0617-SA // CLASSIFIED // TASK GROUP COMMANDER EYES ONLY', 160, 0.12],
       ['SATURNIAN ASSAULT', 160, 0.12],
+      ['ANIM:sat', 0, 0.3],
       ['SITUATION ....... LARGE GROUP OF DRIVE SIGNATURES ON INTERCEPT', 170, 0.08],
       ['                  COURSE FOR TITAN. ETA 3 HOURS.', 170, 0.08],
       ['DEFEND .......... TITAN SHIPYARD (SURFACE), STORAGE BAY AT L1,', 170, 0.08],
@@ -8513,7 +8515,7 @@ function playBriefing(M, done) {
   // Timeline: when each line starts and ends (the boot takes BOOT s)
   let t = BRIEF_BOOT; brief.steps = [];
   for (const [text, cps, pause] of M.orders) {
-    const dur = text === 'ANIM' ? BRIEF_ANIM : text === 'SHIP' ? BRIEF_SHIP : cps ? text.length/cps : 0;
+    const fig = briefFig(text), dur = fig ? fig[1] : text === 'SHIP' ? BRIEF_SHIP : cps ? text.length/cps : 0;
     brief.steps.push({ text, t0: t, t1: t + dur });
     t += dur + pause;
   }
@@ -8567,7 +8569,7 @@ function drawBriefing(g, W, H, t) {
   const flick = 0.93 + 0.07*Math.random();          // phosphor flicker
   g.fillStyle = '#021208'; g.fillRect(0, 0, W, H);
   const rows = Math.max(brief.steps.length + BRIEF_ANIM_ROWS + 1,
-    brief.steps.reduce((n, st) => n + (st.text === 'ANIM' ? BRIEF_ANIM_ROWS : st.text === 'SHIP' ? BRIEF_SHIP_ROWS : 1), 1)), Y0 = H*0.12;
+    brief.steps.reduce((n, st) => n + (briefFig(st.text) ? briefFig(st.text)[2] : st.text === 'SHIP' ? BRIEF_SHIP_ROWS : 1), 1)), Y0 = H*0.12;
   const fs = Math.max(11, Math.min((H*0.95 - Y0)/(rows*1.5), W/68)), lh = fs*1.5, X = W*0.06;
   g.globalAlpha = flick;
   // Header, like an MFD page
@@ -8594,7 +8596,8 @@ function drawBriefing(g, W, H, t) {
   let y = Y0, cur = null, warnBlock = false;
   for (const st of brief.steps) {
     if (t < st.t0) break;
-    if (st.text === 'ANIM') { drawTransfer(g, X, y - fs, W - 2*X, lh*BRIEF_ANIM_ROWS - fs*0.5, t - st.t0, fs); y += lh*BRIEF_ANIM_ROWS; cur = null; continue; }
+    const fig = briefFig(st.text);
+    if (fig) { fig[0](g, X, y - fs, W - 2*X, lh*fig[2] - fs*0.5, t - st.t0, fs); g.font = `${fs}px monospace`; g.textAlign = 'left'; y += lh*fig[2]; cur = null; continue; }
     if (st.text === 'SHIP') { drawShipBrief(g, X, y - fs, W - 2*X, lh*BRIEF_SHIP_ROWS - fs*0.5, t - st.t0, fs); g.font = `${fs}px monospace`; g.textAlign = 'left'; y += lh*BRIEF_SHIP_ROWS; cur = null; continue; }
     const n = st.t1 > st.t0 ? Math.min(st.text.length, Math.floor((t - st.t0)/(st.t1 - st.t0)*st.text.length)) : st.text.length;
     const shown = st.text.slice(0, n);
@@ -8629,6 +8632,186 @@ function drawBriefing(g, W, H, t) {
 // Transfer diagram, inside its box: Earth with its low orbit, a half-ellipse transfer drawing out to the Moon
 // with the ship's blip, the Moon's orbit around Earth (an arc), the depot's known orbit and position, and
 // question marks where patrols might be
+// Briefing figures: each 'ANIM...' line names one (draw function, duration in s, rows of the terminal it fills)
+const BRIEF_FIGS = {
+  'ANIM': () => [drawTransfer, BRIEF_ANIM, BRIEF_ANIM_ROWS],
+  'ANIM:cat': () => [drawCatProfile, 10, 9],
+  'ANIM:sat': () => [drawSatSituation, 10, 9],
+};
+const briefFig = txt => BRIEF_FIGS[txt] ? BRIEF_FIGS[txt]() : null;
+// Shared pieces for the figures
+function figFrame(g, x, y, w, h, fs, title) {
+  g.strokeStyle = DIM; g.lineWidth = Math.max(1, fs/12); g.strokeRect(x, y, w, h);
+  g.beginPath(); g.rect(x, y, w, h); g.clip();
+  g.font = `${fs*0.8}px monospace`; g.fillStyle = DIM; g.textAlign = 'left';
+  g.fillText(title, x + fs*0.5, y + fs*1.1);
+}
+const figTri = (g, x, y, s, up = true) => { g.beginPath(); g.moveTo(x, y + (up ? -s : s)); g.lineTo(x + s*0.85, y + (up ? s*0.6 : -s*0.6)); g.lineTo(x - s*0.85, y + (up ? s*0.6 : -s*0.6)); g.closePath(); g.fill(); };
+const figDia = (g, x, y, s) => { g.beginPath(); g.moveTo(x, y - s); g.lineTo(x + s, y); g.lineTo(x, y + s); g.lineTo(x - s, y); g.closePath(); g.fill(); };
+// A numbered step tag: (n) and its caption, fading in
+function figStep(g, n, x, y, text, fs, a, col = PH, align = 'left') {
+  if (a <= 0) return;
+  g.globalAlpha *= a; g.fillStyle = col; g.font = `bold ${fs*0.85}px monospace`; g.textAlign = align;
+  g.fillText(`${n} ${text}`, x, y);
+  g.globalAlpha /= a; g.font = `${fs*0.8}px monospace`;
+}
+// Fraction of phase [a, b] of the figure's progress k
+const figPh = (k, a, b) => clamp((k - a)/(b - a), 0, 1);
+
+/* OPERATION CATACLYSM: dock with the stage in low Earth orbit, the 125-day transfer (departure burn and two
+   corrections), brake at Mars and drop the stage, then the targets: fleet, stations, surface sites, elevator */
+function drawCatProfile(g, x, y, w, h, t, fs) {
+  const k = clamp(t/10, 0, 1); g.save();
+  figFrame(g, x, y, w, h, fs, 'FIG. 1 · CATACLYSM · MISSION PROFILE (NOT TO SCALE)');
+  g.lineWidth = Math.max(1, fs/10);
+  const ex = x + w*0.1, ey = y + h*0.6, er = h*0.11, lo = er*1.45;
+  const mx = x + w*0.74, my = y + h*0.6, mr = h*0.09, co = mr*1.9;
+  const capY = y + h - fs*0.7;                      // step captions run along the bottom of the box
+  g.font = `${fs*0.65}px monospace`; g.fillStyle = DIM; g.textAlign = 'right';
+  g.fillText('▲ FLEET  ◆ STATIONS  ■ SURFACE SITES', x + w - fs*0.6, y + fs*1.1);
+  // Earth and the parking orbit
+  g.strokeStyle = PH; g.beginPath(); g.arc(ex, ey, er, 0, 2*Math.PI); g.stroke();
+  g.strokeStyle = DIM; g.setLineDash([fs*0.3, fs*0.4]); g.beginPath(); g.arc(ex, ey, lo, 0, 2*Math.PI); g.stroke(); g.setLineDash([]);
+  g.fillStyle = PH; g.textAlign = 'center'; g.font = `${fs*0.8}px monospace`; g.fillText('EARTH', ex, ey + er + fs*1.4);
+  // 1: the BS-90 closes on the DD-84's stern and docks
+  const k1 = figPh(k, 0, 0.14), shx = ex + lo*Math.cos(-1.1), shy = ey + lo*Math.sin(-1.1);
+  g.fillStyle = PH; g.fillRect(shx - fs*0.25, shy - fs*0.25, fs*0.5, fs*0.5);
+  const bgap = (1 - k1)*fs*1.6, bx = shx - fs*0.55 - bgap, by = shy + fs*0.35 + bgap*0.6;
+  g.fillStyle = AMB; g.fillRect(bx - fs*0.5, by - fs*0.18, fs*0.75, fs*0.36);
+  figStep(g, '1', x + fs*0.6, capY, 'DOCK WITH THE BS-90 · 0.15 M/S', fs, figPh(k, 0.02, 0.1));
+  // 2: the transfer (upper half-ellipse), with the burn and the corrections ticked along it
+  const x0 = shx, x1 = mx - co, cxT = (x0 + x1)/2, aT = (x1 - x0)/2, yT = (shy + my - co*0.4)/2, bT = Math.min(yT - (y + fs*3.4), aT*0.5);
+  const path = s => [cxT - aT*Math.cos(Math.PI*s), yT - bT*Math.sin(Math.PI*s)];
+  const k2 = figPh(k, 0.16, 0.56);
+  if (k2 > 0) {
+    g.strokeStyle = AMB; g.setLineDash([fs*0.5, fs*0.3]); g.beginPath();
+    for (let i = 0; i <= Math.round(90*k2); i++) { const [px, py] = path(i/90); i ? g.lineTo(px, py) : g.moveTo(px, py); }
+    g.stroke(); g.setLineDash([]);
+    const ticks = [[0.04, 'BURN 40 MIN'], [0.2, 'TCM-1 +2 D'], [0.9, 'TCM-2 −10 D']];
+    g.font = `${fs*0.72}px monospace`;
+    for (const [s, lab] of ticks) if (k2 >= s) {
+      const [px, py] = path(s); g.strokeStyle = AMB; g.beginPath(); g.moveTo(px, py - fs*0.4); g.lineTo(px, py + fs*0.4); g.stroke();
+      g.fillStyle = AMB; g.textAlign = s < 0.5 ? 'left' : 'right';
+      g.fillText(lab, px + (s < 0.5 ? fs*0.4 : -fs*0.4), s < 0.1 ? py + fs*1.2 : py - fs*0.55);   // the burn's tag under the arc
+    }
+    const [sx, sy] = path(Math.min(k2, 0.985));
+    if (Math.floor(t*6) % 2 === 0 || k2 >= 1) { g.fillStyle = AMB; g.fillRect(sx - fs*0.28, sy - fs*0.28, fs*0.56, fs*0.56); }
+    const [lx, ly] = path(0.5);
+    figStep(g, '2', lx, ly - fs*0.7, '125 DAYS · TIME WARP', fs, figPh(k, 0.3, 0.38), AMB, 'center');
+  }
+  // 3: brake at Mars, burn the stage dry, separate; the capture orbit
+  g.strokeStyle = PH; g.beginPath(); g.arc(mx, my, mr, 0, 2*Math.PI); g.stroke();
+  g.fillStyle = PH; g.textAlign = 'center'; g.fillText('MARS', mx, my + mr + fs*1.4);
+  const k3 = figPh(k, 0.56, 0.7);
+  if (k3 > 0) {
+    g.globalAlpha *= k3;
+    g.strokeStyle = DIM; g.setLineDash([fs*0.25, fs*0.3]); g.beginPath(); g.arc(mx, my, co, 0, 2*Math.PI); g.stroke(); g.setLineDash([]);
+    const [ax, ay] = [mx - co, my];                   // arrival point on the capture orbit
+    const drift = k3*fs*1.4; g.fillStyle = AMB; g.fillRect(ax - fs*1.2 - drift, ay - fs*0.9 - drift*0.4, fs*0.75, fs*0.36);   // the spent stage drifts off
+    g.fillStyle = PH; g.fillRect(ax - fs*0.25, ay - fs*0.25, fs*0.5, fs*0.5);
+    g.globalAlpha /= k3;
+    figStep(g, '3', x + w*0.33, capY, 'BRAKE · BURN THE STAGE DRY · SEPARATE', fs, figPh(k, 0.58, 0.66), PH, 'left');
+  }
+  // 4: the targets: fleet on its orbit, defence stations, surface sites, the elevator up to its hub
+  const k4 = figPh(k, 0.7, 0.9);
+  if (k4 > 0) {
+    g.globalAlpha *= k4;
+    const hubY = y + fs*2.4, spY = my - mr - (my - mr - hubY)*0.42;
+    g.strokeStyle = AMB; g.lineWidth = Math.max(1.2, fs/8); g.beginPath(); g.moveTo(mx, my - mr); g.lineTo(mx, hubY); g.stroke(); g.lineWidth = Math.max(1, fs/10);
+    g.fillStyle = AMB; g.fillRect(mx - fs*0.45, hubY - fs*0.3, fs*0.9, fs*0.6);
+    g.textAlign = 'left'; g.font = `${fs*0.72}px monospace`; g.fillText('ELEVATOR HUB', mx + fs*0.8, hubY + fs*0.25);
+    if (Math.floor(t*3) % 2 === 0) { g.strokeStyle = RED; g.beginPath(); g.arc(mx, spY, fs*0.55, 0, 2*Math.PI); g.stroke(); }
+    g.fillStyle = RED; g.fillText('SPLICE NODE · 9000 KM', mx + fs*0.8, spY + fs*0.25);
+    g.fillStyle = AMB;
+    for (let i = 0; i < 7; i++) { const a = -2.6 + i*0.62; figTri(g, mx + co*1.35*Math.cos(a), my + co*1.35*Math.sin(a)*0.8, fs*0.32); }
+    for (const a of [-0.3, 0.9, 2.2]) figDia(g, mx + co*1.8*Math.cos(a), my + co*1.8*Math.sin(a)*0.75, fs*0.36);
+    for (const a of [-2.2, -0.9, 0.4]) g.fillRect(mx + mr*Math.cos(a) - fs*0.15, my + mr*Math.sin(a) - fs*0.15, fs*0.3, fs*0.3);
+    g.globalAlpha /= k4;
+    figStep(g, '4', x + w - fs*0.6, capY, 'DESTROY EVERYTHING · CUT THE TETHER', fs, figPh(k, 0.78, 0.86), AMB, 'right');
+  }
+  if (k > 0.9 && Math.floor(t*3) % 2 === 0) {
+    g.font = `${fs*0.8}px monospace`; g.fillStyle = AMB; g.textAlign = 'right';
+    g.textAlign = 'left'; g.fillText('WARNING · THE CUT TETHER FALLS ALONG THE EQUATOR', x + fs*0.5, y + fs*2.3);
+  }
+  g.restore();
+}
+
+/* SATURNIAN ASSAULT: Saturn, Titan and its L1 point; the shipyard, the storage bay and the delivery craft running
+   between them; the task group in Titan orbit; the two attack groups' paths, and the dreadnought trailing them */
+function drawSatSituation(g, x, y, w, h, t, fs) {
+  const k = clamp(t/10, 0, 1); g.save();
+  figFrame(g, x, y, w, h, fs, 'FIG. 1 · TITAN DEFENCE · SITUATION (NOT TO SCALE)');
+  g.lineWidth = Math.max(1, fs/10); g.font = `${fs*0.8}px monospace`;
+  const sx = x + w*0.12, sy = y + h*0.62, sr = h*0.16;
+  const tx = x + w*0.6, ty = sy, tr = h*0.055, to = tr*2.4, lx = tx - w*0.15;
+  // Saturn and its rings
+  g.strokeStyle = PH; g.beginPath(); g.arc(sx, sy, sr, 0, 2*Math.PI); g.stroke();
+  g.strokeStyle = DIM; g.beginPath(); g.ellipse(sx, sy, sr*2.1, sr*0.42, -0.08, 0, 2*Math.PI); g.stroke();
+  g.beginPath(); g.ellipse(sx, sy, sr*1.6, sr*0.3, -0.08, 0, 2*Math.PI); g.stroke();
+  g.fillStyle = PH; g.textAlign = 'center'; g.fillText('SATURN', sx, sy + sr + fs*1.4);
+  // Titan's orbit (an arc through Titan), Titan
+  g.strokeStyle = DIM; g.setLineDash([fs*0.3, fs*0.4]); g.beginPath(); g.arc(sx, sy, tx - sx, -0.32, 0.32); g.stroke(); g.setLineDash([]);
+  g.strokeStyle = PH; g.beginPath(); g.arc(tx, ty, tr, 0, 2*Math.PI); g.stroke();
+  g.fillStyle = PH; g.fillText('TITAN', tx, ty + to + fs*1.5);
+  // 1: what to defend
+  const k1 = figPh(k, 0, 0.22);
+  if (k1 > 0) {
+    g.globalAlpha *= k1;
+    const yx = tx - tr*0.7, yy = ty - tr*0.7;
+    g.fillStyle = PH; g.fillRect(yx - fs*0.22, yy - fs*0.22, fs*0.44, fs*0.44);
+    g.textAlign = 'right'; g.font = `${fs*0.72}px monospace`; g.fillText('SHIPYARD', yx - fs*0.5, yy - fs*0.4);
+    figDia(g, lx, ty, fs*0.45); g.textAlign = 'center'; g.fillText('STORAGE BAY · L1', lx, ty - fs*1.0);
+    g.strokeStyle = DIM; g.setLineDash([fs*0.2, fs*0.3]); g.beginPath(); g.moveTo(lx + fs*0.5, ty); g.lineTo(yx, yy); g.stroke(); g.setLineDash([]);
+    for (const ph of [0, 0.5]) {                      // the delivery craft shuttling
+      const u = (t*0.12 + ph) % 1, f = u < 0.5 ? 2*u : 2 - 2*u;
+      g.fillStyle = PH; g.fillRect(lx + fs*0.5 + (yx - lx - fs*0.5)*f - fs*0.12, ty + (yy - ty)*f - fs*0.12, fs*0.24, fs*0.24);
+    }
+    g.globalAlpha /= k1;
+    figStep(g, '1', x + fs*0.6, y + fs*2.6, 'DEFEND THE SHIPYARD, THE L1 BAY AND THE DELIVERY CRAFT', fs, figPh(k, 0.04, 0.14));
+  }
+  // 2: the task group in Titan orbit, in formation
+  const k2 = figPh(k, 0.22, 0.4);
+  if (k2 > 0) {
+    g.globalAlpha *= k2;
+    g.strokeStyle = DIM; g.setLineDash([fs*0.2, fs*0.3]); g.beginPath(); g.arc(tx, ty, to, 0, 2*Math.PI); g.stroke(); g.setLineDash([]);
+    const a0 = -2.2 + t*0.25;
+    for (let i = 0; i < 4; i++) {
+      const a = a0 - i*0.22, px = tx + to*Math.cos(a), py = ty + to*Math.sin(a);
+      g.fillStyle = i ? 'rgba(125,255,154,0.75)' : PH; g.fillRect(px - fs*(i ? 0.17 : 0.27), py - fs*(i ? 0.17 : 0.27), fs*(i ? 0.34 : 0.54), fs*(i ? 0.34 : 0.54));
+    }
+    g.globalAlpha /= k2;
+    figStep(g, '2', x + fs*0.6, y + fs*3.8, 'YOU + RESOLUTE · VALIANT · STEADFAST, DATALINKED', fs, figPh(k, 0.24, 0.32));
+  }
+  // 3: the attack groups: A captures into Titan orbit, B flies past Titan and on to the bay
+  const k3 = figPh(k, 0.42, 0.72);
+  if (k3 > 0) {
+    const draw = (pts, s) => { g.beginPath(); const n = Math.max(1, Math.round(60*s)); for (let i = 0; i <= n; i++) { const [px, py] = pts(i/60); i ? g.lineTo(px, py) : g.moveTo(px, py); } g.stroke(); return pts(n/60); };
+    g.strokeStyle = RED; g.setLineDash([fs*0.5, fs*0.3]);
+    const A = u => { const ax = x + w*0.97, ay = y + h*0.16, ex = tx + to*1.05, ey = ty - to*0.6;
+      return [ax + (ex - ax)*u, ay + (ey - ay)*u*u + (1 - u)*u*h*0.05]; };
+    const B = u => { if (u < 0.55) { const v = u/0.55, bx = x + w*0.84, by = y + h; return [bx + (tx + to*1.3 - bx)*v, by + (ty + to*0.9 - by)*v]; }
+      const v = (u - 0.55)/0.45; return [tx + to*1.3 + (lx + fs*1.2 - tx - to*1.3)*v, ty + to*0.9 + Math.sin(Math.PI*v)*h*0.12 - to*0.9*v]; };
+    const [pa, qa] = draw(A, figPh(k, 0.42, 0.58)); const [pb, qb] = draw(B, figPh(k, 0.5, 0.72));
+    g.setLineDash([]); g.fillStyle = RED; figTri(g, pa, qa, fs*0.35, false); figTri(g, pb, qb, fs*0.35, false);
+    g.font = `bold ${fs*0.78}px monospace`; g.textAlign = 'right';
+    if (k > 0.5) { g.fillStyle = RED; g.fillText('3 GROUP A · CAPTURE AT TITAN · T+3 H', x + w - fs*0.6, y + h*0.16 - fs*0.9); }
+    if (k > 0.62) { g.fillStyle = RED; g.fillText('GROUP B · FLYBY, THEN THE BAY', x + w - fs*0.6, y + h - fs*0.7); }
+  }
+  // 4: the dreadnought trailing the fleet
+  if (k > 0.78) {
+    const bx = x + w*0.93, by = y + h*0.42, s = fs*0.7;
+    if (Math.floor(t*3) % 2 === 0 || k >= 1) { g.fillStyle = RED; figTri(g, bx, by, s, false); g.strokeStyle = RED; g.beginPath(); g.arc(bx, by, s*1.8, 0, 2*Math.PI); g.stroke(); }
+    g.font = `bold ${fs*0.78}px monospace`; g.fillStyle = RED; g.textAlign = 'right';
+    g.fillText('4 WAVE 3 · KR-01 BURYIA', bx - s*2.3, by - fs*0.2);
+    g.font = `${fs*0.7}px monospace`; g.fillText('TARGET ITS SUBSYSTEMS [U]', bx - s*2.3, by + fs*1.0);
+  }
+  if (k > 0.9 && Math.floor(t*3) % 2 === 0) {
+    g.font = `${fs*0.8}px monospace`; g.fillStyle = AMB; g.textAlign = 'right';
+    g.textAlign = 'left'; g.fillText('WARNING · BAY GROUP STANDS OFF 60 KM FROM L1', x + fs*0.6, y + h - fs*0.7);
+  }
+  g.restore();
+}
+
 function drawTransfer(g, x, y, w, h, t, fs) {
   const k = clamp(t/BRIEF_ANIM, 0, 1);
   g.save();
