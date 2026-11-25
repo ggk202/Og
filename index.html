@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OG — Cockpit prototype v0.16.1</title>
+<title>OG — Cockpit prototype v0.16.2</title>
 <style>
   html, body { margin:0; height:100%; background:#000; overflow:hidden;
     font-family: ui-monospace, Menlo, Consolas, monospace; color:#cfd8c0; }
@@ -97,7 +97,7 @@
 </head>
 <body>
 <canvas id="gl"></canvas>
-<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.16.1</span></div>
+<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.16.2</span></div>
 <div id="hangar"><div class="load" id="hangarLoad">LOADING SHIP</div>
   <div class="hint">DRAG TO ORBIT · WHEEL TO ZOOM · CLICK A HARDPOINT TO CHOOSE ITS MODULE</div>
   <div class="panel"><h2>HANGAR</h2><div class="sub" id="hullName"></div><div id="hullSel"></div><div class="sub">LOADOUT · SELECT A HARDPOINT, THEN A MODULE</div>
@@ -984,6 +984,16 @@ function orbitStateInc(r, phase, inc = 0) {
    Priority: dodge inbound player ordnance (thrust across its line of sight), retreat when badly damaged, otherwise
    keep the range: close in to weapons range, open out when the player gets too near. Every burn shows up as a
    large signature (targetSig). Returns the thrust acceleration in world axes, or null when coasting. */
+// The nearest friendly the ship can reach in orbit: the player, carriers, the bay, delivery craft (not surface sites)
+function knifeTarget(t) {
+  let best = dead ? null : ship, bd = dead ? Infinity : Math.hypot(ship.x - t.x, ship.y - t.y, ship.z - t.z);
+  for (const f of targets) {
+    if (f.side !== 'FRIENDLY' || f.gone) continue;
+    const b = primaryAtState(f, simT); if (Math.hypot(f.x - b.c[0], f.y - b.c[1], f.z - b.c[2]) - b.R < 200e3) continue;
+    const d = Math.hypot(f.x - t.x, f.y - t.y, f.z - t.z); if (d < bd) { bd = d; best = f; }
+  }
+  return best;
+}
 function enemyAI(t, h) {
   t.burning = false;
   const ai = t.ai, was = t.aiState; t.aiState = null;
@@ -1018,6 +1028,26 @@ function enemyAI(t, h) {
     t.thrA = [dir.x*ai.acc, dir.y*ai.acc, dir.z*ai.acc];
     return t.thrA;
   }
+  // 0b. Out of torpedoes, a pressing ship (t.press) goes in with its laser: it closes on the nearest friendly
+  //     ship or station in orbit (the player, a carrier, the storage bay, a delivery craft) to ELASER.range
+  if (t.press && t.mag === 0 && !t.retreating) {
+    const kt = knifeTarget(t);
+    if (kt) {
+      const kr = new THREE.Vector3(kt.x - t.x, kt.y - t.y, kt.z - t.z), d = kr.length(), u = kr.clone().divideScalar(d);
+      const kv = new THREE.Vector3(t.vx - kt.vx, t.vy - kt.vy, t.vz - kt.vz);          // own velocity relative to it
+      const want = 0.6*ELASER.range, vc = d > want ? Math.min(800, Math.sqrt(2*ai.acc*0.5*(d - want))) : d < 1500 ? -40 : 0;
+      const err = u.clone().multiplyScalar(vc).sub(kv), e = err.length();
+      if (!t.knifeLogged && isLocal(t)) { t.knifeLogged = true; log(`${t.name} · TUBES DRY · CLOSING ON ${kt === ship ? 'YOU' : kt.name}`); }
+      if (e > 10 || (was === 'KNIFE' && e > 3)) {
+        dir = err.normalize(); why = 'KNIFE';
+        const b = primaryAtState(t, simT), radV = new THREE.Vector3(t.x - b.c[0], t.y - b.c[1], t.z - b.c[2]);
+        if (radV.length() - b.R < 300e3) dir.addScaledVector(radV.normalize(), 1.1).normalize();   // keep off Titan
+        t.burning = true; t.aiState = why; ai.dv = Math.max(0, ai.dv - ai.acc*h);
+        t.thrA = [dir.x*ai.acc, dir.y*ai.acc, dir.z*ai.acc]; return t.thrA;
+      }
+      return null;
+    }
+  }
   // 1. Evade the nearest closing player weapon aimed at this ship
   let thr = null, thrR = 25e3;
   for (const o of ordnance) {
@@ -1036,7 +1066,7 @@ function enemyAI(t, h) {
       if (isLocal(t)) log(`${t.name} EVADING`);
     }
     dir = o.evade.clone().addScaledVector(u, -o.evade.dot(u)).normalize(); why = 'EVADE';
-  } else if (t.integrity < 0.35*t.maxInt) {
+  } else if (t.integrity < (t.press ? 0.12 : 0.35)*t.maxInt) {
     // 2. Retreat: open the range at full thrust
     const opening = rel.dot(relV)/r;                 // the ship's speed away from us
     if (opening < 300) { dir = rel.clone().normalize().negate(); why = 'RETREAT'; }   // then coast away
@@ -1044,7 +1074,7 @@ function enemyAI(t, h) {
   } else if (t.huntTaskGroup && r < 4000e3 && r > 1e3) {
     // 3a. Task-group assault ships (Saturnian Assault Group A): actively close to ~75-135 km combat range
     const u = rel.clone().normalize(), want = t.closeRange || 95e3;
-    const vc = r > want ? Math.min(450, Math.sqrt(2*ai.acc*0.45*(r - want))) : r < 14e3 ? -65 : 0;
+    const vc = r > want ? Math.min(t.press ? 700 : 450, Math.sqrt(2*ai.acc*0.45*(r - want))) : r < 14e3 ? -65 : 0;
     const err = u.clone().multiplyScalar(vc).sub(relV.clone().negate());
     const e = err.length();
     if (e > 16 || (was === 'MANEUVER' && e > 4)) {
@@ -1134,13 +1164,25 @@ function enemyPD(h) {
    - it ablates hull integrity slowly, but never below hullFloor,
    - each burst may degrade one system on the side facing the shooter, never below sysFloor (nothing goes offline),
    - each burst costs a little score. */
-const ELASER = { range: 5000, burst: 4, cool: 6, absorbed: 300e3, hullRate: 0.004, hullFloor: 0.4,
+const ELASER = { range: 5000, burst: 4, cool: 6, absorbed: 300e3, hullRate: 0.004, hullFloor: 0.4, friendlyRate: 20,
                  sysChance: 0.3, sysDmg: [0.08, 0.15], sysFloor: 0.3, score: -100 };
 let laserHeat = 0, lastLaserHitT = -1e9;
 function enemyLasers(h) {
   laserHeat = 0;
   for (const t of targets) {
     if (!t.laser) continue;
+    // Against a friendly ship or station (knife fight): same burst and cooldown, damage to its integrity
+    const kt = t.press && t.mag === 0 && !t.gone ? knifeTarget(t) : null;
+    if (kt && kt !== ship) {
+      const d = Math.hypot(kt.x - t.x, kt.y - t.y, kt.z - t.z), reach = d < ELASER.range && losClear(t, kt);
+      t.lzT = (t.lzT ?? 0) - h;
+      if (t.lasing) {
+        if (t.lzT <= 0 || !reach) { t.lasing = false; t.lzT = ELASER.cool; continue; }
+        kt.integrity -= ELASER.friendlyRate*(1.25 - 0.5*d/ELASER.range)*h;
+        if (!kt.lzLogged && isSeen(t)) { kt.lzLogged = true; log(`${t.name} LASING ${kt.name}`); }
+      } else if (t.lzT <= 0 && reach) { t.lasing = true; t.lzT = ELASER.burst; }
+      continue;
+    }
     const able = !t.gone && t.side === 'HOSTILE' && !(t.needsAlert && !(mission && mission.alert)) && !dead;
     const r = rangeTo(t), inReach = able && r < ELASER.range && losClear(ship, t) && losClearMoon(ship, t);
     t.lzT = (t.lzT ?? 0) - h;
@@ -2459,10 +2501,10 @@ function saturnForces(t0) {
     const st = integrateTo(peri, tAi, t0, 20);
     const big = cls === 'capital', cruiser = n.startsWith('CRUISER');
     out.push(hostile(n, cls, cruiser ? 14 : big ? 9 : 6, cruiser ? 1200 : big ? 450 : 200, st,
-      { score: cruiser ? 2500 : big ? 1000 : 500, salvo: cruiser ? 6 : big ? 4 : 3, salvoT: cruiser ? 18 : 22,
-        fireRange: 520e3, prefer: null, huntTaskGroup: true, closeRange: cruiser ? 130e3 : big ? 100e3 : 75e3,
+      { score: cruiser ? 2500 : big ? 1000 : 500, salvo: cruiser ? 6 : big ? 4 : 3, salvoT: cruiser ? 14 : 16,
+        fireRange: 520e3, prefer: null, huntTaskGroup: true, press: true, closeRange: cruiser ? 95e3 : big ? 65e3 : 45e3,
         mag: cruiser ? 64 : big ? 32 : 18,
-        pd: cruiser ? 5 : big ? 3 : 2, laser: !cruiser, fireT: 8 + i, len: cruiser ? 90 : undefined, arrive: { mode: 'capture' }, acc: cruiser ? 2.5 : 4 }));
+        pd: cruiser ? 5 : big ? 3 : 2, laser: true, fireT: 8 + i, len: cruiser ? 90 : undefined, arrive: { mode: 'capture' }, acc: cruiser ? 2.5 : 4 }));
   });
   // Attack group B: arrives 3 min after Group A right across the player's orbital position (~80-150 km), engages
   // the task group for 15 minutes during the main battle, and any survivors then break off for Storage Bay L1
@@ -2478,9 +2520,9 @@ function saturnForces(t0) {
     const st = integrateTo(peri, tBi, t0, 20);
     const big = cls === 'capital', cruiser = n.startsWith('CRUISER');
     out.push(hostile(n, cls, cruiser ? 14 : big ? 9 : 6, cruiser ? 1200 : big ? 450 : 200, st,
-      { score: cruiser ? 2500 : big ? 1000 : 500, salvo: cruiser ? 6 : big ? 4 : 3, salvoT: cruiser ? 18 : 22,
-        fireRange: 480e3, prefer: null, closeRange: cruiser ? 140e3 : big ? 110e3 : 85e3, mag: cruiser ? 64 : big ? 32 : 18,
-        pd: cruiser ? 5 : big ? 3 : 2, laser: !cruiser, fireT: 8 + i, len: cruiser ? 90 : undefined,
+      { score: cruiser ? 2500 : big ? 1000 : 500, salvo: cruiser ? 6 : big ? 4 : 3, salvoT: cruiser ? 14 : 16,
+        fireRange: 480e3, prefer: null, press: true, closeRange: cruiser ? 95e3 : big ? 70e3 : 50e3, mag: cruiser ? 64 : big ? 32 : 18,
+        pd: cruiser ? 5 : big ? 3 : 2, laser: true, fireT: 8 + i, len: cruiser ? 90 : undefined,
         arrive: { mode: 'meet', obj: bay, stand: 60e3, vmax: 2400, via: 'TITAN', departT: tB + 900 }, acc: cruiser ? 2.5 : 4 }));
   });
   // Wave 3 Boss: KR-01 Buryia Heavy Soviet Orbital Dreadnought trailing the main attack fleet; held in outer staging
@@ -2697,6 +2739,12 @@ function ringSensorStep(dt) {
       if (oneWay > 1) F.rwr.push({ t, kind, r, u, painted, strength: oneWay, cover, lastPaint: painted ? simT : (t.rwrPaint && t.rwrPaint[kind]) || -1e9 });
       if (painted) { t.rwrPaint = t.rwrPaint || {}; t.rwrPaint[kind] = simT; }
       if (!painted) continue;
+      const heard = oneWay > 1, now = performance.now();
+      if (heard && kind !== 'track' && WARPS[warpIdx] <= 10 && now - (t.rwrSnd || 0) > 400) {
+        t.rwrSnd = now;
+        const Rd = S.R0*Math.pow(shipRCS(u)*aF, 0.25);
+        sfx.rwrChirp(kind, oneWay, (Rd/r)**4*Math.exp(-2*tau)*cover*cover >= 1);
+      }
       const Rdet = S.R0*Math.pow(shipRCS(u)*aF, 0.25), snr = (Rdet/r)**4*Math.exp(-2*tau)*cover*cover;
       F.radNow = Math.max(F.radNow, snr);
       if (snr >= 1) { got[cl] = (got[cl] || 0) + (kind === 'track' ? RSENS.Qtrack*Math.min(snr, 3)*dt : RSENS.Qpaint*Math.min(snr, 3)); C.by = t.name; }
@@ -8018,6 +8066,34 @@ const sfx = {
   rcsPuff() { if (actx) burst(intBus, 'bandpass', 1500, 1.2, 0.06, 0.03); },
   click() { if (actx) burst(intBus, 'bandpass', 2800, 2, 0.02, 0.35); },
   // Detection alarm: a two-tone klaxon, four cycles
+  // RWR, in the headset. A paint: two short pips (search radars 1.3 kHz, guard ships 1.7 kHz), harsher and with a
+  // third pip when the paint added to the track. Quieter the weaker the signal.
+  rwrChirp(kind, strength, counted) {
+    if (!actx) return;
+    const t = actx.currentTime, f = kind === 'guard' ? 1700 : 1300, a = clamp(0.012 + 0.012*Math.log10(strength), 0.008, 0.045)*(counted ? 1.4 : 1);
+    for (let i = 0; i < (counted ? 3 : 2); i++) {
+      const o = actx.createOscillator(); o.type = counted ? 'square' : 'triangle'; o.frequency.value = f*(i === 2 ? 1.26 : 1);
+      const g = actx.createGain(), t0 = t + i*0.075;
+      g.gain.setValueAtTime(0.0001, t0); g.gain.exponentialRampToValueAtTime(a, t0 + 0.006); g.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.05);
+      o.connect(g).connect(intBus); o.start(t0); o.stop(t0 + 0.06);
+    }
+  },
+  // The track tone (rising and pulsing faster as the network's track Q builds) and the lock warble (a tracker
+  // holding its beam on the hull); both persistent oscillators, set every frame
+  rwrUpdate(Q, lock) {
+    if (!actx) return;
+    const t = actx.currentTime, R = this._rwr || (this._rwr = (() => {
+      const mk = type => { const o = actx.createOscillator(); o.type = type; const g = actx.createGain(); g.gain.value = 0; o.connect(g).connect(intBus); o.start(); return { o, g }; };
+      return { tone: mk('sine'), warb: mk('square'), ph: 0 };
+    })());
+    const on = Q > 0.05;
+    R.ph += (2 + 10*Q)*(1/60);
+    const pulse = 0.55 + 0.45*Math.sin(2*Math.PI*R.ph);
+    R.tone.o.frequency.setTargetAtTime(380 + 900*Q, t, 0.05);
+    R.tone.g.gain.setTargetAtTime(on ? (0.006 + 0.03*Q)*pulse : 0, t, 0.03);
+    R.warb.o.frequency.setValueAtTime(Math.floor(t*9) % 2 ? 900 : 1350, t);
+    R.warb.g.gain.setTargetAtTime(lock ? 0.022 : 0, t, 0.02);
+  },
   klaxon() {
     if (!actx) return;
     const t = actx.currentTime;
@@ -8144,6 +8220,11 @@ let rcsWasOn = false;
 function audioFrame() {
   if (!actx) return;
   const t = actx.currentTime;
+  // RWR: the network track tone and the tracker lock warble (silent outside the ring mission, paused, or dead)
+  {
+    const live = ringF && !paused && !dead && !(mission && mission.ended);
+    sfx.rwrUpdate(live ? clamp(ringF.Q, 0, 1) : 0, live && ringF.rwr.some(e => e.kind === 'track' && e.painted));
+  }
   const rc = controlState();
   const rcsOn = rcsActive && !!(rc.pitch || rc.yaw || rc.roll || rc.tx || rc.ty || rc.tz);
   if (rcsOn && !rcsWasOn) sfx.rcsPuff();
@@ -8906,7 +8987,7 @@ function buildHangarScene() {
 // holding the same bytes in base64 under "glb" (the published artifact can't serve .glb files, but serves JSON).
 const gltfLoader = new GLTFLoader();
 const dracoLoader = new DRACOLoader();
-dracoLoader.setDecoderPath('https://unpkg.com/three@0.160.0/examples/jsm/libs/draco/gltf/');
+dracoLoader.setDecoderPath('libs/draco/');            // decoder shipped with the game (libs/draco), no CDN needed
 gltfLoader.setDRACOLoader(dracoLoader);
 function loadModel(file, onProgress) {
   if (hangar.files[file]) return hangar.files[file];
