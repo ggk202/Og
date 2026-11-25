@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OG — Cockpit prototype v0.17.2</title>
+<title>OG — Cockpit prototype v0.17.3</title>
 <style>
   html, body { margin:0; height:100%; background:#000; overflow:hidden;
     font-family: ui-monospace, Menlo, Consolas, monospace; color:#cfd8c0; }
@@ -97,7 +97,7 @@
 </head>
 <body>
 <canvas id="gl"></canvas>
-<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.17.2</span></div>
+<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.17.3</span></div>
 <div id="hangar"><div class="load" id="hangarLoad">LOADING SHIP</div>
   <div class="hint">DRAG TO ORBIT · WHEEL TO ZOOM · CLICK A HARDPOINT TO CHOOSE ITS MODULE</div>
   <div class="panel"><h2>HANGAR</h2><div class="sub" id="hullName"></div><div id="hullSel"></div><div class="sub">LOADOUT · SELECT A HARDPOINT, THEN A MODULE</div>
@@ -10313,6 +10313,7 @@ function launch() {
   if (!started) started = true;
   if (scenario === 'sandbox') { mission = null; log('ORBIT NOMINAL · LEO 400 KM · PROGRADE'); log('GROUND LINK ESTABLISHED'); }
   else startMission();
+  extPreload();                                      // exterior view and booster models ready before they are first needed
   const fit = Object.keys(HARDPOINTS).filter(modAt).map(slotLabel);
   if (fit.length > 8) {                              // larger hulls: counts per module type
     const n = {}; for (const sl of Object.keys(HARDPOINTS)) { const m = modAt(sl); if (m) n[m.short] = (n[m.short] || 0) + 1; }
@@ -12253,33 +12254,48 @@ const ext = { on: false, mode: 0, built: false, yaw: 2.5, pitch: 0.28, dist: 0, 
 const EXT_FAR = 9e5;                                 // far-pass bodies sit no further than this, scaled to their true angular size
 function extTex(w, h, paint) { const c = document.createElement('canvas'); c.width = w; c.height = h; paint(c.getContext('2d'), w, h);
   const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t; }
-// Cheap value noise for the planet maps
-function extNoise(seed) {
-  const R = rng32(seed), G = new Float32Array(64*32).map(() => R());
-  const at = (x, y) => G[((y & 31)*64) + (x & 63)];
-  return (u, v) => { let s = 0, a = 1, f = 1, n = 0;
-    for (let o = 0; o < 4; o++) { const x = u*8*f, y = v*4*f, xi = Math.floor(x), yi = Math.floor(y), fx = x - xi, fy = y - yi;
-      const sx = fx*fx*(3 - 2*fx), sy = fy*fy*(3 - 2*fy);
-      const l = at(xi, yi)*(1 - sx) + at(xi + 1, yi)*sx, r = at(xi, yi + 1)*(1 - sx) + at(xi + 1, yi + 1)*sx;
-      s += a*(l*(1 - sy) + r*sy); n += a; a *= 0.5; f *= 2; }
-    return s/n; };
-}
-function extPlanetTex(kind) {
-  return extTex(512, 256, (g, w, h) => {
-    const img = g.createImageData(w, h), N = extNoise({ earth: 3, moon: 7, mars: 11, titan: 13 }[kind] || 1), N2 = extNoise(29);
-    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
-      const u = x/w, v = y/h, n = N(u, v), m = N2(u*1.7, v*1.7), lat = Math.abs(v - 0.5)*2; let r, gg, b;
-      if (kind === 'earth') {
-        const land = n > 0.53;
-        [r, gg, b] = land ? (lat > 0.82 ? [235, 240, 245] : [70 + 90*m, 95 + 60*m, 50 + 30*m]) : [18, 50 + 25*m, 110 + 40*m];
-        const cloud = clamp((N2(u*3.1 + 0.3, v*3.1) - 0.52)*4, 0, 0.85); r += (245 - r)*cloud; gg += (248 - gg)*cloud; b += (250 - b)*cloud;
-      } else if (kind === 'moon') { const c = 110 + 90*n - 40*(m > 0.6 ? 1 : 0); r = gg = b = c;
-      } else if (kind === 'mars') { [r, gg, b] = [150 + 70*n, 70 + 35*n, 40 + 20*n]; if (lat > 0.9) [r, gg, b] = [235, 230, 225]; if (m > 0.62) { r *= 0.7; gg *= 0.7; b *= 0.7; }
-      } else { [r, gg, b] = [200 + 30*n, 140 + 30*n, 60 + 20*n]; }   // Titan: orange haze
-      const i = (y*w + x)*4; img.data[i] = r; img.data[i + 1] = gg; img.data[i + 2] = b; img.data[i + 3] = 255;
-    }
-    g.putImageData(img, 0, 0);
-  });
+// Planet surfaces computed per pixel from 3D noise on the unit sphere (object space, +Y the pole), so they stay sharp
+// from low orbit: no texture is fine enough at 400 km
+const EXT_PLANET_GLSL = `
+varying vec3 vOP;
+float h3(vec3 p) { p = fract(p*0.3183099 + 0.1); p *= 17.0; return fract(p.x*p.y*p.z*(p.x + p.y + p.z)); }
+float n3(vec3 x) { vec3 i = floor(x), f = fract(x); f = f*f*(3.0 - 2.0*f);
+  return mix(mix(mix(h3(i), h3(i + vec3(1,0,0)), f.x), mix(h3(i + vec3(0,1,0)), h3(i + vec3(1,1,0)), f.x), f.y),
+             mix(mix(h3(i + vec3(0,0,1)), h3(i + vec3(1,0,1)), f.x), mix(h3(i + vec3(0,1,1)), h3(i + vec3(1,1,1)), f.x), f.y), f.z); }
+float fbm(vec3 p, int oct) { float s = 0.0, a = 0.5; for (int o = 0; o < 14; o++) { if (o >= oct) break; s += a*n3(p); p = p*2.03 + 17.1; a *= 0.5; } return s; }
+vec3 planetColor(vec3 q, int kind) {
+  vec3 p = normalize(q); float lat = abs(p.y);
+  if (kind == 0) {                                     // Earth: oceans, land by latitude, ice caps, clouds
+    float n = fbm(p*2.2, 13) + 0.06*(1.0 - lat*1.3), m = fbm(p*9.0 + 5.0, 6);
+    vec3 sea = mix(vec3(0.02, 0.07, 0.20), vec3(0.03, 0.16, 0.30), smoothstep(0.43, 0.50, n));
+    vec3 green = mix(vec3(0.10, 0.20, 0.07), vec3(0.24, 0.30, 0.12), m), desert = mix(vec3(0.55, 0.45, 0.30), vec3(0.70, 0.58, 0.40), m);
+    vec3 land = mix(green, desert, smoothstep(0.45, 0.6, m)*(1.0 - smoothstep(0.3, 0.5, lat))*smoothstep(0.05, 0.2, lat));
+    land = mix(land, vec3(0.92, 0.94, 0.96), smoothstep(0.72, 0.78, lat));
+    vec3 c = mix(sea, land, smoothstep(0.505, 0.515, n));
+    c = mix(c, vec3(0.92, 0.94, 0.97), smoothstep(0.86, 0.9, lat));
+    float cl = smoothstep(0.50, 0.68, fbm(p*3.1 + vec3(3.0), 12))*(0.55 + 0.45*smoothstep(0.35, 0.6, fbm(p*14.0, 5)));
+    return mix(c, vec3(0.95), cl*0.9);
+  }
+  if (kind == 1) {                                     // Moon: highlands and maria, fine craters of noise
+    float n = fbm(p*2.0, 12), mar = smoothstep(0.50, 0.46, fbm(p*1.3 + 9.0, 5));
+    return vec3(0.42 + 0.35*n)*(1.0 - 0.45*mar);
+  }
+  if (kind == 2) {                                     // Mars: rust, darker albedo features, polar caps
+    float n = fbm(p*2.4, 13), d = smoothstep(0.52, 0.6, fbm(p*1.7 + 2.0, 6));
+    vec3 c = mix(vec3(0.62, 0.30, 0.15), vec3(0.78, 0.45, 0.25), n)*(1.0 - 0.35*d);
+    return mix(c, vec3(0.93, 0.91, 0.88), smoothstep(0.90, 0.93, lat + 0.03*n));
+  }
+  float n = fbm(p*3.0, 8);                             // Titan: orange haze with faint banding
+  return mix(vec3(0.70, 0.48, 0.20), vec3(0.85, 0.62, 0.30), 0.6*n + 0.4*(0.5 + 0.5*sin(p.y*9.0)));
+}`;
+function extPlanetMat(kind, rough = 0.95) {
+  const m = new THREE.MeshStandardMaterial({ roughness: rough, metalness: 0 }), K = { earth: 0, moon: 1, mars: 2, titan: 3 }[kind];
+  m.onBeforeCompile = sh => {
+    sh.vertexShader = 'varying vec3 vOP;\n' + sh.vertexShader.replace('#include <begin_vertex>', '#include <begin_vertex>\n vOP = position;');
+    sh.fragmentShader = EXT_PLANET_GLSL + '\n' + sh.fragmentShader.replace('#include <map_fragment>', `diffuseColor.rgb = planetColor(vOP, ${K});`);
+  };
+  m.customProgramCacheKey = () => 'planet' + K;
+  return m;
 }
 function extBuild() {
   ext.built = true;
@@ -12293,15 +12309,15 @@ function extBuild() {
   ext.farSun = new THREE.DirectionalLight(0xfff4e6, 2.6); ext.far.add(ext.farSun, ext.farSun.target);
   ext.far.add(new THREE.AmbientLight(0x202830, 0.12));
   // Bodies
-  const sph = (tex, rough = 1) => new THREE.Mesh(new THREE.SphereGeometry(1, 96, 48), new THREE.MeshStandardMaterial({ map: tex, roughness: rough, metalness: 0 }));
+  const sph = (tex, rough = 1) => new THREE.Mesh(new THREE.SphereGeometry(1, 192, 96), tex.isMaterial ? tex : new THREE.MeshStandardMaterial({ map: tex, roughness: rough, metalness: 0 }));
   ext.bodies = {
-    EARTH: sph(extPlanetTex('earth'), 0.8), MOON: sph(extPlanetTex('moon')), MARS: sph(extPlanetTex('mars')),
+    EARTH: sph(extPlanetMat('earth', 0.8)), MOON: sph(extPlanetMat('moon')), MARS: sph(extPlanetMat('mars')),
     SATURN: sph(extTex(8, 256, (g) => { for (let y = 0; y < 256; y++) { const b = 0.5 + 0.5*Math.sin(y*0.21)*Math.sin(y*0.047 + 1);
       g.fillStyle = `rgb(${200 + 30*b | 0},${170 + 30*b | 0},${120 + 25*b | 0})`; g.fillRect(0, y, 8, 1); } })),
-    TITAN: sph(extPlanetTex('titan')),
+    TITAN: sph(extPlanetMat('titan')),
   };
   for (const m of Object.values(ext.bodies)) ext.far.add(m);
-  ext.earthAtm = new THREE.Mesh(new THREE.SphereGeometry(1.025, 64, 32), new THREE.MeshBasicMaterial({ color: 0x4a8cff, transparent: true, opacity: 0.18, side: THREE.BackSide, blending: THREE.AdditiveBlending, depthWrite: false }));
+  ext.earthAtm = new THREE.Mesh(new THREE.SphereGeometry(1.008, 96, 48), new THREE.MeshBasicMaterial({ color: 0x8cbcff, transparent: true, opacity: 0.38, side: THREE.BackSide, blending: THREE.AdditiveBlending, depthWrite: false }));
   ext.bodies.EARTH.add(ext.earthAtm);
   const rc = extTex(512, 4, (g) => { for (let x = 0; x < 512; x++) { const r = 74.5 + (136.78 - 74.5)*x/511;
     let o = r < 92 ? 0.12 : r < 117.5 ? 0.85 : r < 122.2 ? 0.06 : 0.5; if (r > 133.4 && r < 133.75) o = 0.05;
@@ -12591,9 +12607,15 @@ function extRender(dt) {
     const hp = new THREE.Vector3(clamp(u.x*20, b.min.x, b.max.x)*0.8, clamp(u.y*20, b.min.y, b.max.y)*0.8, fs.z*L);
     extGlow(hp, 2.5 + Math.random()*1.5, fs.col, 1); extGlow(hp, 7, fs.col, 0.35);
   }
+  // The BS-90 off the ship (before docking, after separation): its model, out to 30 km
+  { const b = boosterTarget(); let shown = false;
+    if (b && ext.boosterFree && dock.state !== 'DOCKED') { const G = dockGeom(b);
+      if (G.bpB.length() < 30e3) { shown = true; ext.boosterFree.position.copy(G.bpB); ext.boosterFree.quaternion.copy(bq).multiply(b.bq); } }
+    if (ext.boosterFree) ext.boosterFree.visible = shown;
+    ext.boosterShown = shown; }
   // Other ships: points of light; KR-01 Buryia drawn from its model when close
   for (const t of targets) {
-    if (t.gone) continue;
+    if (t.gone || t.booster && ext.boosterShown) continue;
     const p = rel(t.x, t.y, t.z), d = p.length();
     if (t.boss && d < 60e3) {
       if (!ext.boss && !ext.bossLoading) { ext.bossLoading = true; loadModel('soviet_dreadnought_boss_lod.glb').then(tp => { ext.boss = tp.clone(true); ext.scene.add(ext.boss); }); }
@@ -12642,6 +12664,21 @@ function extOverlay(bq) {
   g.fillStyle = 'rgba(125,255,154,0.85)';
   g.fillText(`EXTERIOR${ext.mode === 2 ? ' · CHASE ' + (targets[curTarget] ? targets[curTarget].name : '') : ''} · [${k}] NEXT VIEW · DRAG TO TURN · WHEEL TO ZOOM`, 18, 22);
   g.fillText(`HULL ${(hullInt*100).toFixed(0)}% · THRUST ${(thrustFrac*100).toFixed(0)}% · WARP x${WARPS[warpIdx]}${ext.loading ? ' · LOADING SHIP' : ''}`, 18, 40);
+}
+// Load and build everything the exterior view and the docking camera need at launch, so the first [Z] (or the first
+// look at the booster) doesn't wait on a download or a shader compile
+function extPreload() {
+  try {
+    if (typeof document === 'undefined' || !renderer) return;
+    if (!ext.built) extBuild();
+    extLoadShip();
+    if (HULL.dockZ) loadModel(BOOSTER.file).then(t => {
+      if (!ext.boosterFree) { ext.boosterFree = t.clone(true); ext.boosterFree.visible = false; ext.scene.add(ext.boosterFree); }
+    }).catch(() => {});
+    const warm = () => { if (ext.loading || !ext.ship) return setTimeout(warm, 500);
+      setTimeout(() => { try { renderer.compile(ext.scene, ext.cam); renderer.compile(ext.far, ext.farCam); } catch (e) {} }, 200); };
+    warm();
+  } catch (e) { console.warn('exterior preload', e); }
 }
 function extHide() { if (ext.cv) ext.cv.style.display = 'none'; }
 // Input while the exterior view is up: any drag turns the camera, the wheel zooms; nothing reaches the cockpit
