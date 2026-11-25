@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OG — Cockpit prototype v0.17.0</title>
+<title>OG — Cockpit prototype v0.17.1</title>
 <style>
   html, body { margin:0; height:100%; background:#000; overflow:hidden;
     font-family: ui-monospace, Menlo, Consolas, monospace; color:#cfd8c0; }
@@ -97,7 +97,7 @@
 </head>
 <body>
 <canvas id="gl"></canvas>
-<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.17.0</span></div>
+<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.17.1</span></div>
 <div id="hangar"><div class="load" id="hangarLoad">LOADING SHIP</div>
   <div class="hint">DRAG TO ORBIT · WHEEL TO ZOOM · CLICK A HARDPOINT TO CHOOSE ITS MODULE</div>
   <div class="panel"><h2>HANGAR</h2><div class="sub" id="hullName"></div><div id="hullSel"></div><div class="sub">LOADOUT · SELECT A HARDPOINT, THEN A MODULE</div>
@@ -12586,6 +12586,7 @@ function extOverlay(bq) {
     g.fillText(`${t.name} ${fmtDist(d)}`, s[0] + 12, s[1] - 10); placed.push(s);
   }
   for (const o of ordnance) { if (o.dead) continue; const v = new THREE.Vector3(o.x - ship.x, o.y - ship.y, o.z - ship.z).applyQuaternion(bq); const s = proj(v); if (!s || v.length() < 30) continue;
+    if (labelsAt(s)) continue; placed.push(s);
     g.fillStyle = ORD[o.kind] ? ORD[o.kind].color : '#fff'; g.fillText(`${ORD[o.kind] ? ORD[o.kind].name : 'WPN'} ${fmtDist(v.length())}`, s[0] + 8, s[1] + 10); }
   const groups = [];                                   // torpedoes bunched on screen share one label
   for (const tp of torpedoes) { if (tp.dead) continue; const v = new THREE.Vector3(tp.x - ship.x, tp.y - ship.y, tp.z - ship.z).applyQuaternion(bq); const s = proj(v); if (!s) continue;
