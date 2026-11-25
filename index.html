@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OG — Cockpit prototype v0.17.1</title>
+<title>OG — Cockpit prototype v0.17.2</title>
 <style>
   html, body { margin:0; height:100%; background:#000; overflow:hidden;
     font-family: ui-monospace, Menlo, Consolas, monospace; color:#cfd8c0; }
@@ -97,7 +97,7 @@
 </head>
 <body>
 <canvas id="gl"></canvas>
-<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.17.1</span></div>
+<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.17.2</span></div>
 <div id="hangar"><div class="load" id="hangarLoad">LOADING SHIP</div>
   <div class="hint">DRAG TO ORBIT · WHEEL TO ZOOM · CLICK A HARDPOINT TO CHOOSE ITS MODULE</div>
   <div class="panel"><h2>HANGAR</h2><div class="sub" id="hullName"></div><div id="hullSel"></div><div class="sub">LOADOUT · SELECT A HARDPOINT, THEN A MODULE</div>
@@ -4120,8 +4120,12 @@ function physicsStep(h) {
     if (!best) continue;
     const rel = new THREE.Vector3(best.x-mP.x, best.y-mP.y, best.z-mP.z);
     const relV = new THREE.Vector3(best.vx-ship.vx, best.vy-ship.vy, best.vz-ship.vz);
-    const tt = leadTime(rel, relV, PDC_V);
+    let tt = leadTime(rel, relV, PDC_V);
     if (tt === null) continue;
+    // Lead on its thrust as well: a few passes moving the aim point by the torpedo's commanded acceleration
+    const ac = best.cmd ? new THREE.Vector3(...best.cmd) : null;
+    for (let it = 0; ac && it < 3; it++) { const t2 = leadTime(rel.clone().addScaledVector(ac, 0.5*tt*tt), relV, PDC_V); if (t2 === null) break; tt = t2; }
+    if (ac) rel.addScaledVector(ac, 0.5*tt*tt);
     const aim = rel.addScaledVector(relV, tt).normalize()
       .add(new THREE.Vector3(Math.random()-0.5, Math.random()-0.5, Math.random()-0.5)
         .multiplyScalar(PDC_SPREAD*(1 + 4*(1 - damage[m.sys])))).normalize();   // a damaged mount scatters more
@@ -12334,7 +12338,7 @@ function extBuild() {
   const lines = (col, n, op = 1, add = false) => { const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(n*6), 3));
     const l = new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color: col, transparent: true, opacity: op, blending: add ? THREE.AdditiveBlending : THREE.NormalBlending, depthWrite: false }));
     l.frustumCulled = false; ext.scene.add(l); return l; };
-  ext.trailL = lines(0xb0b8c0, 6000, 0.35); ext.tracerL = lines(0xffd27a, 3000, 1, true); ext.eTracerL = lines(0xff8a5a, 3000, 1, true); ext.slugL = lines(0xe8f4ff, 400, 1, true);
+  ext.trailL = lines(0xb0b8c0, 6000, 0.35); ext.tracerL = lines(0xffa040, 6000, 1, true); ext.eTracerL = lines(0xff8a5a, 3000, 1, true); ext.slugL = lines(0xe8f4ff, 400, 1, true);
   // Drive plume: a long additive cone behind the stern
   // Drive plume: a hot core inside a faint halo, both fading toward the tip (cone v runs base 0 -> tip 1)
   const fade = extTex(4, 128, (g) => { const gr = g.createLinearGradient(0, 128, 0, 0); gr.addColorStop(0, '#fff'); gr.addColorStop(0.35, '#888'); gr.addColorStop(1, '#000'); g.fillStyle = gr; g.fillRect(0, 0, 4, 128); });
@@ -12377,6 +12381,8 @@ function extLoadShip() {
     if (HULL !== H) return;
     if (ext.ship) ext.scene.remove(ext.ship);
     const hull = tpl.clone(true); ext.ship = hull; ext.mods = {}; ext.doors = {}; ext.pivots = {};
+    if (!Object.values(HARDPOINTS).some(hp => hp.m)) hull.rotation.y = Math.PI;   // OG-1 file: nose along +Z, body nose is -Z
+    hull.updateMatrixWorld(true);
     for (const [slot, hp] of Object.entries(HARDPOINTS)) {
       const node = hull.getObjectByName(hp.node), mod = modAt(slot); if (!node || !mod) continue;
       const tm = hangar.files[mod.file]; if (!tm) continue;
@@ -12386,6 +12392,7 @@ function extLoadShip() {
         if (HULL.lo && HULL.lo.doors.includes(slot)) { const d = loBayDoors(obj, slot); obj.add(d); ext.doors[slot] = d; }
         node.add(obj); ext.mods[slot] = obj;
         let az = null, el = null; obj.traverse(o => { if (/AzPivot$/.test(o.name)) az = o; if (/ElPivot$/.test(o.name)) el = o; });
+        if (!az && ['pdc', 'interceptor', 'lpd'].includes(mod.role)) [az, el] = extSplitTurret(obj);
         if (az) ext.pivots[slot] = { az, el, az0: az.quaternion.clone(), el0: el ? el.quaternion.clone() : null };
       });
     }
@@ -12394,6 +12401,26 @@ function extLoadShip() {
     const b = new THREE.Box3().setFromObject(hull); ext.box = b;
     if (!ext.dist) ext.dist = 1.6*H.length;
   }).catch(e => { ext.loading = false; console.error('exterior ship failed', e); });
+}
+// A turret modelled as one mesh (OG-1 modules): base (bottom tenth, fixed), head (traverses about the module's Y)
+// and barrels (top 40 %, elevate about a pivot at their foot), split by triangle centroid height
+function extSplitTurret(obj) {
+  let mesh = null; obj.traverse(o => { if (o.isMesh && !mesh) mesh = o; }); if (!mesh) return [null, null];
+  const g0 = mesh.geometry.index ? mesh.geometry.toNonIndexed() : mesh.geometry, P = g0.attributes.position, n = P.count/3;
+  g0.computeBoundingBox(); const top = g0.boundingBox.max.y, y0 = 0.1*top, y1 = 0.6*top;
+  const parts = [[], [], []];
+  for (let t = 0; t < n; t++) { const cy = (P.getY(3*t) + P.getY(3*t + 1) + P.getY(3*t + 2))/3; parts[cy < y0 ? 0 : cy < y1 ? 1 : 2].push(t); }
+  const sub = (tris, dy) => { const g = new THREE.BufferGeometry();
+    for (const [k, a] of Object.entries(g0.attributes)) { const arr = new a.array.constructor(tris.length*3*a.itemSize);
+      tris.forEach((t, i) => arr.set(a.array.subarray(3*t*a.itemSize, 3*(t + 1)*a.itemSize), 3*i*a.itemSize)); g.setAttribute(k, new THREE.BufferAttribute(arr, a.itemSize, a.normalized)); }
+    if (dy) g.translate(0, -dy, 0); return new THREE.Mesh(g, mesh.material); };
+  const base = sub(parts[0]), az = new THREE.Group(), el = new THREE.Group();
+  az.name = 'ExtAzPivot'; el.name = 'ExtElPivot'; el.position.y = y1;
+  az.add(sub(parts[1])); el.add(sub(parts[2], y1)); az.add(el);
+  const host = mesh.parent; base.position.copy(mesh.position); base.quaternion.copy(mesh.quaternion); base.scale.copy(mesh.scale);
+  az.position.copy(mesh.position); az.quaternion.copy(mesh.quaternion); az.scale.copy(mesh.scale);
+  host.remove(mesh); host.add(base, az);
+  return [az, el];
 }
 // LO bays in their real state: a shut bay folds its leaves flat and hides the module
 function extBays() {
@@ -12416,17 +12443,26 @@ function extTurrets(bq) {
     if (l && l.target) return new THREE.Vector3(l.target.x - ship.x, l.target.y - ship.y, l.target.z - ship.z).applyQuaternion(bq).normalize();
     return null;
   };
+  const Y = new THREE.Vector3(0, 1, 0), q = new THREE.Quaternion();
   for (const [slot, P] of Object.entries(ext.pivots)) {
-    const a = aimFor(slot), parent = P.az.parent;
+    const par = P.az.parent; par.updateWorldMatrix(true, true);
+    if (!P.rest) {
+      // Rest pointing, in the traverse parent's frame: from the pivots toward the middle of the barrels
+      const c = new THREE.Box3().setFromObject(P.el || P.az).getCenter(new THREE.Vector3()); par.worldToLocal(c);
+      const r = c.clone().sub(P.az.position), e = P.el ? par.worldToLocal(P.el.getWorldPosition(new THREE.Vector3())) : P.az.position.clone(), re = c.clone().sub(e);
+      const yaw0 = Math.atan2(r.x, r.z), pit0 = Math.atan2(re.y, Math.hypot(re.x, re.z));
+      // the elevation axis (horizontal, across the barrels) in the elevation pivot's parent frame
+      const kP = new THREE.Vector3(Math.sin(yaw0), 0, Math.cos(yaw0)).cross(Y).normalize();
+      let kE = null; if (P.el) { const qp = new THREE.Quaternion(), qe = new THREE.Quaternion(); par.getWorldQuaternion(qp); P.el.parent.getWorldQuaternion(qe);
+        kE = kP.clone().applyQuaternion(qp).applyQuaternion(qe.invert()).normalize(); }
+      P.rest = { yaw0, pit0, kE };
+    }
+    const a = aimFor(slot);
     if (!a) { P.az.quaternion.slerp(P.az0, 0.05); if (P.el) P.el.quaternion.slerp(P.el0, 0.05); continue; }
-    // the aim in the az pivot's parent frame: yaw about its Y, then pitch about X
-    parent.updateWorldMatrix(true, false);
-    const inv = new THREE.Quaternion(); parent.getWorldQuaternion(inv); inv.invert();
-    const l = a.clone().applyQuaternion(inv);       // ship model has no rotation: world == body here
-    const yaw = Math.atan2(-l.x, -l.z), pit = Math.atan2(l.y, Math.hypot(l.x, l.z));
-    const qa = P.az0.clone().multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw));
-    P.az.quaternion.slerp(qa, 0.25);
-    if (P.el) P.el.quaternion.slerp(P.el0.clone().multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), clamp(pit, -0.2, 1.4))), 0.25);
+    par.getWorldQuaternion(q); const l = a.clone().applyQuaternion(q.invert());   // the scene is the body frame
+    const yaw = Math.atan2(l.x, l.z), pit = Math.atan2(l.y, Math.hypot(l.x, l.z));
+    P.az.quaternion.slerp(new THREE.Quaternion().setFromAxisAngle(Y, yaw - P.rest.yaw0).multiply(P.az0), 0.3);
+    if (P.el) P.el.quaternion.slerp(new THREE.Quaternion().setFromAxisAngle(P.rest.kE, clamp(pit, -0.15, 1.5) - P.rest.pit0).multiply(P.el0), 0.3);
   }
 }
 function extRender(dt) {
@@ -12530,7 +12566,15 @@ function extRender(dt) {
       const v = new THREE.Vector3(t.vx - ship.vx, t.vy - ship.vy, t.vz - ship.vz).applyQuaternion(bq).multiplyScalar(seg);
       arr.set([p.x, p.y, p.z, p.x - v.x, p.y - v.y, p.z - v.z], n*6); n++; }
     L.geometry.setDrawRange(0, n*2); L.geometry.attributes.position.needsUpdate = true; };
-  streaks(tracers, ext.tracerL, 2990, 0.012); streaks(eTracers, ext.eTracerL, 2990, 0.012); streaks(projectiles, ext.slugL, 390, 0.004);
+  // Own guns: each simulated round stands for four (the sim fires 8 a second per mount); the extra streaks ride the
+  // same line, spaced a quarter of a firing interval apart, so the stream looks as dense as a gatling's
+  { const arr = ext.tracerL.geometry.attributes.position.array; let n = 0; const dtR = 1/(4*PDC_RATE);
+    for (const t of tracers) { if (t.dead || n >= 5990) continue; const v = new THREE.Vector3(t.vx - ship.vx, t.vy - ship.vy, t.vz - ship.vz).applyQuaternion(bq);
+      const p0 = rel(t.x, t.y, t.z); if (p0.lengthSq() > 2.5e7) continue;
+      for (let k = 0; k < 4 && n < 5990; k++) { if (k*dtR > t.age) break; const p = p0.clone().addScaledVector(v, -k*dtR);
+        arr.set([p.x, p.y, p.z, p.x - v.x*0.016, p.y - v.y*0.016, p.z - v.z*0.016], n*6); n++;
+        if (k === 0) extGlow(p, Math.max(0.8, p.distanceTo(ext.cam.position)*0.006), 0xff9a30, 0.9); } }
+    ext.tracerL.geometry.setDrawRange(0, n*2); ext.tracerL.geometry.attributes.position.needsUpdate = true; } streaks(eTracers, ext.eTracerL, 2990, 0.012); streaks(projectiles, ext.slugL, 390, 0.004);
   // Flashes (hits, kills)
   for (const f of flashes) { const age = simT - f.t0; if (age > f.dur) continue; const p = rel(f.x + f.vx*age, f.y + f.vy*age, f.z + f.vz*age), d = p.length();
     const k = 1 - age/f.dur; extGlow(p, Math.max(8, d*0.02)*(f.kind === 'kill' ? 3 : 1)*(0.5 + k), f.kind === 'kill' ? 0xffd090 : 0xffffff, k); }
