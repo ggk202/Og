@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OG — Cockpit prototype v0.17.3</title>
+<title>OG — Cockpit prototype v0.17.4</title>
 <style>
   html, body { margin:0; height:100%; background:#000; overflow:hidden;
     font-family: ui-monospace, Menlo, Consolas, monospace; color:#cfd8c0; }
@@ -97,7 +97,7 @@
 </head>
 <body>
 <canvas id="gl"></canvas>
-<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.17.3</span></div>
+<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.17.4</span></div>
 <div id="hangar"><div class="load" id="hangarLoad">LOADING SHIP</div>
   <div class="hint">DRAG TO ORBIT · WHEEL TO ZOOM · CLICK A HARDPOINT TO CHOOSE ITS MODULE</div>
   <div class="panel"><h2>HANGAR</h2><div class="sub" id="hullName"></div><div id="hullSel"></div><div class="sub">LOADOUT · SELECT A HARDPOINT, THEN A MODULE</div>
@@ -12438,6 +12438,40 @@ function extSplitTurret(obj) {
   host.remove(mesh); host.add(base, az);
   return [az, el];
 }
+// Radiators glow with the heat they shed: flux per square metre (radiated power over the working area) against the
+// flux at the hull's temperature limit, dull red when warm to orange at the limit. Stowed panels shed nothing; a
+// droplet radiator whose sheet is cut for a hard burn goes dark. (Real panels at 300-400 K glow only in the IR:
+// this is the thermal picture, scaled to be seen.)
+const EXT_RAD_MAT = /Radiator_Panel|Radiator_Carbon|TEX_Radiators|LDR_Droplet/i;
+function extRadiators() {
+  if (ext.radShip !== ext.ship || ext.radN !== Object.keys(ext.mods).length) {
+    ext.radShip = ext.ship; ext.radN = Object.keys(ext.mods).length; ext.radMats = [];
+    const grab = (root, slot) => root.traverse(o => {
+      if (!o.isMesh || o.userData.radSlot !== undefined) return;
+      const ms = Array.isArray(o.material) ? o.material : [o.material]; let hit = false;
+      const out = ms.map(m => { if (!EXT_RAD_MAT.test(m.name || '')) return m; hit = true;
+        const c = m.clone(); c.emissive = new THREE.Color(0); c.emissiveIntensity = 0; c.emissiveMap = null; c.needsUpdate = true;
+        ext.radMats.push({ m: c, slot, col: c.color.clone(), env: c.envMapIntensity ?? 1, met: c.metalness ?? 0 }); return c; });
+      if (hit) { o.material = Array.isArray(o.material) ? out : out[0]; o.userData.radSlot = slot; }
+    });
+    for (const [slot, obj] of Object.entries(ext.mods)) if (modAt(slot) && modAt(slot).role === 'radiator') grab(obj, slot);
+    grab(ext.ship, null);                               // radiators built into the hull (OG-1)
+  }
+  if (!ext.radMats.length) return;
+  const A = radAreaEff(), flux = radDeployed && A > 0 ? Math.max(0, telem.qout)/A : 0;
+  const ref = THERM.eps*THERM.sigma*(Math.pow(THERM.tMax, 4) - Math.pow(THERM.tSpace, 4));
+  const g = clamp(flux/ref, 0, 1.2);
+  for (const r of ext.radMats) {
+    const st = r.slot && modAt(r.slot) ? modAt(r.slot).stats || {} : {};
+    const k = (r.slot && (damage[r.slot] ?? 1) <= 0) || (st.ldr && ldrCut) ? 0 : g;
+    const u = clamp(k, 0, 1);
+    r.m.emissive.setRGB(0.55 + 0.45*u, 0.02 + 0.30*u*u, 0.04*u*u);          // deep red, warming to orange at the limit
+    // near idle (about 0.3 of the limit flux) a faint warmth; from there the panel's own light takes over from the sun's
+    const w = clamp((u - 0.25)/0.5, 0, 1), hot = w*w*(3 - 2*w);
+    r.m.emissiveIntensity = 1.9*Math.pow(k, 2.5);
+    r.m.color.copy(r.col).multiplyScalar(1 - 0.85*hot); r.m.envMapIntensity = r.env*(1 - 0.9*hot); r.m.metalness = r.met*(1 - 0.9*hot);
+  }
+}
 // LO bays in their real state: a shut bay folds its leaves flat and hides the module
 function extBays() {
   if (!HULL.lo) return;
@@ -12531,7 +12565,7 @@ function extRender(dt) {
     ext.elev.geometry.setAttribute('position', new THREE.Float32BufferAttribute(arr, 3)); ext.elev.visible = arr.length > 0; }
   // The ship: bays, turrets, booster, plume
   if (ext.ship) {
-    extBays(); extTurrets(bq);
+    extBays(); extTurrets(bq); extRadiators();
     if (ext.booster) ext.booster.visible = dock.state === 'DOCKED';
     const stern = ext.box ? ext.box.max.z : H.length/2, f = thrustFrac;
     ext.plume.visible = f > 0.01;
