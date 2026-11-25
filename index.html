@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OG — Cockpit prototype v0.16.2</title>
+<title>OG — Cockpit prototype v0.16.3</title>
 <style>
   html, body { margin:0; height:100%; background:#000; overflow:hidden;
     font-family: ui-monospace, Menlo, Consolas, monospace; color:#cfd8c0; }
@@ -97,7 +97,7 @@
 </head>
 <body>
 <canvas id="gl"></canvas>
-<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.16.2</span></div>
+<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.16.3</span></div>
 <div id="hangar"><div class="load" id="hangarLoad">LOADING SHIP</div>
   <div class="hint">DRAG TO ORBIT · WHEEL TO ZOOM · CLICK A HARDPOINT TO CHOOSE ITS MODULE</div>
   <div class="panel"><h2>HANGAR</h2><div class="sub" id="hullName"></div><div id="hullSel"></div><div class="sub">LOADOUT · SELECT A HARDPOINT, THEN A MODULE</div>
@@ -410,6 +410,8 @@ const saveLoadout = () => { try { localStorage.setItem(LOADOUT_KEY, JSON.stringi
 const modAt = slot => MODULE_CATALOG[loadout[slot]] || null;
 const slotsWithRole = role => Object.keys(HARDPOINTS).filter(s => modAt(s) && modAt(s).role === role);
 const roleSlot = role => slotsWithRole(role)[0] || null;
+// The see-through view needs the geodesic EW suite's stitched telescope cameras (the CS-17's bow module)
+const hasDas = () => Object.keys(HARDPOINTS).some(s => loadout[s] === 'mod_geodesic_ew_emitter');
 const hasRole = role => !!roleSlot(role);
 const slotLabel = slot => `${modAt(slot) ? modAt(slot).short : 'EMPTY'} ${HARDPOINTS[slot].tag}`;
 // Module-file point -> body axes, through its hardpoint
@@ -950,7 +952,7 @@ const ewOut = () => !HULL.lo || (lo.ew && !ewMoving());              // the suit
 const ewExposed = () => !!HULL.lo && (lo.ew || ewMoving());          // it shows on radar
 const baysExposed = () => !!HULL.lo && (lo.bays || bayMoving());
 const bayShut = sl => !!HULL.lo && HULL.lo.bays.includes(sl) && (!lo.bays || bayMoving());
-function loReset() { lo.ew = true; lo.bays = !HULL.lo; lo.ewT = lo.bayT = -1e9; }
+function loReset() { lo.ew = true; lo.bays = !HULL.lo; lo.ewT = lo.bayT = -1e9; if (typeof das !== 'undefined') das.on = false; }
 let radDeployed = true, rcsStab = true, laserArmed = false, guardOpen = false, brownout = false;
 let lampTestT = 0;   // seconds of lamp test remaining
 let keyBuf = '';     // keypad entry buffer, shown on the COMMS page
@@ -8340,7 +8342,9 @@ function onAction(id) {
       sfx.click(); sfx.dockMotors(ew ? HULL.lo.ewTransit : HULL.lo.bayTransit);   // actuators
       break;
     }
-    case 'toggleDas': das.on = !das.on; sfx.click(); log(das.on ? 'EW SEE-THROUGH ON' : 'EW SEE-THROUGH OFF'); break;
+    case 'toggleDas':
+      if (!hasDas()) { das.on = false; log('NO DAS · NEEDS THE GEODESIC EW SUITE'); break; }
+      das.on = !das.on; sfx.click(); log(das.on ? 'EW SEE-THROUGH ON' : 'EW SEE-THROUGH OFF'); break;
     case 'cycleSub': cycleBossSub((held.has('ShiftLeft') || held.has('ShiftRight')) ? -1 : 1); break;
     case 'cycleRange': rangeIdx = (rangeIdx+1) % RANGES.length; break;
     case 'guardMaster': masterGuardOpen = !masterGuardOpen; sfx.click(); break;
@@ -12261,7 +12265,7 @@ function frame(now) {
   updateBook(dt);
   audioFrame();
   renderer.render(scene, camera);
-  if (das.on && started && !uiOverlay && !dead) dasRender(); else dasHide();
+  if (das.on && hasDas() && started && !uiOverlay && !dead) dasRender(); else dasHide();
 }
 updateDisplays();
 buildTable();
