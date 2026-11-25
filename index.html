@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>OG — Cockpit prototype v0.16.3</title>
+<title>OG — Cockpit prototype v0.17.0</title>
 <style>
   html, body { margin:0; height:100%; background:#000; overflow:hidden;
     font-family: ui-monospace, Menlo, Consolas, monospace; color:#cfd8c0; }
@@ -97,7 +97,7 @@
 </head>
 <body>
 <canvas id="gl"></canvas>
-<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.16.3</span></div>
+<div id="start">CLICK TO START<small>enables audio · ESC for controls · P pause</small><span id="ver">v0.17.0</span></div>
 <div id="hangar"><div class="load" id="hangarLoad">LOADING SHIP</div>
   <div class="hint">DRAG TO ORBIT · WHEEL TO ZOOM · CLICK A HARDPOINT TO CHOOSE ITS MODULE</div>
   <div class="panel"><h2>HANGAR</h2><div class="sub" id="hullName"></div><div id="hullSel"></div><div class="sub">LOADOUT · SELECT A HARDPOINT, THEN A MODULE</div>
@@ -878,6 +878,7 @@ const ACTIONS = [
   { id:'cycleTarget',label:'Cycle target',             def:'KeyT', edge:true },
   { id:'cycleSub',   label:'Cycle boss subsystem',     def:'KeyU', edge:true },
   { id:'toggleDas',  label:'See-through EW view (toggle)', def:'KeyO', edge:true },
+  { id:'extView',    label:'Exterior view (cycle)',    def:'KeyZ', edge:true },
   { id:'toggleEw',   label:'EW suite extend/stow (LO)', def:'BracketLeft', edge:true },
   { id:'toggleBays', label:'Turret bay doors (LO)',     def:'BracketRight', edge:true },
   { id:'cycleRange', label:'Tactical range scale',     def:'KeyM', edge:true },
@@ -8342,6 +8343,9 @@ function onAction(id) {
       sfx.click(); sfx.dockMotors(ew ? HULL.lo.ewTransit : HULL.lo.bayTransit);   // actuators
       break;
     }
+    case 'extView': ext.mode = (ext.mode + 1) % 3; ext.on = ext.mode > 0; sfx.click();
+      if (ext.mode === 2 && !targets[curTarget]) { ext.mode = 0; ext.on = false; }
+      if (!ext.on) extHide(); break;
     case 'toggleDas':
       if (!hasDas()) { das.on = false; log('NO DAS · NEEDS THE GEODESIC EW SUITE'); break; }
       das.on = !das.on; sfx.click(); log(das.on ? 'EW SEE-THROUGH ON' : 'EW SEE-THROUGH OFF'); break;
@@ -12231,6 +12235,388 @@ function dasOverlay(bq) {
 }
 function dasHide() { if (das.cv) das.cv.style.display = 'none'; }
 
+/* ================= EXTERIOR VIEW =================
+   [Z] cycles: cockpit -> exterior (orbit camera: drag to turn, wheel to zoom) -> exterior chase toward the current
+   target -> cockpit. The ship flies on as usual; the scene is drawn in the ship's body frame with the ship at the
+   origin. Near pass: the fitted ship (hull and modules as in the hangar, LO bays and the docked BS-90 in their real
+   state, turrets tracking), the drive plume, ordnance with motor flames and trails, gun tracers, rail slugs, hit
+   flashes, and laser energy where it lands (beams themselves are invisible in vacuum: only the hot spot on the
+   target and a glint at the emitter show). Far pass: the Sun, Earth, Moon, Mars (with the elevator), Saturn and its
+   rings, Titan, each placed along its true direction at a capped distance with its true angular size. Other ships
+   are points of light with labels; KR-01 Buryia, the one enemy with a model, is drawn when within 60 km. */
+const ext = { on: false, mode: 0, built: false, yaw: 2.5, pitch: 0.28, dist: 0, drag: null, key: '', ship: null, loading: false,
+  doors: {}, mods: {}, pivots: {}, booster: null, boss: null, trails: new Map(), flashT: new Map() };
+const EXT_FAR = 9e5;                                 // far-pass bodies sit no further than this, scaled to their true angular size
+function extTex(w, h, paint) { const c = document.createElement('canvas'); c.width = w; c.height = h; paint(c.getContext('2d'), w, h);
+  const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; return t; }
+// Cheap value noise for the planet maps
+function extNoise(seed) {
+  const R = rng32(seed), G = new Float32Array(64*32).map(() => R());
+  const at = (x, y) => G[((y & 31)*64) + (x & 63)];
+  return (u, v) => { let s = 0, a = 1, f = 1, n = 0;
+    for (let o = 0; o < 4; o++) { const x = u*8*f, y = v*4*f, xi = Math.floor(x), yi = Math.floor(y), fx = x - xi, fy = y - yi;
+      const sx = fx*fx*(3 - 2*fx), sy = fy*fy*(3 - 2*fy);
+      const l = at(xi, yi)*(1 - sx) + at(xi + 1, yi)*sx, r = at(xi, yi + 1)*(1 - sx) + at(xi + 1, yi + 1)*sx;
+      s += a*(l*(1 - sy) + r*sy); n += a; a *= 0.5; f *= 2; }
+    return s/n; };
+}
+function extPlanetTex(kind) {
+  return extTex(512, 256, (g, w, h) => {
+    const img = g.createImageData(w, h), N = extNoise({ earth: 3, moon: 7, mars: 11, titan: 13 }[kind] || 1), N2 = extNoise(29);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      const u = x/w, v = y/h, n = N(u, v), m = N2(u*1.7, v*1.7), lat = Math.abs(v - 0.5)*2; let r, gg, b;
+      if (kind === 'earth') {
+        const land = n > 0.53;
+        [r, gg, b] = land ? (lat > 0.82 ? [235, 240, 245] : [70 + 90*m, 95 + 60*m, 50 + 30*m]) : [18, 50 + 25*m, 110 + 40*m];
+        const cloud = clamp((N2(u*3.1 + 0.3, v*3.1) - 0.52)*4, 0, 0.85); r += (245 - r)*cloud; gg += (248 - gg)*cloud; b += (250 - b)*cloud;
+      } else if (kind === 'moon') { const c = 110 + 90*n - 40*(m > 0.6 ? 1 : 0); r = gg = b = c;
+      } else if (kind === 'mars') { [r, gg, b] = [150 + 70*n, 70 + 35*n, 40 + 20*n]; if (lat > 0.9) [r, gg, b] = [235, 230, 225]; if (m > 0.62) { r *= 0.7; gg *= 0.7; b *= 0.7; }
+      } else { [r, gg, b] = [200 + 30*n, 140 + 30*n, 60 + 20*n]; }   // Titan: orange haze
+      const i = (y*w + x)*4; img.data[i] = r; img.data[i + 1] = gg; img.data[i + 2] = b; img.data[i + 3] = 255;
+    }
+    g.putImageData(img, 0, 0);
+  });
+}
+function extBuild() {
+  ext.built = true;
+  ext.scene = new THREE.Scene(); ext.far = new THREE.Scene();
+  ext.cam = new THREE.PerspectiveCamera(55, innerWidth/innerHeight, 0.3, 60000);
+  ext.farCam = new THREE.PerspectiveCamera(55, innerWidth/innerHeight, 1, 3e6);
+  ext.sun = new THREE.DirectionalLight(0xfff4e6, 3.0); ext.scene.add(ext.sun, ext.sun.target);
+  ext.scene.add(new THREE.AmbientLight(0x8090a0, 0.18));
+  ext.planetShine = new THREE.DirectionalLight(0x6688aa, 0.0); ext.scene.add(ext.planetShine, ext.planetShine.target);
+  ext.scene.environment = scene.environment;
+  ext.farSun = new THREE.DirectionalLight(0xfff4e6, 2.6); ext.far.add(ext.farSun, ext.farSun.target);
+  ext.far.add(new THREE.AmbientLight(0x202830, 0.12));
+  // Bodies
+  const sph = (tex, rough = 1) => new THREE.Mesh(new THREE.SphereGeometry(1, 96, 48), new THREE.MeshStandardMaterial({ map: tex, roughness: rough, metalness: 0 }));
+  ext.bodies = {
+    EARTH: sph(extPlanetTex('earth'), 0.8), MOON: sph(extPlanetTex('moon')), MARS: sph(extPlanetTex('mars')),
+    SATURN: sph(extTex(8, 256, (g) => { for (let y = 0; y < 256; y++) { const b = 0.5 + 0.5*Math.sin(y*0.21)*Math.sin(y*0.047 + 1);
+      g.fillStyle = `rgb(${200 + 30*b | 0},${170 + 30*b | 0},${120 + 25*b | 0})`; g.fillRect(0, y, 8, 1); } })),
+    TITAN: sph(extPlanetTex('titan')),
+  };
+  for (const m of Object.values(ext.bodies)) ext.far.add(m);
+  ext.earthAtm = new THREE.Mesh(new THREE.SphereGeometry(1.025, 64, 32), new THREE.MeshBasicMaterial({ color: 0x4a8cff, transparent: true, opacity: 0.18, side: THREE.BackSide, blending: THREE.AdditiveBlending, depthWrite: false }));
+  ext.bodies.EARTH.add(ext.earthAtm);
+  const rc = extTex(512, 4, (g) => { for (let x = 0; x < 512; x++) { const r = 74.5 + (136.78 - 74.5)*x/511;
+    let o = r < 92 ? 0.12 : r < 117.5 ? 0.85 : r < 122.2 ? 0.06 : 0.5; if (r > 133.4 && r < 133.75) o = 0.05;
+    g.fillStyle = `rgba(222,214,196,${o.toFixed(3)})`; g.fillRect(x, 0, 1, 4); } });
+  const rgeo = new THREE.RingGeometry(74.5e6, 136.78e6, 256, 1), uv = rgeo.attributes.uv, pp = rgeo.attributes.position;
+  for (let i = 0; i < pp.count; i++) uv.setXY(i, (Math.hypot(pp.getX(i), pp.getY(i)) - 74.5e6)/(136.78e6 - 74.5e6), 0.5);
+  ext.rings = new THREE.Mesh(rgeo, new THREE.MeshBasicMaterial({ map: rc, transparent: true, side: THREE.DoubleSide, depthWrite: false }));
+  ext.far.add(ext.rings);
+  ext.elev = new THREE.LineSegments(new THREE.BufferGeometry(), new THREE.LineBasicMaterial({ color: 0xd8d0c0, transparent: true, opacity: 0.8 }));
+  ext.elev.frustumCulled = false; ext.far.add(ext.elev);
+  ext.sunDisc = new THREE.Sprite(new THREE.SpriteMaterial({ map: extTex(64, 64, (g) => { const gr = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+    gr.addColorStop(0, 'rgba(255,255,250,1)'); gr.addColorStop(0.25, 'rgba(255,245,220,0.9)'); gr.addColorStop(1, 'rgba(255,230,180,0)'); g.fillStyle = gr; g.fillRect(0, 0, 64, 64); }),
+    blending: THREE.AdditiveBlending, depthWrite: false }));
+  ext.far.add(ext.sunDisc);
+  const NS = 2500, sp = new Float32Array(NS*3), SR = rng32(21);
+  for (let i = 0; i < NS; i++) { const v = new THREE.Vector3(SR() - 0.5, SR() - 0.5, SR() - 0.5).normalize().multiplyScalar(2.5e6); sp.set([v.x, v.y, v.z], i*3); }
+  ext.stars = new THREE.Points(new THREE.BufferGeometry(), new THREE.PointsMaterial({ color: 0xffffff, size: 1.3, sizeAttenuation: false }));
+  ext.stars.geometry.setAttribute('position', new THREE.BufferAttribute(sp, 3)); ext.far.add(ext.stars);
+  // Glow sprite shared by flames, flashes, laser hot spots and distant ships
+  ext.glowTex = extTex(64, 64, (g) => { const gr = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+    gr.addColorStop(0, 'rgba(255,255,255,1)'); gr.addColorStop(0.3, 'rgba(255,255,255,0.5)'); gr.addColorStop(1, 'rgba(255,255,255,0)'); g.fillStyle = gr; g.fillRect(0, 0, 64, 64); });
+  ext.sprites = []; ext.spriteN = 0;
+  // Ordnance models (metres; built along -Z): torpedo, missile, interceptor
+  const M = c => new THREE.MeshStandardMaterial({ color: c, roughness: 0.5, metalness: 0.6 });
+  const body = (r, L, col) => { const g = new THREE.Group();
+    const c = new THREE.Mesh(new THREE.CylinderGeometry(r, r, L, 12), M(col)); c.rotation.x = Math.PI/2; g.add(c);
+    const n = new THREE.Mesh(new THREE.ConeGeometry(r, r*3, 12), M(0x9aa0a6)); n.rotation.x = -Math.PI/2; n.position.z = -L/2 - r*1.5; g.add(n);
+    for (let k = 0; k < 4; k++) { const f = new THREE.Mesh(new THREE.BoxGeometry(r*0.15, r*2.2, L*0.18), M(0x60666c)); f.position.z = L*0.38;
+      const piv = new THREE.Group(); piv.rotation.z = k*Math.PI/2; f.position.y = r*1.4; piv.add(f); g.add(piv); }
+    return g; };
+  ext.ordTpl = { torpedo: body(0.35, 4.5, 0xc8ccd0), missile: body(0.17, 2.6, 0xd8d8d0), interceptor: body(0.09, 1.3, 0xd0d8e0), excalibur: body(0.5, 5, 0x9fb8c8), enemy: body(0.38, 4.8, 0x8a7a70) };
+  ext.ordPool = []; ext.ordN = 0;
+  // Line batches: trails, tracers, slugs
+  const lines = (col, n, op = 1, add = false) => { const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.BufferAttribute(new Float32Array(n*6), 3));
+    const l = new THREE.LineSegments(g, new THREE.LineBasicMaterial({ color: col, transparent: true, opacity: op, blending: add ? THREE.AdditiveBlending : THREE.NormalBlending, depthWrite: false }));
+    l.frustumCulled = false; ext.scene.add(l); return l; };
+  ext.trailL = lines(0xb0b8c0, 6000, 0.35); ext.tracerL = lines(0xffd27a, 3000, 1, true); ext.eTracerL = lines(0xff8a5a, 3000, 1, true); ext.slugL = lines(0xe8f4ff, 400, 1, true);
+  // Drive plume: a long additive cone behind the stern
+  // Drive plume: a hot core inside a faint halo, both fading toward the tip (cone v runs base 0 -> tip 1)
+  const fade = extTex(4, 128, (g) => { const gr = g.createLinearGradient(0, 128, 0, 0); gr.addColorStop(0, '#fff'); gr.addColorStop(0.35, '#888'); gr.addColorStop(1, '#000'); g.fillStyle = gr; g.fillRect(0, 0, 4, 128); });
+  fade.colorSpace = THREE.NoColorSpace;
+  const pm = (c, op) => new THREE.MeshBasicMaterial({ color: c, alphaMap: fade, transparent: true, opacity: op, blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide });
+  ext.plume = new THREE.Group();
+  const core = new THREE.Mesh(new THREE.ConeGeometry(0.45, 1, 24, 1, true), pm(0xdfeaff, 0.5)), halo = new THREE.Mesh(new THREE.ConeGeometry(1, 1, 24, 1, true), pm(0x6f9cff, 0.18));
+  for (const m of [core, halo]) { m.rotation.x = -Math.PI/2; ext.plume.add(m); }    // base at the nozzle, tip astern
+  ext.plume.userData.mats = [core.material, halo.material]; ext.scene.add(ext.plume);
+  // Rocks (Nightglass): instanced like the see-through view
+  ext.rockMeshes = [];
+  const rmat = new THREE.MeshStandardMaterial({ color: 0xb8b2a8, roughness: 1, flatShading: true });
+  for (let k = 0; k < 6; k++) {
+    const g = new THREE.IcosahedronGeometry(1, 2), p = g.attributes.position, R = rng32(911 + k*37);
+    const bumps = Array.from({ length: 7 }, () => [new THREE.Vector3(R() - 0.5, R() - 0.5, R() - 0.5).normalize(), 0.12 + 0.25*R()]), v = new THREE.Vector3();
+    for (let i = 0; i < p.count; i++) { v.fromBufferAttribute(p, i); const u = v.clone().normalize(); let f = 1; for (const [d, a] of bumps) f += a*Math.max(0, u.dot(d))**3 - 0.08*a; p.setXYZ(i, v.x*f, v.y*f*(0.75 + 0.2*k/5), v.z*f); }
+    g.computeVertexNormals();
+    const m = new THREE.InstancedMesh(g, rmat, 1400); m.frustumCulled = false; m.count = 0; ext.scene.add(m); ext.rockMeshes.push(m);
+  }
+  // 2D layer: labels and the HUD line
+  ext.cv = document.createElement('canvas'); ext.cv.style.cssText = 'position:fixed;left:0;top:0;width:100vw;height:100vh;pointer-events:none;z-index:5;display:none';
+  document.body.appendChild(ext.cv); ext.g = ext.cv.getContext('2d');
+}
+// Glow sprites from a pool, reset every frame
+function extGlow(pos, size, color, op = 1, scene = ext.scene) {
+  let s = ext.sprites[ext.spriteN];
+  if (!s) { s = new THREE.Sprite(new THREE.SpriteMaterial({ map: ext.glowTex, blending: THREE.AdditiveBlending, depthWrite: false, transparent: true })); ext.sprites.push(s); }
+  if (s.parent !== scene) scene.add(s);
+  ext.spriteN++; s.visible = true; s.position.copy(pos); s.scale.setScalar(size); s.material.color.set(color); s.material.opacity = op;
+  return s;
+}
+// The fitted ship: hull, modules on their hardpoints, LO bay doors, the booster when docked
+function extLoadShip() {
+  const key = HULL.id + '|' + JSON.stringify(loadout);
+  if (ext.key === key || ext.loading) return;
+  ext.loading = true;
+  const H = HULL, fitted = [...new Set(Object.keys(HARDPOINTS).map(modAt).filter(Boolean).map(m => m.file))];
+  Promise.all([loadModel(H.file), ...fitted.map(f => loadModel(f)), H.dockZ ? loadModel(BOOSTER.file) : null]).then(([tpl]) => {
+    ext.loading = false;
+    if (HULL !== H) return;
+    if (ext.ship) ext.scene.remove(ext.ship);
+    const hull = tpl.clone(true); ext.ship = hull; ext.mods = {}; ext.doors = {}; ext.pivots = {};
+    for (const [slot, hp] of Object.entries(HARDPOINTS)) {
+      const node = hull.getObjectByName(hp.node), mod = modAt(slot); if (!node || !mod) continue;
+      const tm = hangar.files[mod.file]; if (!tm) continue;
+      tm.then(t => {
+        const obj = t.clone(true);
+        if (mod.sidePylon && hp.pos[0] < 0) { if (hp.m && hp.m[8] < -0.5) obj.scale.z = -1; else if (hp.m && hp.m[0] > 0.5) obj.scale.x = -1; }
+        if (HULL.lo && HULL.lo.doors.includes(slot)) { const d = loBayDoors(obj, slot); obj.add(d); ext.doors[slot] = d; }
+        node.add(obj); ext.mods[slot] = obj;
+        let az = null, el = null; obj.traverse(o => { if (/AzPivot$/.test(o.name)) az = o; if (/ElPivot$/.test(o.name)) el = o; });
+        if (az) ext.pivots[slot] = { az, el, az0: az.quaternion.clone(), el0: el ? el.quaternion.clone() : null };
+      });
+    }
+    if (H.dockZ) loadModel(BOOSTER.file).then(t => { ext.booster = t.clone(true); ext.booster.position.set(0, 0, H.dockZ); hull.add(ext.booster); });
+    ext.scene.add(hull); ext.key = key;
+    const b = new THREE.Box3().setFromObject(hull); ext.box = b;
+    if (!ext.dist) ext.dist = 1.6*H.length;
+  }).catch(e => { ext.loading = false; console.error('exterior ship failed', e); });
+}
+// LO bays in their real state: a shut bay folds its leaves flat and hides the module
+function extBays() {
+  if (!HULL.lo) return;
+  for (const [slot, d] of Object.entries(ext.doors)) {
+    const ew = slot === HULL.lo.ew, isBay = HULL.lo.bays.includes(slot);
+    if (!ew && !isBay) continue;                        // the VLS doors stay as drawn
+    const st = ew ? lo.ew : lo.bays, moving = ew ? ewMoving() : bayMoving(), T = ew ? HULL.lo.ewTransit : HULL.lo.bayTransit;
+    const since = simT - (ew ? lo.ewT : lo.bayT), f = moving ? (st ? clamp(since/T, 0, 1) : 1 - clamp(since/T, 0, 1)) : (st ? 1 : 0);
+    let k = 0; d.children.forEach(c => { if (c.type === 'Group') { const s = k++ ? 1 : -1; c.rotation.z = -s*115*Math.PI/180*f; } });
+    const mod = ext.mods[slot]; if (mod) mod.children.forEach(c => { if (c !== d) c.visible = f > 0.02; });
+  }
+}
+// Turrets: traverse and elevate toward what they engage (body-frame aim from the mount's last shot or its target)
+function extTurrets(bq) {
+  const aimFor = slot => {
+    const g = PDC_MOUNTS.find(m => m.sys === slot);
+    if (g && g.aimW && simT - (g.lastFire ?? -1e9) < 1.5) return g.aimW.clone().applyQuaternion(bq);
+    const l = LPD_MOUNTS.find(m => m.sys === slot);
+    if (l && l.target) return new THREE.Vector3(l.target.x - ship.x, l.target.y - ship.y, l.target.z - ship.z).applyQuaternion(bq).normalize();
+    return null;
+  };
+  for (const [slot, P] of Object.entries(ext.pivots)) {
+    const a = aimFor(slot), parent = P.az.parent;
+    if (!a) { P.az.quaternion.slerp(P.az0, 0.05); if (P.el) P.el.quaternion.slerp(P.el0, 0.05); continue; }
+    // the aim in the az pivot's parent frame: yaw about its Y, then pitch about X
+    parent.updateWorldMatrix(true, false);
+    const inv = new THREE.Quaternion(); parent.getWorldQuaternion(inv); inv.invert();
+    const l = a.clone().applyQuaternion(inv);       // ship model has no rotation: world == body here
+    const yaw = Math.atan2(-l.x, -l.z), pit = Math.atan2(l.y, Math.hypot(l.x, l.z));
+    const qa = P.az0.clone().multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw));
+    P.az.quaternion.slerp(qa, 0.25);
+    if (P.el) P.el.quaternion.slerp(P.el0.clone().multiply(new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), clamp(pit, -0.2, 1.4))), 0.25);
+  }
+}
+function extRender(dt) {
+  if (!ext.built) extBuild();
+  extLoadShip();
+  ext.spriteN = 0;
+  const bq = toBodyQ(), now = simT, H = HULL;
+  const rel = (x, y, z) => new THREE.Vector3(x - ship.x, y - ship.y, z - ship.z).applyQuaternion(bq);
+  // Camera: orbit about the ship, or a chase line from behind the ship toward the current target
+  const L = H.length, tgt = targets[curTarget];
+  for (const c of [ext.cam, ext.farCam]) { c.aspect = innerWidth/innerHeight; }
+  if (ext.mode === 2 && tgt && !tgt.gone) {
+    const u = rel(tgt.x, tgt.y, tgt.z).normalize(), up = Math.abs(u.y) < 0.95 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0);
+    const side = new THREE.Vector3().crossVectors(u, up).normalize(), upv = new THREE.Vector3().crossVectors(side, u);
+    ext.cam.position.copy(u).multiplyScalar(-ext.dist*0.9).addScaledVector(upv, ext.dist*0.28).addScaledVector(side, ext.dist*0.12);
+    ext.cam.up.copy(upv); ext.cam.lookAt(u.clone().multiplyScalar(L*1.5));
+  } else {
+    const cp = Math.cos(ext.pitch);
+    ext.cam.position.set(ext.dist*cp*Math.sin(ext.yaw), ext.dist*Math.sin(ext.pitch), ext.dist*cp*Math.cos(ext.yaw));
+    ext.cam.up.set(0, 1, 0); ext.cam.lookAt(0, 0, 0);
+  }
+  ext.cam.updateProjectionMatrix();
+  ext.farCam.position.set(0, 0, 0); ext.farCam.quaternion.copy(ext.cam.quaternion); ext.farCam.updateProjectionMatrix();
+  // Light
+  const sunB = SUN_DIR.clone().applyQuaternion(bq);
+  ext.sun.position.copy(sunB).multiplyScalar(1000); ext.farSun.position.copy(sunB).multiplyScalar(1e6);
+  ext.sunDisc.position.copy(sunB).multiplyScalar(2.2e6); ext.sunDisc.scale.setScalar(2.2e6*0.02);
+  ext.stars.quaternion.copy(bq);
+  // Bodies at their true angular size; light reflected from the nearest one fills the shadow side a little
+  const place = (mesh, c, R, pole) => {
+    const v = rel(c[0], c[1], c[2]), d = v.length(), k = Math.min(1, EXT_FAR/d);
+    mesh.position.copy(v).multiplyScalar(k); mesh.scale.setScalar(R*k);
+    mesh.quaternion.copy(bq).multiply(new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), pole));
+    return { v, d, k };
+  };
+  const Z = new THREE.Vector3(0, 0, 1);
+  const pE = place(ext.bodies.EARTH, [0, 0, 0], R_E, Z), mo = moonPos(now), pM = place(ext.bodies.MOON, mo, R_MOON, Z);
+  const mp = marsPos(now), pMa = place(ext.bodies.MARS, mp, R_MARS, MARS_POLE);
+  const sp = satPos(now), pS = place(ext.bodies.SATURN, sp, R_SAT, SAT_POLE), pT = place(ext.bodies.TITAN, titanPos(now), R_TITAN, SAT_POLE);
+  ext.rings.position.copy(ext.bodies.SATURN.position); ext.rings.scale.setScalar(pS.k);
+  ext.rings.quaternion.copy(bq).multiply(new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), SAT_POLE));
+  ext.rings.material.opacity = ringF ? 0.4*clamp(Math.abs((ringF.me || ringCoords(ship)).z)/2500, 0.2, 1) : 0.85;
+  // In a body's shadow the Sun goes out (ship and near scene only; the far pass keeps lighting the planets)
+  const shade = [[pE, R_E], [pM, R_MOON], [pMa, R_MARS], [pS, R_SAT], [pT, R_TITAN]].some(([P, R]) => { const sd = P.v.dot(sunB); return sd > 0 && P.d < 5e8 && Math.sqrt(Math.max(0, P.d*P.d - sd*sd)) < R; });
+  ext.sun.intensity = shade ? 0 : 3.0; ext.sunDisc.visible = !shade;
+  const near = [[pE, R_E, 0x6688bb], [pM, R_MOON, 0x888888], [pMa, R_MARS, 0x996644], [pS, R_SAT, 0xaa9966], [pT, R_TITAN, 0x997744]].sort((a, b) => a[0].d/a[1] - b[0].d/b[1])[0];
+  ext.planetShine.color.set(near[2]); ext.planetShine.intensity = clamp(1.2*near[1]/near[0].d, 0, 0.8); ext.planetShine.position.copy(near[0].v).normalize().multiplyScalar(1000);
+  // Mars elevator, scaled with Mars
+  { const segs = ELEV ? elevLines(now) : [], arr = []; for (const pl of segs) for (let i = 0; i + 1 < pl.length; i++) { const a = rel(...pl[i]).multiplyScalar(pMa.k), b = rel(...pl[i + 1]).multiplyScalar(pMa.k); arr.push(a.x, a.y, a.z, b.x, b.y, b.z); }
+    ext.elev.geometry.setAttribute('position', new THREE.Float32BufferAttribute(arr, 3)); ext.elev.visible = arr.length > 0; }
+  // The ship: bays, turrets, booster, plume
+  if (ext.ship) {
+    extBays(); extTurrets(bq);
+    if (ext.booster) ext.booster.visible = dock.state === 'DOCKED';
+    const stern = ext.box ? ext.box.max.z : H.length/2, f = thrustFrac;
+    ext.plume.visible = f > 0.01;
+    if (f > 0.01) { const len = H.length*(0.6 + 1.6*f)*(0.92 + 0.08*Math.random()), rad = H.length*0.035*(0.7 + 0.5*f);
+      ext.plume.scale.set(rad, rad, len); ext.plume.position.set(0, 0, stern + len/2);
+      ext.plume.userData.mats[0].opacity = 0.3 + 0.35*f; ext.plume.userData.mats[1].opacity = 0.08 + 0.12*f;
+      extGlow(new THREE.Vector3(0, 0, stern + rad*0.5), rad*5, 0xcfe2ff, 0.9); }
+  }
+  // Rocks
+  const counts = [0, 0, 0, 0, 0, 0], m4 = new THREE.Matrix4(), q = new THREE.Quaternion(), qr = new THREE.Quaternion(), pos = new THREE.Vector3(), scl = new THREE.Vector3(), ax = new THREE.Vector3();
+  if (ringF && ringF.near) { const sx = { sp, sv: satVel(now) };
+    for (const r of ringF.near) { const m = ext.rockMeshes[r.shape]; if (counts[r.shape] >= 1400) continue;
+      const p = rockRel(r, now, sx); pos.set(p.x, p.y, p.z).applyQuaternion(bq); if (pos.lengthSq() > 7000*7000) continue;
+      ax.set(r.ax[0], r.ax[1], r.ax[2]).normalize(); qr.setFromAxisAngle(ax, r.rot0 + r.spin*(now - ringF.te)); q.copy(bq).multiply(qr);
+      scl.set(r.R, r.R*r.flat, r.R); m4.compose(pos, q, scl); m.setMatrixAt(counts[r.shape]++, m4); } }
+  ext.rockMeshes.forEach((m, k) => { m.count = counts[k]; m.instanceMatrix.needsUpdate = true; });
+  // Ordnance: player weapons and enemy torpedoes, with flames and trails
+  for (const o of ext.ordPool) o.visible = false; ext.ordN = 0;
+  const trailArr = ext.trailL.geometry.attributes.position.array; let tn = 0;
+  const seen = new Set();
+  const drawOrd = (o, kind, burning) => {
+    const p = rel(o.x, o.y, o.z), d = p.length(); seen.add(o);
+    // trail: world positions, kept a few seconds
+    let tr = ext.trails.get(o); if (!tr) ext.trails.set(o, tr = []);
+    // kept relative to the ship (as it would look from her), so her own orbital speed doesn't smear them
+    if (!tr.length || simT - tr[tr.length - 1][3] > 0.25) { tr.push([o.x - ship.x, o.y - ship.y, o.z - ship.z, simT]); if (tr.length > 40) tr.shift(); }
+    for (let i = 0; i + 1 < tr.length && tn < 5990; i++) { const a = new THREE.Vector3(tr[i][0], tr[i][1], tr[i][2]).applyQuaternion(bq), b = new THREE.Vector3(tr[i + 1][0], tr[i + 1][1], tr[i + 1][2]).applyQuaternion(bq);
+      trailArr.set([a.x, a.y, a.z, b.x, b.y, b.z], tn*6); tn++; }
+    if (d > 40000) { extGlow(p, Math.max(3, d*0.004), burning ? 0xffe0a0 : 0x9aa4b0, 0.9); return; }
+    let mesh = ext.ordPool[ext.ordN]; const tpl = ext.ordTpl[kind] || ext.ordTpl.missile;
+    if (!mesh || mesh.userData.kind !== kind) { if (mesh) ext.scene.remove(mesh); mesh = tpl.clone(true); mesh.userData.kind = kind; ext.ordPool[ext.ordN] = mesh; ext.scene.add(mesh); }
+    ext.ordN++; mesh.visible = true; mesh.position.copy(p);
+    if (d > 600) extGlow(p, d*0.004, kind === 'enemy' ? 0xff9070 : 0xd0e0ff, 0.6);   // too small to see past a few hundred metres
+    const v = new THREE.Vector3(o.vx - ship.vx, o.vy - ship.vy, o.vz - ship.vz).applyQuaternion(bq);
+    if (v.lengthSq() > 1) mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, -1), v.normalize());
+    if (burning) { const back = new THREE.Vector3(0, 0, 1).applyQuaternion(mesh.quaternion), L = kind === 'torpedo' || kind === 'enemy' ? 4.5 : kind === 'missile' ? 2.6 : 1.3;
+      extGlow(p.clone().addScaledVector(back, L*0.7), L*(1.4 + 0.4*Math.random()), 0xffd59a, 1);
+      extGlow(p.clone().addScaledVector(back, L*1.8), L*2.6, 0xff9a50, 0.35); }
+  };
+  for (const o of ordnance) if (!o.dead) drawOrd(o, o.kind, !(o.coldUntil && simT < o.coldUntil) && (o.burn ?? 1) > 0);
+  for (const tp of torpedoes) if (!tp.dead) drawOrd(tp, 'enemy', (tp.burn ?? 1) > 0);
+  for (const k of ext.trails.keys()) if (!seen.has(k)) ext.trails.delete(k);
+  for (let i = tn*6; i < trailArr.length && i < (ext.trailN || 0)*6; i++) trailArr[i] = 0;
+  ext.trailN = tn; ext.trailL.geometry.setDrawRange(0, tn*2); ext.trailL.geometry.attributes.position.needsUpdate = true;
+  // Tracers (each a streak along its velocity relative to the ship) and rail slugs
+  const streaks = (list, L, maxN, seg) => { const arr = L.geometry.attributes.position.array; let n = 0;
+    for (const t of list) { if (t.dead || n >= maxN) continue; const p = rel(t.x, t.y, t.z); if (p.lengthSq() > 2.5e7) continue;
+      const v = new THREE.Vector3(t.vx - ship.vx, t.vy - ship.vy, t.vz - ship.vz).applyQuaternion(bq).multiplyScalar(seg);
+      arr.set([p.x, p.y, p.z, p.x - v.x, p.y - v.y, p.z - v.z], n*6); n++; }
+    L.geometry.setDrawRange(0, n*2); L.geometry.attributes.position.needsUpdate = true; };
+  streaks(tracers, ext.tracerL, 2990, 0.012); streaks(eTracers, ext.eTracerL, 2990, 0.012); streaks(projectiles, ext.slugL, 390, 0.004);
+  // Flashes (hits, kills)
+  for (const f of flashes) { const age = simT - f.t0; if (age > f.dur) continue; const p = rel(f.x + f.vx*age, f.y + f.vy*age, f.z + f.vz*age), d = p.length();
+    const k = 1 - age/f.dur; extGlow(p, Math.max(8, d*0.02)*(f.kind === 'kill' ? 3 : 1)*(0.5 + k), f.kind === 'kill' ? 0xffd090 : 0xffffff, k); }
+  // Laser energy where it lands: the point-defence turrets' hot spot on the torpedo and a glint at the aperture
+  for (const m of LPD_MOUNTS) if (m.target && !m.target.dead) {
+    const p = rel(m.target.x, m.target.y, m.target.z); extGlow(p, Math.max(4, p.length()*0.014)*(0.8 + 0.4*Math.random()), 0xfff6e0, 1);
+    const mod = ext.mods[m.sys]; if (mod) { const w = new THREE.Vector3(); mod.getWorldPosition(w); extGlow(w, 1.6, 0xd8f0ff, 0.7); }
+  }
+  // Enemy lasers on the hull: a red or green hot spot on the side facing the ship that is lasing
+  for (const t of targets) {
+    if (!t.lasing || t.gone || t.side !== 'HOSTILE' || simT - lastLaserHitT > 0.3) continue;
+    const u = rel(t.x, t.y, t.z).normalize(), b = ext.box || new THREE.Box3(new THREE.Vector3(-5, -5, -L/2), new THREE.Vector3(5, 5, L/2));
+    let fs = ext.flashT.get(t); if (!fs) ext.flashT.set(t, fs = { z: (Math.random() - 0.5)*0.7, col: /[AEIOU]/.test(t.name[t.name.length - 1]) ? 0x44ff66 : 0xff3030 });
+    const hp = new THREE.Vector3(clamp(u.x*20, b.min.x, b.max.x)*0.8, clamp(u.y*20, b.min.y, b.max.y)*0.8, fs.z*L);
+    extGlow(hp, 2.5 + Math.random()*1.5, fs.col, 1); extGlow(hp, 7, fs.col, 0.35);
+  }
+  // Other ships: points of light; KR-01 Buryia drawn from its model when close
+  for (const t of targets) {
+    if (t.gone) continue;
+    const p = rel(t.x, t.y, t.z), d = p.length();
+    if (t.boss && d < 60e3) {
+      if (!ext.boss && !ext.bossLoading) { ext.bossLoading = true; loadModel('soviet_dreadnought_boss_lod.glb').then(tp => { ext.boss = tp.clone(true); ext.scene.add(ext.boss); }); }
+      if (ext.boss) { ext.boss.visible = true; ext.boss.position.copy(p);
+        const F = targetFrame(t), mtx = new THREE.Matrix4().makeBasis(F.rt, F.up, F.f.clone().negate());
+        ext.boss.quaternion.copy(bq).multiply(new THREE.Quaternion().setFromRotationMatrix(mtx)); continue; }
+    }
+    if (!isSeen(t) && !t.intel) continue;
+    extGlow(p.clone().multiplyScalar(d > 50000 ? 50000/d : 1), d > 50000 ? 160 : Math.max(4, d*0.0032), t.side === 'FRIENDLY' ? 0x9fdcff : 0xffd8b0, 0.9);
+  }
+  if (ext.boss && !targets.some(t => t.boss && !t.gone && rangeTo(t) < 60e3)) ext.boss.visible = false;
+  for (let i = ext.spriteN; i < ext.sprites.length; i++) ext.sprites[i].visible = false;
+  // Draw
+  renderer.setClearColor(0x000000, 1); renderer.clear();
+  renderer.autoClear = false;
+  renderer.render(ext.far, ext.farCam); renderer.clearDepth(); renderer.render(ext.scene, ext.cam);
+  renderer.autoClear = true;
+  extOverlay(bq);
+}
+function extOverlay(bq) {
+  const cv = ext.cv, W = innerWidth, H = innerHeight; if (cv.width !== W || cv.height !== H) { cv.width = W; cv.height = H; }
+  cv.style.display = 'block'; const g = ext.g; g.clearRect(0, 0, W, H);
+  g.font = '13px monospace'; g.textBaseline = 'middle';
+  const proj = v => { const c = v.clone().project(ext.cam); return c.z < 1 && c.z > -1 && Math.abs(c.x) < 1.05 && Math.abs(c.y) < 1.05 ? [(c.x*0.5 + 0.5)*W, (-c.y*0.5 + 0.5)*H] : null; };
+  const placed = [], labelsAt = s => placed.some(p => Math.hypot(p[0] - s[0], p[1] - s[1]) < 30);
+  for (const t of targets) {
+    if (t.gone || !(isSeen(t) || t.intel || t.side === 'FRIENDLY')) continue;
+    const v = new THREE.Vector3(t.x - ship.x, t.y - ship.y, t.z - ship.z).applyQuaternion(bq), d = v.length();
+    if (d > 3e6 && t !== targets[curTarget]) continue;
+    const s = proj(d > 50000 ? v.multiplyScalar(50000/d) : v); if (!s) continue;
+    const sel = t === targets[curTarget], col = t.side === 'FRIENDLY' ? '#9fdcff' : sel ? '#ffcf6a' : 'rgba(255,220,190,0.75)';
+    g.strokeStyle = col; g.fillStyle = col;
+    if (sel) { g.strokeRect(s[0] - 9, s[1] - 9, 18, 18); }
+    g.fillText(`${t.name} ${fmtDist(d)}`, s[0] + 12, s[1] - 10); placed.push(s);
+  }
+  for (const o of ordnance) { if (o.dead) continue; const v = new THREE.Vector3(o.x - ship.x, o.y - ship.y, o.z - ship.z).applyQuaternion(bq); const s = proj(v); if (!s || v.length() < 30) continue;
+    g.fillStyle = ORD[o.kind] ? ORD[o.kind].color : '#fff'; g.fillText(`${ORD[o.kind] ? ORD[o.kind].name : 'WPN'} ${fmtDist(v.length())}`, s[0] + 8, s[1] + 10); }
+  const groups = [];                                   // torpedoes bunched on screen share one label
+  for (const tp of torpedoes) { if (tp.dead) continue; const v = new THREE.Vector3(tp.x - ship.x, tp.y - ship.y, tp.z - ship.z).applyQuaternion(bq); const s = proj(v); if (!s) continue;
+    const d = v.length(), gp = groups.find(q => Math.hypot(q.s[0] - s[0], q.s[1] - s[1]) < 40);
+    if (gp) { gp.n++; gp.d = Math.min(gp.d, d); } else groups.push({ s, d, n: 1 }); }
+  g.fillStyle = '#ff7060';
+  for (const q of groups) g.fillText(`TORPEDO${q.n > 1 ? ' ×' + q.n : ''} ${fmtDist(q.d)}`, q.s[0] + 8, q.s[1] + 10 + 14*(labelsAt(q.s) ? 1 : 0));
+  const k = codeName(bindings.extView) || 'Z';
+  g.fillStyle = 'rgba(125,255,154,0.85)';
+  g.fillText(`EXTERIOR${ext.mode === 2 ? ' · CHASE ' + (targets[curTarget] ? targets[curTarget].name : '') : ''} · [${k}] NEXT VIEW · DRAG TO TURN · WHEEL TO ZOOM`, 18, 22);
+  g.fillText(`HULL ${(hullInt*100).toFixed(0)}% · THRUST ${(thrustFrac*100).toFixed(0)}% · WARP x${WARPS[warpIdx]}${ext.loading ? ' · LOADING SHIP' : ''}`, 18, 40);
+}
+function extHide() { if (ext.cv) ext.cv.style.display = 'none'; }
+// Input while the exterior view is up: any drag turns the camera, the wheel zooms; nothing reaches the cockpit
+window.addEventListener('pointerdown', e => {
+  if (!ext.on || e.target !== canvas || hangarOpen || uiOverlay) return;
+  ext.drag = { x: e.clientX, y: e.clientY }; e.stopImmediatePropagation(); e.preventDefault();
+}, true);
+window.addEventListener('pointermove', e => {
+  if (!ext.drag) return;
+  const dx = e.clientX - ext.drag.x, dy = e.clientY - ext.drag.y; ext.drag.x = e.clientX; ext.drag.y = e.clientY;
+  if (ext.mode === 2) ext.mode = 1;                   // grabbing the camera leaves the chase view
+  ext.yaw -= dx*0.006; ext.pitch = clamp(ext.pitch + dy*0.005, -1.45, 1.45);
+});
+window.addEventListener('pointerup', () => { ext.drag = null; });
+canvas.addEventListener('wheel', e => {
+  if (!ext.on || hangarOpen) return;
+  e.preventDefault(); e.stopImmediatePropagation();
+  ext.dist = clamp(ext.dist*Math.exp(e.deltaY*0.001), 0.45*HULL.length, 40*HULL.length);
+}, { passive: false, capture: true });
+
 /* ================= MAIN LOOP ================= */
 function step(dt) {
   const c = controlState();
@@ -12255,7 +12641,7 @@ function frame(now) {
   requestAnimationFrame(frame);
   const dt = Math.min((now - lastFrame)/1000, 0.1);
   lastFrame = now;
-  if (cutscene.active || hangarOpen) dasHide();
+  if (cutscene.active || hangarOpen) { dasHide(); extHide(); }
   if (cutscene.active) { renderBossCutscene(dt); return; }
   if (hangarOpen) { renderHangar(dt); return; }
   if (started && !paused && !menuOpen && !dead && !uiOverlay && !(mission && mission.ended)) step(dt);
@@ -12264,8 +12650,12 @@ function frame(now) {
   if (uiAcc > 0.066) { uiAcc = 0; updateDisplays(); }
   updateBook(dt);
   audioFrame();
-  renderer.render(scene, camera);
-  if (das.on && hasDas() && started && !uiOverlay && !dead) dasRender(); else dasHide();
+  if (ext.on && started && !uiOverlay) { dasHide(); extRender(dt); }
+  else {
+    extHide();
+    renderer.render(scene, camera);
+    if (das.on && hasDas() && started && !uiOverlay && !dead) dasRender(); else dasHide();
+  }
 }
 updateDisplays();
 buildTable();
